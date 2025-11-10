@@ -3,6 +3,7 @@ from shapely.geometry import LineString, Point
 from shapely.ops import linemerge
 import numpy as np
 import argparse
+from path_index import PathIndex
 
 # PARAMETERS
 d_tol = 20.0      # max distance for merging endpoints
@@ -20,128 +21,217 @@ def simplify_segments(segments):
         simplified.append(list(ls.simplify(simplify_tol, preserve_topology=False).coords))
     return simplified
 
-def merge_collinear(segments, merge_dist_tol=1.0, angle_tol=10.0):
+def are_segments_collinear(seg1_end: tuple, seg1_dir: tuple, seg2_start: tuple, seg2_dir: tuple, angle_tol: float) -> bool:
+    """Check if two segments are collinear at their potential merge point
+    
+    Args:
+        seg1_end: Last two points of first segment if connecting at its end, or first two points if at start
+        seg1_dir: Direction vector of first segment at connection point
+        seg2_start: First two points of second segment if connecting at its start, or last two points if at end
+        seg2_dir: Direction vector of second segment at connection point
+        angle_tol: Maximum angle difference in degrees to consider collinear
+        
+    Returns:
+        bool: True if segments are collinear within tolerance
+    """
+    # Compute angle between direction vectors
+    dot = np.dot(seg1_dir, seg2_dir)
+    angle = np.degrees(np.arccos(np.clip(abs(dot), -1.0, 1.0)))
+    
+    # Check if vectors are aligned (parallel or anti-parallel)
+    return angle < angle_tol or abs(180 - angle) < angle_tol
+
+def merge_paths(path1: list, path2: list, reverse1: bool, reverse2: bool) -> list:
+    """Merge two paths with given orientations
+    
+    Args:
+        path1: First path to merge
+        path2: Second path to merge
+        reverse1: Whether to reverse first path
+        reverse2: Whether to reverse second path
+        
+    Returns:
+        list: Merged path
+    """
+    result = []
+    if reverse1:
+        result.extend(reversed(path1))
+    else:
+        result.extend(path1)
+        
+    if reverse2:
+        result.extend(reversed(path2[1:]))  # Skip first point to avoid duplication
+    else:
+        result.extend(path2[1:])  # Skip first point to avoid duplication
+    
+    return result
+
+def handle_self_closing_paths(segments: list, merge_dist_tol: float) -> list:
+    """Process paths that should close on themselves.
+    A path should self-close if its endpoints are within merge_dist_tol.
+    
+    Args:
+        segments: List of paths to process
+        merge_dist_tol: Maximum distance for considering endpoints connected
+        
+    Returns:
+        List of processed paths, with self-closing paths properly closed
+    """
+    result = []
+    
+    for path in segments:
+        if len(path) < 3:  # Need at least 3 points for a closed path
+            result.append(path)
+            continue
+            
+        # Check if start and end points are close enough
+        start = np.array(path[0])
+        end = np.array(path[-1])
+        
+        if np.allclose(start, end):  # Already closed
+            result.append(path)
+            continue
+            
+        dist = np.linalg.norm(end - start)
+        if dist <= merge_dist_tol:
+            # Check if start and end segments are collinear
+            start_dir = np.array(path[1]) - start
+            end_dir = end - np.array(path[-2])
+            start_dir = start_dir / np.linalg.norm(start_dir)
+            end_dir = end_dir / np.linalg.norm(end_dir)
+            
+            if are_segments_collinear(path[:2], start_dir, path[-2:], -end_dir, a_tol):
+                # Close the path by adding a copy of the start point
+                closed_path = path + [tuple(start)]
+                result.append(closed_path)
+            else:
+                result.append(path)
+        else:
+            result.append(path)
+            
+    return result
+
+def merge_collinear(segments: list, merge_dist_tol: float = 1.0, angle_tol: float = 10.0) -> list:
     """Merge collinear segments that have endpoints within merge_dist_tol distance.
-    Only merges open paths at their endpoints.
     
     Args:
         segments: List of line segments, each a list of points
         merge_dist_tol: Maximum distance between endpoints to consider merging
         angle_tol: Maximum angle difference in degrees to consider segments collinear
+        
+    Returns:
+        list: List of merged path segments
     """
     if not segments:
         return []
-
-    # Helper to get endpoints info for a segment
-    def get_endpoint_info(seg):
-        """Return list of endpoint info tuples for a segment if it's open"""
-        if len(seg) > 1 and seg[0] != seg[-1]:
-            return [
-                (seg[0][0], seg[0][1], True, seg[0], seg[1]),  # start point info
-                (seg[-1][0], seg[-1][1], False, seg[-1], seg[-2])  # end point info
-            ]
-        return []
-
-    # Keep merging until no more merges are possible
-    while True:
-        # Create a fresh copy and track used segments
-        merged = segments.copy()
-        used = set()
-        merged_any = False
-
-        # Get endpoints for all open paths
-        endpoints = []
-        for i, seg in enumerate(segments):
-            for x, y, is_start, pt, next_pt in get_endpoint_info(seg):
-                endpoints.append((x, y, is_start, i, pt, next_pt))
-
-        # Sort by x coordinate for faster nearby point finding
-        endpoints.sort()
-
-        # Try to merge segments
-        for i, (x1, y1, is_start1, seg_idx1, pt1, next_pt1) in enumerate(endpoints):
-            if seg_idx1 in used:
-                continue
-
-            # Look at nearby endpoints
-            j = i + 1
-            # TODO: need binary search or similar on sorted x for efficiency
-            while j < len(endpoints):
-                x2, y2, is_start2, seg_idx2, pt2, next_pt2 = endpoints[j]
-
-                # Break if beyond possible merge distance in x
-                if x2 - x1 > merge_dist_tol:
-                    break
-
-                # TODO: won't this skip self-closing merges?
-                # Skip if same segment or either segment already used
-                if seg_idx1 == seg_idx2 or seg_idx2 in used:
-                    j += 1
-                    continue
-
-                # Check if points are close enough
-                dist = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-                if dist < merge_dist_tol:
-                    seg1, seg2 = merged[seg_idx1], merged[seg_idx2]
-
-                    # Calculate angles for each segment
-                    ang1 = line_angle(pt1, next_pt1)
-                    ang2 = line_angle(pt2, next_pt2)
-
-                    # Normalize angle difference to -180 to 180 range
-                    ang_diff = (ang1 - ang2 + 180) % 360 - 180
-
-                    # Check if segments are collinear (within tolerance)
-                    if abs(ang_diff) < angle_tol or abs(abs(ang_diff) - 180) < angle_tol:
-                        # Create merged segment with correct orientation
-                        merged_coords = []
-                        
-                        # Determine orientations based on angle difference
-                        # If angles are nearly opposite (diff close to 180), we need to reverse one segment
-                        reverse1 = is_start1
-                        reverse2 = is_start2 if abs(ang_diff) < angle_tol else not is_start2
-
-                        # Build merged path
-                        if reverse1:
-                            merged_coords.extend(list(reversed(seg1)))
-                        else:
-                            merged_coords.extend(seg1)
-                            
-                        if reverse2:
-                            merged_coords.extend(list(reversed(seg2))[1:])  # Skip first point to avoid duplication
-                        else:
-                            merged_coords.extend(seg2[1:])  # Skip first point to avoid duplication
-
-                        merged[seg_idx1] = merged_coords
-                        used.add(seg_idx2)
-                        merged_any = True
-                        break  # Move to next i since we found a merge
-
-                j += 1
-
-        # Get list of segments that haven't been used in merges
-        result = [seg for i, seg in enumerate(merged) if i not in used]
         
-        # If we didn't merge anything this round, we're done
-        if not merged_any:
+    # First try to close any paths that should be self-closing
+    segments = handle_self_closing_paths(segments, merge_dist_tol)
+    
+    # Create spatial index for remaining open paths
+    path_index = PathIndex(segments)
+    result = segments.copy()
+    
+    while True:
+        original_count = len(result)
+        merged_segments = []
+        used = set()
+        
+        # Try to merge each path
+        for i, path in enumerate(result):
+            if i in used or len(path) < 2:
+                continue
+                
+            # Skip if path is closed
+            if len(path) >= 3 and np.allclose(path[0], path[-1]):
+                merged_segments.append(path)
+                used.add(i)
+                continue
+                
+            # Try to merge at path start
+            start_point = path[0]
+            start_dir = np.array(path[1]) - np.array(path[0])
+            start_dir = start_dir / np.linalg.norm(start_dir)
+            
+            matches = path_index.find_endpoints_in_radius(start_point, merge_dist_tol)
+            for match in matches:
+                if match.path_index == i or match.path_index in used:
+                    continue
+                    
+                other_path = result[match.path_index]
+                # Skip closed paths
+                if len(other_path) >= 3 and np.allclose(other_path[0], other_path[-1]):
+                    continue
+                    
+                if match.is_start:
+                    other_dir = np.array(other_path[1]) - np.array(other_path[0])
+                else:
+                    other_dir = np.array(other_path[-1]) - np.array(other_path[-2])
+                other_dir = other_dir / np.linalg.norm(other_dir)
+                
+                if are_segments_collinear(path[0:2], start_dir, 
+                                        other_path[0:2] if match.is_start else other_path[-2:],
+                                        other_dir, angle_tol):
+                    merged = merge_paths(other_path, path, 
+                                      not match.is_start,  # Reverse other path if connecting to its end
+                                      False)  # Don't reverse current path
+                    merged_segments.append(merged)
+                    used.add(i)
+                    used.add(match.path_index)
+                    path_index.remove_path(i)
+                    path_index.remove_path(match.path_index)
+                    break
+            
+            if i in used:
+                continue
+                
+            # Try to merge at path end
+            end_point = path[-1]
+            end_dir = np.array(path[-1]) - np.array(path[-2])
+            end_dir = end_dir / np.linalg.norm(end_dir)
+            
+            matches = path_index.find_endpoints_in_radius(end_point, merge_dist_tol)
+            for match in matches:
+                if match.path_index == i or match.path_index in used:
+                    continue
+                    
+                other_path = result[match.path_index]
+                # Skip closed paths
+                if len(other_path) >= 3 and np.allclose(other_path[0], other_path[-1]):
+                    continue
+                    
+                if match.is_start:
+                    other_dir = np.array(other_path[1]) - np.array(other_path[0])
+                else:
+                    other_dir = np.array(other_path[-1]) - np.array(other_path[-2])
+                other_dir = other_dir / np.linalg.norm(other_dir)
+                
+                if are_segments_collinear(path[-2:], end_dir,
+                                        other_path[0:2] if match.is_start else other_path[-2:],
+                                        other_dir, angle_tol):
+                    merged = merge_paths(path, other_path,
+                                      False,  # Don't reverse current path
+                                      match.is_start)  # Reverse other path if connecting to its end
+                    merged_segments.append(merged)
+                    used.add(i)
+                    used.add(match.path_index)
+                    path_index.remove_path(i)
+                    path_index.remove_path(match.path_index)
+                    break
+            
+            # If path wasn't merged, keep it
+            if i not in used:
+                merged_segments.append(path)
+        
+        # If no merges happened, we're done
+        if len(merged_segments) >= original_count:
             break
             
-        # Otherwise, try another round with the merged segments
-        segments = result
-
-    return segments
-
-def snap_endpoints(segments):
-    all_pts = [p for seg in segments for p in [seg[0], seg[-1]]]
-    for i, seg in enumerate(segments):
-        for end_idx in [0, -1]:
-            p = np.array(seg[end_idx])
-            # find nearest endpoint in others
-            for q in all_pts:
-                if np.linalg.norm(p - q) < d_tol:
-                    seg[end_idx] = tuple(q)
-                    break
-    return segments
+        # Update for next iteration
+        result = merged_segments
+        path_index = PathIndex(result)  # Rebuild index with new paths
+    
+    return result
 
 def svg_lines_to_segments(paths):
     segments = []
@@ -178,7 +268,6 @@ def main(input_svg, output_svg):
     paths, attrs = svg2paths(input_svg)
     segments = svg_lines_to_segments(paths)
     segments = simplify_segments(segments)
-    #segments = snap_endpoints(segments)
     segments = merge_collinear(segments, merge_dist_tol=d_tol, angle_tol=a_tol)
 
     # Build SVG output - convert segments back to path objects
