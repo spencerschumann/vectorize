@@ -1,124 +1,120 @@
 import numpy as np
 from dataclasses import dataclass
 from typing import List, Tuple, Set
+from sortedcontainers import SortedList
+
 
 @dataclass
 class EndpointMatch:
-    """Represents a matching endpoint from another path"""
-    path_index: int  # Index of the path in the original list
-    is_start: bool   # Whether this is the start point of the path
-    point: Tuple[float, float]  # The actual endpoint coordinates
-    distance: float  # Distance to the query point
-    
+    path_index: int
+    is_start: bool
+    point: Tuple[float, float]
+    distance: float
+
+
 @dataclass
 class IndexEntry:
-    """Entry in the spatial index"""
-    x: float  # x coordinate for sorting
-    y: float  # y coordinate
-    path_index: int  # Index of the path this point belongs to
-    is_start: bool  # Whether this is the start point of the path
+    x: float
+    y: float
+    path_index: int
+    is_start: bool
+
 
 class PathIndex:
-    """Maintains a sorted index of path endpoints for efficient proximity queries"""
-    
+    """Spatial index for path endpoints using dual SortedLists (x and y)."""
+
     def __init__(self, paths: List[List[Tuple[float, float]]]):
-        """Initialize index from a list of paths
-        
-        Args:
-            paths: List of paths, each path being a list of (x,y) points
-        """
         self.paths = paths
-        self.entries: List[IndexEntry] = []
-        self.excluded: Set[int] = set()  # Paths to exclude from queries
-        
-        # Build initial index
+        self.excluded: Set[int] = set()
+
+        # Each SortedList stores (coordinate, IndexEntry)
+        self.entries_x = SortedList(key=lambda e: e.x)
+        self.entries_y = SortedList(key=lambda e: e.y)
+
         self._build_index()
-        
+
     def _is_closed_path(self, path: List[Tuple[float, float]], tol=1e-6) -> bool:
-        """Check if a path is closed (first point = last point)"""
-        if len(path) < 3:
-            return False
-        return np.allclose(path[0], path[-1], rtol=tol)
-    
+        return len(path) >= 3 and np.allclose(path[0], path[-1], rtol=tol)
+
     def _build_index(self):
-        """Build the sorted endpoint index"""
-        self.entries = []
-        
+        self.entries_x.clear()
+        self.entries_y.clear()
+        self.excluded.clear()
+
         for i, path in enumerate(self.paths):
             if self._is_closed_path(path):
                 self.excluded.add(i)
                 continue
-                
             if len(path) >= 2:
-                # Add start point
-                self.entries.append(IndexEntry(
-                    x=path[0][0],
-                    y=path[0][1],
-                    path_index=i,
-                    is_start=True
-                ))
-                # Add end point
-                self.entries.append(IndexEntry(
-                    x=path[-1][0],
-                    y=path[-1][1],
-                    path_index=i,
-                    is_start=False
-                ))
+                for pt, is_start in [(path[0], True), (path[-1], False)]:
+                    entry = IndexEntry(x=pt[0], y=pt[1], path_index=i, is_start=is_start)
+                    self.entries_x.add(entry)
+                    self.entries_y.add(entry)
+
+    # ------------------ Query ------------------
+
+    def find_endpoints_in_radius(
+        self, point: Tuple[float, float], radius: float
+    ) -> List[EndpointMatch]:
+        """Find nearby endpoints within radius, using the axis with the smallest range."""
+        x0, y0 = point
+        r = radius
+
+        # Candidate sets for each axis
+        [left_x, right_x] = self._range_query(self.entries_x, x0 - r, x0 + r, axis="x")
+        [left_y, right_y] = self._range_query(self.entries_y, y0 - r, y0 + r, axis="y")
         
-        # Sort by x coordinate
-        self.entries.sort(key=lambda e: e.x)
-    
-    def find_endpoints_in_radius(self, point: Tuple[float, float], radius: float) -> List[EndpointMatch]:
-        """Find all endpoints (start or end) within radius of point using x-coordinate binary search
-        
-        Args:
-            point: (x,y) point to search near
-            radius: Search radius
-            
-        Returns:
-            List of EndpointMatch objects for points within radius, sorted by distance
-        """
+        # Pick smaller set to refine
+        if (right_x - left_x) < (right_y - left_y):
+            candidates = self.entries_x[left_x:right_x]
+        else:
+            candidates = self.entries_y[left_y:right_y]
+
         results = []
-        x = point[0]
-        point_array = np.array(point)
-        radius_squared = radius * radius
-        
-        # Binary search for leftmost point in range
-        left = 0
-        right = len(self.entries) - 1
-        while left <= right:
-            mid = (left + right) // 2
-            if self.entries[mid].x < x - radius:
-                left = mid + 1
-            else:
-                right = mid - 1
-                
-        # Scan through x-coordinate window and check actual distances
-        i = left
-        while i < len(self.entries) and self.entries[i].x <= x + radius:
-            entry = self.entries[i]
-            if entry.path_index not in self.excluded:
-                # Check actual 2D distance
-                entry_point = np.array((entry.x, entry.y))
-                dist_squared = np.sum((point_array - entry_point) ** 2)
-                
-                if dist_squared <= radius_squared:
-                    results.append(EndpointMatch(
+        r2 = r * r
+        for entry in candidates:
+            if entry.path_index in self.excluded:
+                continue
+            dx = entry.x - x0
+            dy = entry.y - y0
+            d2 = dx * dx + dy * dy
+            if d2 <= r2:
+                results.append(
+                    EndpointMatch(
                         path_index=entry.path_index,
                         is_start=entry.is_start,
                         point=(entry.x, entry.y),
-                        distance=np.sqrt(dist_squared)
-                    ))
-            i += 1
-        
-        # Sort by distance
+                        distance=np.sqrt(d2),
+                    )
+                )
         results.sort(key=lambda m: m.distance)
         return results
-    
+
+    def _range_query(self, sorted_list: SortedList, lo: float, hi: float, axis: str):
+        """Return entries within coordinate range [lo, hi] on given axis."""
+        # Find index range in SortedList
+        other_axis = "y" if axis == "x" else "x"
+        left = sorted_list.bisect_left(IndexEntry(**{axis: lo, other_axis: 0, "path_index": 0, "is_start": False}))
+        right = sorted_list.bisect_right(IndexEntry(**{axis: hi, other_axis: 0, "path_index": 0, "is_start": False}))
+        return [left, right]
+
+    # ------------------ Dynamic updates ------------------
+
+    def insert_path(self, path: List[Tuple[float, float]], path_index: int):
+        """Insert endpoints for a new or updated path."""
+        if self._is_closed_path(path):
+            self.excluded.add(path_index)
+            return
+
+        for pt, is_start in [(path[0], True), (path[-1], False)]:
+            entry = IndexEntry(x=pt[0], y=pt[1], path_index=path_index, is_start=is_start)
+            self.entries_x.add(entry)
+            self.entries_y.add(entry)
+
     def remove_path(self, path_index: int):
-        """Remove a path from the index
-        
-        Args:
-            path_index: Index of the path to remove
-        """
+        """Remove all entries for a given path."""
         self.excluded.add(path_index)
+        # Lazy removal: they’ll be ignored in queries.
+        # If memory pressure matters, you can physically remove them:
+        # self.entries_x = SortedList([e for e in self.entries_x if e.path_index != path_index], key=lambda e: e.x)
+        # self.entries_y = SortedList([e for e in self.entries_y if e.path_index != path_index], key=lambda e: e.y)
