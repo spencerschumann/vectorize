@@ -53,33 +53,18 @@ def merge_paths(path1: list, path2: list, reverse1: bool, reverse2: bool) -> lis
     Returns:
         list: Merged path with no duplicated points at junction
     """
-    # Convert to numpy arrays
-    p1_np = np.array(list(reversed(path1)) if reverse1 else path1)
-    p2_np = np.array(list(reversed(path2)) if reverse2 else path2)
-    
-    # Handle the merge point
-    if np.allclose(p1_np[-1], p2_np[0]):
-        # Use the first path's end point coordinates
-        # This ensures consistent coordinates when we have nearly equal points
-        merged = np.vstack((p1_np[:-1], p1_np[-1:], p2_np[1:]))  
+    # Reverse paths if needed
+    p1 = list(reversed(path1)) if reverse1 else list(path1)
+    p2 = list(reversed(path2)) if reverse2 else list(path2)
+
+    # Avoid duplicate at merge point
+    if np.allclose(p1[-1], p2[0]):
+        merged = p1 + p2[1:]
     else:
-        merged = np.vstack((p1_np, p2_np))
-        
-    # Remove any intermediate points that are nearly identical
-    # to ensure we get a clean path with no duplicates
-    unique = []
-    for i, point in enumerate(merged):
-        add_point = True
-        if i > 0:
-            # Skip point if it's too close to the previous point
-            if np.allclose(point, merged[i-1]):
-                add_point = False
-                
-        if add_point:
-            # Convert to float tuple to ensure consistent format
-            unique.append(tuple(float(x) for x in point))
-            
-    return unique
+        merged = p1 + p2
+
+    # Return merged path (no need for extra duplicate filtering)
+    return merged
 
 def should_close_path(path: list, merge_dist_tol: float, angle_tol: float = 10.0) -> bool:
     """Determine if a path should be closed based on endpoint proximity and collinearity
@@ -166,31 +151,42 @@ def merge_collinear(segments: list, merge_dist_tol: float = 1.0, angle_tol: floa
     merged_paths = []
     if not segments:
         return merged_paths
-    # First, close any paths that should be self-closing
-    segments = handle_self_closing_paths(segments, merge_dist_tol)
 
-    # Use PathIndex for efficient endpoint lookup
     n = len(segments)
     used = [False] * n
-    merged_paths = []
     path_index = PathIndex(segments)
-
-
-    # Aggressive merging loop
-    merged_paths = []
     active = [i for i in range(n) if len(segments[i]) >= 2]
+
     while active:
+        # Check for self-closing paths in active, move them to merged_paths
+        to_remove = []
+        for idx in active:
+            path = segments[idx]
+            if should_close_path(path, merge_dist_tol, angle_tol):
+                # Close the path by adding a copy of the exact start point
+                closed_path = path + [tuple(path[0])]
+                segments[idx] = closed_path
+                merged_paths.append(closed_path)
+                path_index.remove_path(idx)
+                to_remove.append(idx)
+        # Remove by value, not by position
+        for idx in to_remove:
+            if idx in active:
+                active.remove(idx)
+        if not active:
+            break
+
         merged = False
         i = 0
         while i < len(active):
-            idx = active[i]
+            idx = active[i]  # idx is always the original segment index
             path = segments[idx]
             # Try to merge at end
             end = tuple(path[-1])
             matches = path_index.find_endpoints_in_radius(end, merge_dist_tol)
             merged_this_path = False
             for match in matches:
-                j = match.path_index
+                j = match.path_index  # j is also an original segment index
                 if j == idx or j not in active or len(segments[j]) < 2:
                     continue
                 seg = segments[j]
@@ -210,7 +206,9 @@ def merge_collinear(segments: list, merge_dist_tol: float = 1.0, angle_tol: floa
                         path = merge_paths(path, seg, False, not match.is_start)
                         segments[idx] = path
                         path_index.insert_path(path, idx)
-                        active.remove(j)
+                        # Remove j from active by value, not by position
+                        if j in active:
+                            active.remove(j)
                         merged = True
                         merged_this_path = True
                         break
@@ -240,7 +238,8 @@ def merge_collinear(segments: list, merge_dist_tol: float = 1.0, angle_tol: floa
                         path = merge_paths(seg, path, not match.is_start, False)
                         segments[idx] = path
                         path_index.insert_path(path, idx)
-                        active.remove(j)
+                        if j in active:
+                            active.remove(j)
                         merged = True
                         merged_this_path = True
                         break
@@ -249,12 +248,10 @@ def merge_collinear(segments: list, merge_dist_tol: float = 1.0, angle_tol: floa
             i += 1
         if not merged:
             break
-    # Explicitly close any path whose endpoints are within tolerance
+
+    # Add any remaining open paths
     for idx in active:
-        path = segments[idx]
-        if len(path) > 2 and np.linalg.norm(np.array(path[0]) - np.array(path[-1])) <= merge_dist_tol:
-            path = path + [tuple(path[0])]
-        merged_paths.append(path)
+        merged_paths.append(segments[idx])
     return merged_paths
 
 def svg_lines_to_segments(paths):
