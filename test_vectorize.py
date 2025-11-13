@@ -1,6 +1,6 @@
 import unittest
 import numpy as np
-from vectorize import merge_collinear
+from vectorize import merge_collinear, simplify_segments
 
 class TestVectorize(unittest.TestCase):
     def assert_segments_match(self, actual_segments, expected_segments):
@@ -65,6 +65,17 @@ class TestVectorize(unittest.TestCase):
         merged = merge_collinear(segments, merge_dist_tol=0.1, angle_tol=5.0)
         self.assert_segments_match(merged, segments)
 
+    def test_simplify_closed_path_removes_redundant_endpoint(self):
+        # Path with redundant endpoint
+        path = [(10,0), (20,0), (20,10), (0,10), (0,0), (10,0)]
+        simplified = simplify_segments([path])[0]
+        # Should be closed, minimal, with start = end
+        self.assertEqual(simplified[0], simplified[-1])
+        self.assertEqual(len(simplified), 5)
+        # Should contain all corners
+        for pt in [(0,0), (20,0), (20,10), (0,10)]:
+            self.assertIn(pt, simplified)
+            
     def test_multi_segment_merge(self):
         """Test case 5: Three collinear segments should merge into one"""
         segments = [

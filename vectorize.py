@@ -7,7 +7,7 @@ from path_index import PathIndex
 
 # PARAMETERS
 d_tol = 20.0      # max distance for merging endpoints
-a_tol = 10       # max angle difference (degrees) for merging collinear segments
+a_tol = 15       # max angle difference (degrees) for merging collinear segments
 simplify_tol = 1.01  # Douglas–Peucker tolerance
 
 def line_angle(a, b):
@@ -18,7 +18,19 @@ def simplify_segments(segments):
     simplified = []
     for s in segments:
         ls = LineString(s)
-        simplified.append(list(ls.simplify(simplify_tol, preserve_topology=False).coords))
+        simp = list(ls.simplify(simplify_tol).coords)
+        
+        # if closed, see if the endpoint can be simplified out
+        is_closed = len(simp) >= 4 and np.allclose(simp[0], simp[-1])
+        if is_closed:
+            ls = LineString([simp[-2], simp[0], simp[1]])
+            ls = list(ls.simplify(simplify_tol).coords)
+            if len(ls) == 2:
+                # start/end point was removed by simplification - take it out
+                simp = simp[1:-1]
+                # close the path again
+                simp.append(simp[0])
+        simplified.append(simp)
     return simplified
 
 def are_segments_collinear(seg1_end: tuple, seg1_dir: tuple, seg2_start: tuple, seg2_dir: tuple, angle_tol: float) -> bool:
@@ -117,30 +129,6 @@ def should_close_path(path: list, merge_dist_tol: float, angle_tol: float = 10.0
         
     except (IndexError, ZeroDivisionError):
         return False
-
-def handle_self_closing_paths(segments: list, merge_dist_tol: float) -> list:
-    """Process paths that should close on themselves.
-    A path should self-close if its endpoints are within merge_dist_tol 
-    and the connecting segments are collinear.
-    
-    Args:
-        segments: List of paths to process
-        merge_dist_tol: Maximum distance for considering endpoints connected
-        
-    Returns:
-        List of processed paths, with self-closing paths properly closed
-    """
-    result = []
-    
-    for path in segments:
-        if should_close_path(path, merge_dist_tol):
-            # Close the path by adding a copy of the exact start point
-            closed_path = path + [tuple(p for p in path[0])]
-            result.append(closed_path)
-        else:
-            result.append(path)
-            
-    return result
 
 def merge_collinear(segments: list, merge_dist_tol: float = 1.0, angle_tol: float = 10.0) -> list:
     """Merge collinear segments that have endpoints within merge_dist_tol distance.
@@ -290,6 +278,8 @@ def main(input_svg, output_svg):
     segments = svg_lines_to_segments(paths)
     segments = simplify_segments(segments)
     segments = merge_collinear(segments, merge_dist_tol=d_tol, angle_tol=a_tol)
+    # simplify again after merging
+    segments = simplify_segments(segments)
 
     # Build SVG output - convert segments back to path objects
     out_paths = []
