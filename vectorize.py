@@ -1,4 +1,9 @@
 from svgpathtools import svg2paths, wsvg, parse_path
+try:
+    # svg2paths2 is available in newer svgpathtools; provides root <svg> attributes
+    from svgpathtools import svg2paths2  # type: ignore
+except Exception:  # pragma: no cover
+    svg2paths2 = None
 from shapely.geometry import LineString, Point
 from shapely.ops import linemerge
 import numpy as np
@@ -274,7 +279,16 @@ def svg_lines_to_segments(paths):
     return segments
 
 def main(input_svg, output_svg):
-    paths, attrs = svg2paths(input_svg)
+    # Prefer svg2paths2 if available to also obtain root <svg> attributes
+    root_svg_attrs = {}
+    if svg2paths2 is not None:
+        try:
+            paths, attrs, root_svg_attrs = svg2paths2(input_svg)
+        except Exception:
+            paths, attrs = svg2paths(input_svg)
+            root_svg_attrs = {}
+    else:
+        paths, attrs = svg2paths(input_svg)
     segments = svg_lines_to_segments(paths)
     segments = simplify_segments(segments)
     segments = merge_collinear(segments, merge_dist_tol=d_tol, angle_tol=a_tol)
@@ -282,8 +296,68 @@ def main(input_svg, output_svg):
     segments = simplify_segments(segments)
 
     # Build SVG output - convert segments back to path objects
-    out_paths = []
+    # Scale all coordinates from source units (200 dpi) to millimeters
+    dpi = 200.0
+    mm_per_inch = 25.4
+    scale = mm_per_inch / dpi
+
+    scaled_segments = []
     for seg in segments:
+        scaled = [(p[0] * scale, p[1] * scale) for p in seg]
+        scaled_segments.append(scaled)
+
+    # Prefer using the source SVG's viewBox/width/height from svg2paths2, scaled to mm.
+    viewbox_tuple = None
+    width_mm = None
+    height_mm = None
+
+    def parse_len_to_mm(val: str):
+        if val is None:
+            return None
+        s = str(val).strip()
+        try:
+            if s.endswith('mm'):
+                return float(s[:-2])
+            if s.endswith('cm'):
+                return float(s[:-2]) * 10.0
+            if s.endswith('in'):
+                return float(s[:-2]) * mm_per_inch
+            if s.endswith('pt'):
+                return float(s[:-2]) * (mm_per_inch / 72.0)
+            if s.endswith('px'):
+                return float(s[:-2]) * scale
+            # unitless -> assume px
+            return float(s) * scale
+        except Exception:
+            return None
+
+    vb_attr = None
+    if isinstance(root_svg_attrs, dict):
+        vb_attr = root_svg_attrs.get('viewBox') or root_svg_attrs.get('viewbox')
+        w_attr = root_svg_attrs.get('width')
+        h_attr = root_svg_attrs.get('height')
+        w_from_attr = parse_len_to_mm(w_attr) if w_attr is not None else None
+        h_from_attr = parse_len_to_mm(h_attr) if h_attr is not None else None
+        if w_from_attr is not None:
+            width_mm = w_from_attr
+        if h_from_attr is not None:
+            height_mm = h_from_attr
+
+        if vb_attr:
+            parts = vb_attr.replace(',', ' ').split()
+            if len(parts) == 4:
+                try:
+                    min_x_px, min_y_px, w_px, h_px = [float(p) for p in parts]
+                    min_x = min_x_px * scale
+                    min_y = min_y_px * scale
+                    vw_mm = max(1e-3, w_px * scale)
+                    vh_mm = max(1e-3, h_px * scale)
+                    viewbox_tuple = (min_x, min_y, vw_mm, vh_mm)
+                except Exception:
+                    viewbox_tuple = None
+
+    out_paths = []
+    for seg in scaled_segments:
         if len(seg) < 2:
             continue  # Skip segments with less than 2 points
             
@@ -303,9 +377,31 @@ def main(input_svg, output_svg):
     # If no valid paths were created, create a minimal SVG
     if not out_paths:
         print("Warning: No valid paths found. Creating empty SVG.")
-        wsvg([], filename=output_svg)
+        w = width_mm if width_mm is not None else 1.0
+        h = height_mm if height_mm is not None else 1.0
+        svg_attrs = {
+            'width': f"{w}mm",
+            'height': f"{h}mm",
+        }
+        # Only include viewBox if the source had one
+        if viewbox_tuple is not None:
+            svg_attrs['viewBox'] = f"{viewbox_tuple[0]} {viewbox_tuple[1]} {viewbox_tuple[2]} {viewbox_tuple[3]}"
+            wsvg([], filename=output_svg, svg_attributes=svg_attrs, viewbox=viewbox_tuple)
+        else:
+            wsvg([], filename=output_svg, svg_attributes=svg_attrs)
     else:
-        wsvg(out_paths, filename=output_svg)
+        w = width_mm if width_mm is not None else 1.0
+        h = height_mm if height_mm is not None else 1.0
+        svg_attrs = {
+            'width': f"{w}mm",
+            'height': f"{h}mm",
+        }
+        # Only include viewBox if the source had one
+        if viewbox_tuple is not None:
+            svg_attrs['viewBox'] = f"{viewbox_tuple[0]} {viewbox_tuple[1]} {viewbox_tuple[2]} {viewbox_tuple[3]}"
+            wsvg(out_paths, filename=output_svg, svg_attributes=svg_attrs, viewbox=viewbox_tuple)
+        else:
+            wsvg(out_paths, filename=output_svg, svg_attributes=svg_attrs)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Clean SVG lines into simplified paths.")
