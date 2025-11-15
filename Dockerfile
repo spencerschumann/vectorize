@@ -10,8 +10,9 @@ RUN dnf -y update && \
    ca-certificates \
    dejavu-sans-fonts \
    pipx \
-   inkscape \
-   && dnf clean all
+   pip \
+   && dnf clean all && \
+   pip install --no-cache-dir svgpathtools shapely sortedcontainers
 
 # Non-root user
 #RUN groupadd -r app && useradd -r -m -g app app
