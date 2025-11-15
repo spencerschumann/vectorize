@@ -134,6 +134,46 @@ class TestCleanup(unittest.TestCase):
         for p in expected_points:
             self.assertIn(p, actual_points, f"Missing expected point {p}")
 
+    def test_parallel_dashed_lines(self):
+        """Test case 11: Parallel dashed lines should not merge across the gap
+        
+        This test simulates parallel dashed lines where the distance between 
+        the lines is similar to the gap between dashes. The segments should 
+        follow the dashes, not jump to the parallel line.
+        """
+        # Two parallel horizontal dashed lines, 20 units apart
+        # Line 1 at y=0: dashes from 0-30, 50-80, 100-130
+        # Line 2 at y=20: dashes from 0-30, 50-80, 100-130
+        # Gap between dashes is 20 units, same as distance between lines
+        segments = [
+            [(0, 0), (30, 0)],      # Line 1, dash 1
+            [(50, 0), (80, 0)],     # Line 1, dash 2
+            [(100, 0), (130, 0)],   # Line 1, dash 3
+            [(0, 19), (30, 19)],    # Line 2, dash 1
+            [(50, 19), (80, 19)],   # Line 2, dash 2
+            [(100, 19), (130, 19)], # Line 2, dash 3
+        ]
+        
+        # With merge_dist_tol=25, endpoints can reach across gaps
+        # But they should NOT merge with the parallel line (offset by 20 units)
+        merged = merge_collinear(segments, merge_dist_tol=25, angle_tol=5.0)
+        
+        # Should get 2 merged paths (one for each line), not cross-contamination
+        self.assertEqual(len(merged), 2, 
+                        f"Expected 2 merged paths (one per line), got {len(merged)}")
+        
+        # Check that each merged path is continuous along one y-coordinate
+        for path in merged:
+            y_coords = [pt[1] for pt in path]
+            # All points in a path should have the same y-coordinate (within tolerance)
+            self.assertTrue(all(abs(y - y_coords[0]) < 1.0 for y in y_coords),
+                           f"Path crosses between parallel lines: {path}")
+            
+            # Each path should span the full x-range (0 to 130)
+            x_coords = [pt[0] for pt in path]
+            self.assertAlmostEqual(min(x_coords), 0, delta=1.0)
+            self.assertAlmostEqual(max(x_coords), 130, delta=1.0)
+
     def test_large_dataset_performance(self):
         """Test case 10: Large dataset performance"""
         # Test case 10: Large dataset performance

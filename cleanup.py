@@ -53,7 +53,43 @@ def are_segments_collinear(seg1_end: tuple, seg1_dir: tuple, seg2_start: tuple, 
     # Check if vectors are aligned (parallel or anti-parallel)
     return angle < angle_tol or abs(180 - angle) < angle_tol
 
+def point_to_line_distance(point: np.ndarray, line_point: np.ndarray, line_dir: np.ndarray) -> float:
+    """Calculate perpendicular distance from a point to a line
+    
+    Args:
+        point: The point to measure from
+        line_point: A point on the line
+        line_dir: Direction vector of the line (should be normalized)
+        
+    Returns:
+        float: Perpendicular distance from point to line
+    """
+    # Vector from line_point to point
+    v = point - line_point
+    # Project v onto line_dir to get the parallel component
+    parallel_component = np.dot(v, line_dir) * line_dir
+    # Perpendicular component is the remainder
+    perpendicular = v - parallel_component
+    return np.linalg.norm(perpendicular)
+
+def are_segments_offset(seg1_point: np.ndarray, seg1_dir: np.ndarray, 
+                       seg2_point: np.ndarray, offset_tol: float) -> bool:
+    """Check if two parallel segments are offset (not on the same line)
+    
+    Args:
+        seg1_point: A point on the first segment
+        seg1_dir: Direction vector of first segment (normalized)
+        seg2_point: A point on the second segment
+        offset_tol: Maximum perpendicular distance to consider segments on same line
+        
+    Returns:
+        bool: True if segments are offset beyond tolerance
+    """
+    perp_dist = point_to_line_distance(seg2_point, seg1_point, seg1_dir)
+    return perp_dist > offset_tol
+
 def merge_paths(path1: list, path2: list, reverse1: bool, reverse2: bool) -> list:
+
     """Merge two paths with given orientations, handling duplicates at merge point
     
     Args:
@@ -189,6 +225,14 @@ def merge_collinear(segments: list, merge_dist_tol: float = 1.0, angle_tol: floa
                     if are_segments_collinear(path[-2:], dir1,
                                             seg[0:2] if match.is_start else seg[-2:],
                                             dir2, angle_tol):
+                        # Check if segments are offset (parallel but not on same line)
+                        # Use a tolerance based on merge_dist_tol
+                        offset_tol = merge_dist_tol * 0.5  # Half the merge distance
+                        seg_point = np.array(seg[0] if match.is_start else seg[-1])
+                        path_point = np.array(path[-1])
+                        if are_segments_offset(path_point, dir1, seg_point, offset_tol):
+                            continue  # Skip this merge - segments are parallel but offset
+                        
                         path_index.remove_path(idx)
                         path_index.remove_path(j)
                         path = merge_paths(path, seg, False, not match.is_start)
@@ -221,6 +265,14 @@ def merge_collinear(segments: list, merge_dist_tol: float = 1.0, angle_tol: floa
                     if are_segments_collinear(path[0:2], dir1,
                                             seg[0:2] if match.is_start else seg[-2:],
                                             dir2, angle_tol):
+                        # Check if segments are offset (parallel but not on same line)
+                        # Use a tolerance based on merge_dist_tol
+                        offset_tol = merge_dist_tol * 0.5  # Half the merge distance
+                        seg_point = np.array(seg[0] if match.is_start else seg[-1])
+                        path_point = np.array(path[0])
+                        if are_segments_offset(path_point, dir1, seg_point, offset_tol):
+                            continue  # Skip this merge - segments are parallel but offset
+                        
                         path_index.remove_path(idx)
                         path_index.remove_path(j)
                         path = merge_paths(seg, path, not match.is_start, False)
