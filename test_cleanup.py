@@ -1,8 +1,8 @@
 import unittest
 import numpy as np
-from vectorize import merge_collinear, simplify_segments
+from cleanup import merge_collinear, simplify_segments
 
-class TestVectorize(unittest.TestCase):
+class TestCleanup(unittest.TestCase):
     def assert_segments_match(self, actual_segments, expected_segments):
         """Helper to compare sets of segments, accounting for reversed segments and order"""
         self.assertEqual(len(actual_segments), len(expected_segments), 

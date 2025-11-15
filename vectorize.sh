@@ -15,10 +15,10 @@ extract_color() {
 
     echo "Extracting $color lines..."
     magick -monitor out/page.png \
-        -fuzz 10% -fill white -opaque "#000000" \
-        -fuzz 20% -fill black -opaque "#$rgb" \
+        -fill white -opaque "#000000" \
+        -fill black -opaque "#$rgb" \
         -colorspace Gray \
-        -threshold 10% \
+        -threshold 5% \
         out/page_$color.png
 }
 
@@ -41,8 +41,7 @@ trace_lines() {
         --output-file out/page_${color}_raw.svg \
         out/page_${color}.png
 
-    python vectorize.py \
-        --source-dpi 200.0 \
+    python cleanup.py \
         --stroke-color "$stroke_color" \
         --stroke-width 1 \
         out/page_${color}_raw.svg \
@@ -61,11 +60,11 @@ docker run --rm -i -v "$(pwd -W)":/data vectorize-magick-autotrace bash -l <<EOF
 
     echo "Generating palette..."
     magick \
-        xc:#000000 \
-        xc:#ff0000 \
-        xc:#00cc00 \
-        xc:#0000ff \
         xc:#ffffff \
+        xc:#000000 \
+        xc:#aa0000 \
+        xc:#00ff00 \
+        xc:#0000ff \
         xc:#ff00ff \
         xc:#00ffff \
         xc:#ffaa00 \
@@ -89,20 +88,29 @@ docker run --rm -i -v "$(pwd -W)":/data vectorize-magick-autotrace bash -l <<EOF
         -threshold 5% \
         out/page_black.png &
 
-    extract_color red ff0000 &
-    extract_color green 00cc00 &
+    extract_color red aa0000 &
+    extract_color green 00ff00 &
     extract_color blue 0000ff &
     extract_color magenta ff00ff &
 
     wait
 
     trace_lines black &
-    trace_lines red &
-    trace_lines green &
+    trace_lines red '#ff0000' &
+    trace_lines green '#00dd00' &
     trace_lines blue &
     trace_lines magenta &
 
     wait
+
+    python composite.py \
+        --scale-to-mm \
+        out/page_black.svg \
+        out/page_red.svg \
+        out/page_green.svg \
+        out/page_blue.svg \
+        out/page_magenta.svg \
+        -o out/vectorized.svg
 EOF
 
 echo "Processing complete."
