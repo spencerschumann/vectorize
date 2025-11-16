@@ -9,6 +9,7 @@ from path_index import PathIndex
 d_tol = 50.0      # max distance for merging endpoints
 a_tol = 15       # max angle difference (degrees) for merging collinear segments
 simplify_tol = 1.01  # Douglas–Peucker tolerance
+speckle_merge_tol = 2.0  # max perpendicular distance for merging speckles to lines
 
 def line_angle(a, b):
     v = np.array(b) - np.array(a)
@@ -278,48 +279,74 @@ def try_merge_at_endpoint(path: list, idx: int, at_start: bool, segments: list,
         path_is_speckle = is_speckle(path)
         seg_is_speckle = is_speckle(seg)
         
-        # If both are speckles or neither is, do normal angle checking
-        # If one is a speckle, allow merge without angle constraint
-        skip_angle_check = path_is_speckle or seg_is_speckle
+        # If both are speckles, do normal checking
+        # If one is a speckle and the other isn't, skip angle check but still do offset check
+        # If neither is a speckle, do full checking
+        both_speckles = path_is_speckle and seg_is_speckle
+        one_is_speckle = path_is_speckle or seg_is_speckle
+        skip_angle_check = one_is_speckle and not both_speckles
         
+        # Get direction vectors and points for both segments (needed for offset check even when skipping angle check)
+        if at_start:
+            dir1 = np.array(path[1]) - np.array(path[0])
+            path_points = path[0:2]
+            path_point = np.array(path[0])
+        else:
+            dir1 = np.array(path[-1]) - np.array(path[-2])
+            path_points = path[-2:]
+            path_point = np.array(path[-1])
+        
+        if match.is_start:
+            dir2 = np.array(seg[1]) - np.array(seg[0])
+            seg_points = seg[0:2]
+            seg_point = np.array(seg[0])
+        else:
+            dir2 = np.array(seg[-1]) - np.array(seg[-2])
+            seg_points = seg[-2:]
+            seg_point = np.array(seg[-1])
+        
+        # Check if direction vectors are valid
+        if np.linalg.norm(dir1) <= 1e-8 or np.linalg.norm(dir2) <= 1e-8:
+            continue
+            
+        # Normalize direction vectors
+        dir1 = dir1 / np.linalg.norm(dir1)
+        dir2 = dir2 / np.linalg.norm(dir2)
+        
+        # If one segment is a speckle, check that the speckle is close to the line of the longer segment
+        if skip_angle_check:
+            # Use a much tighter tolerance for speckles - we only want to merge speckles
+            # that are very close to the line (filling gaps), not random noise
+            speckle_offset_tol = 2.0  # much tighter than regular offset_tol
+            
+            # Check which is the speckle and which is the regular segment
+            if path_is_speckle and not seg_is_speckle:
+                # path is speckle, check if it's close to seg's line
+                if are_segments_offset(seg_point, dir2, path_point, speckle_offset_tol):
+                    continue  # Speckle is too far from the line
+            elif seg_is_speckle and not path_is_speckle:
+                # seg is speckle, check if it's close to path's line
+                if are_segments_offset(path_point, dir1, seg_point, speckle_offset_tol):
+                    continue  # Speckle is too far from the line
+            # Note: If both are speckles, we still check offset below with tighter tolerance
+        
+        # Check collinearity (only if not skipping angle check)
         if not skip_angle_check:
-            # Get direction vectors for both segments
-            if at_start:
-                dir1 = np.array(path[1]) - np.array(path[0])
-                path_points = path[0:2]
-                path_point = np.array(path[0])
-            else:
-                dir1 = np.array(path[-1]) - np.array(path[-2])
-                path_points = path[-2:]
-                path_point = np.array(path[-1])
-            
-            if match.is_start:
-                dir2 = np.array(seg[1]) - np.array(seg[0])
-                seg_points = seg[0:2]
-                seg_point = np.array(seg[0])
-            else:
-                dir2 = np.array(seg[-1]) - np.array(seg[-2])
-                seg_points = seg[-2:]
-                seg_point = np.array(seg[-1])
-            
-            # Check if direction vectors are valid
-            if np.linalg.norm(dir1) <= 1e-8 or np.linalg.norm(dir2) <= 1e-8:
-                continue
-                
-            # Normalize direction vectors
-            dir1 = dir1 / np.linalg.norm(dir1)
-            dir2 = dir2 / np.linalg.norm(dir2)
-            
-            # Check collinearity
             if not are_segments_collinear(path_points, dir1, seg_points, dir2, angle_tol):
                 continue
-            
-            # Check if segments are offset (parallel but not on same line)
-            offset_tol = merge_dist_tol * 0.5
-            if are_segments_offset(path_point, dir1, seg_point, offset_tol):
-                continue  # Skip this merge - segments are parallel but offset
-            
-            # Check if merging would create a backtracking path
+        
+        # Always check if segments are offset (parallel but not on same line)
+        # Use tighter tolerance for speckles, looser for regular segments
+        if one_is_speckle:
+            offset_tol = 2.0  # tight tolerance for speckles
+        else:
+            offset_tol = merge_dist_tol * 0.5  # regular tolerance for dashed lines
+        
+        if are_segments_offset(path_point, dir1, seg_point, offset_tol):
+            continue  # Skip this merge - segments are parallel but offset
+        
+        # Check if merging would create a backtracking path (only for non-speckles)
+        if not skip_angle_check:
             # The connection vector between endpoints should be aligned with the segment directions
             connection_vec = seg_point - path_point
             connection_dist = np.linalg.norm(connection_vec)

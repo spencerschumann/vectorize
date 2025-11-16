@@ -396,6 +396,55 @@ class TestCleanup(unittest.TestCase):
         self.assertTrue(any(calculate_path_length(seg) > 18 for seg in merged),
                        "Main diagonal line should be preserved")
 
+    def test_speckle_offset_rejection(self):
+        """Test case 17: Speckles that are offset from a line should not merge
+        
+        Speckles should only merge if they're very close to the line (within 2 pixels).
+        This prevents merging random noise while allowing speckles that fill gaps in
+        dashed lines.
+        """
+        from cleanup import is_speckle, calculate_path_length
+        
+        segments = [
+            # Main horizontal line at y=0
+            [(0, 0), (100, 0)],
+            # Speckle at y=5, too far from the line (> 2 pixel tolerance)
+            [(100, 5), (101, 5)],
+            # Speckle very close to the line (y=1), should merge
+            [(100, 1), (101, 1)],
+        ]
+        
+        # Verify speckle detection
+        self.assertFalse(is_speckle(segments[0]), "Main line should not be a speckle")
+        self.assertTrue(is_speckle(segments[1]), "Offset segment should be detected as speckle")
+        self.assertTrue(is_speckle(segments[2]), "Close segment should be detected as speckle")
+        
+        # With merge_dist_tol=50, endpoint distance would allow merging
+        # But tight speckle tolerance (2 pixels) should prevent the far speckle from merging
+        merged = merge_collinear(segments, merge_dist_tol=50.0, angle_tol=15.0)
+        
+        print(f"\nMerged from {len(segments)} to {len(merged)} segments")
+        for i, seg in enumerate(merged):
+            length = calculate_path_length(seg)
+            y_coords = [pt[1] for pt in seg]
+            print(f"  Segment {i}: length={length:.1f}, y_range=[{min(y_coords):.1f}, {max(y_coords):.1f}]")
+        
+        # Should have 1 segment: main line merged with close speckle (y=1)
+        # The offset speckle (y=5) should be filtered out because it didn't merge
+        self.assertEqual(len(merged), 1,
+                        f"Expected 1 segment (main line + close speckle, offset filtered), got {len(merged)}")
+        
+        # The merged segment should have y-coordinates near 0-1
+        path = merged[0]
+        y_coords = [pt[1] for pt in path]
+        self.assertTrue(all(abs(y) <= 2 for y in y_coords),
+                       f"Merged segment should have y near 0-1, got y_range=[{min(y_coords)}, {max(y_coords)}]")
+        
+        # The main line segment should be longer than 100 (merged with close speckle)
+        main_length = calculate_path_length(path)
+        self.assertGreater(main_length, 100.0, 
+                          f"Main line should have merged with close speckle, length={main_length:.1f}")
+
     def test_large_dataset_performance(self):
         """Test case 10: Large dataset performance"""
         # Test case 10: Large dataset performance
