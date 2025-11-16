@@ -29,29 +29,29 @@ class TestCleanup(unittest.TestCase):
     def test_basic_collinear_merge(self):
         """Test case 1: Two collinear segments that should merge"""
         segments = [
-            [(0, 0), (1, 1)],
-            [(1, 1), (2, 2)]
+            [(0, 0), (10, 10)],
+            [(10, 10), (20, 20)]
         ]
         merged = merge_collinear(segments, merge_dist_tol=0.1, angle_tol=5.0)
-        self.assert_segments_match(merged, [[(0, 0), (1, 1), (2, 2)]])
+        self.assert_segments_match(merged, [[(0, 0), (10, 10), (20, 20)]])
 
     def test_endpoint_distance_threshold(self):
         """Test case 2: Two segments with endpoints too far apart"""
         segments = [
-            [(0, 0), (1, 1)],
-            [(1.2, 1.2), (2, 2)]
+            [(0, 0), (10, 10)],
+            [(12.0, 12.0), (20, 20)]
         ]
         merged = merge_collinear(segments, merge_dist_tol=0.1, angle_tol=5.0)
         self.assert_segments_match(merged, [
-            [(0, 0), (1, 1)],
-            [(1.2, 1.2), (2, 2)]
+            [(0, 0), (10, 10)],
+            [(12.0, 12.0), (20, 20)]
         ])
 
     def test_angle_threshold(self):
         """Test case 3: Two segments at different angles"""
         segments = [
-            [(0, 0), (1, 1)],
-            [(1, 1), (2, 1)]  # 45 degrees different
+            [(0, 0), (10, 10)],
+            [(10, 10), (20, 10)]  # 45 degrees different
         ]
         merged = merge_collinear(segments, merge_dist_tol=0.1, angle_tol=5.0)
         self.assert_segments_match(merged, segments)
@@ -59,8 +59,8 @@ class TestCleanup(unittest.TestCase):
     def test_closed_path_preservation(self):
         """Test case 4: Closed path should not merge with other segments"""
         segments = [
-            [(0, 0), (1, 1), (1, 2), (0, 0)],  # closed path
-            [(1, 1), (2, 2)]
+            [(0, 0), (10, 10), (10, 20), (0, 0)],  # closed path
+            [(10, 10), (20, 20)]
         ]
         merged = merge_collinear(segments, merge_dist_tol=0.1, angle_tol=5.0)
         self.assert_segments_match(merged, segments)
@@ -79,21 +79,21 @@ class TestCleanup(unittest.TestCase):
     def test_multi_segment_merge(self):
         """Test case 5: Three collinear segments should merge into one"""
         segments = [
-            [(0, 0), (1, 1)],
-            [(1, 1), (2, 2)],
-            [(2, 2), (3, 3)]
+            [(0, 0), (10, 10)],
+            [(10, 10), (20, 20)],
+            [(20, 20), (30, 30)]
         ]
         merged = merge_collinear(segments, merge_dist_tol=0.1, angle_tol=5.0)
-        self.assert_segments_match(merged, [[(0, 0), (1, 1), (2, 2), (3, 3)]])
+        self.assert_segments_match(merged, [[(0, 0), (10, 10), (20, 20), (30, 30)]])
 
     def test_opposite_direction_merge(self):
         """Test case 6: Two segments in opposite directions should merge correctly"""
         segments = [
-            [(0, 0), (1, 1)],
-            [(2, 2), (1, 1)]
+            [(0, 0), (10, 10)],
+            [(20, 20), (10, 10)]
         ]
         merged = merge_collinear(segments, merge_dist_tol=0.1, angle_tol=5.0)
-        self.assert_segments_match(merged, [[(0, 0), (1, 1), (2, 2)]])
+        self.assert_segments_match(merged, [[(0, 0), (10, 10), (20, 20)]])
 
     def test_edge_cases(self):
         """Test case 7-8: Empty input and single segment cases"""
@@ -101,7 +101,7 @@ class TestCleanup(unittest.TestCase):
         self.assertEqual(merge_collinear([]), [])
         
         # Single segment
-        segments = [[(0, 0), (1, 1)]]
+        segments = [[(0, 0), (10, 10)]]
         merged = merge_collinear(segments, merge_dist_tol=0.1, angle_tol=5.0)
         self.assert_segments_match(merged, segments)
 
@@ -346,6 +346,55 @@ class TestCleanup(unittest.TestCase):
         y_coords = [pt[1] for pt in path]
         self.assertTrue(all(abs(y - 1785.0) < 0.1 for y in y_coords),
                        f"All points should be at y=1785, got y-coords: {set(y_coords)}")
+
+    def test_filter_speckles_from_dashed_line(self):
+        """Test case 16: Speckles merge into nearby lines without angle constraints
+        
+        Real-world case from autotrace output: diagonal line with dashed segments
+        and a single-pixel speckle. The speckle should merge into the main line
+        during collinear merging (without angle checks), then get simplified away
+        by Douglas-Peucker.
+        """
+        from cleanup import is_speckle, calculate_path_length
+        
+        segments = [
+            # Main diagonal line (19 points, ~19 pixels)
+            [(0, 0), (1, 0), (2, -1), (3, -1), (4, -2), (5, -2), (6, -2),
+             (7, -2), (8, -2), (9, -2), (10, -2), (11, -2), (12, -2), 
+             (13, -2), (14, -3), (15, -3), (16, -3), (17, -3), (18, -3)],
+            # Single-pixel speckle (1 pixel) - 8 pixels from main line, within merge range
+            [(-8, 0), (-7, 0)],
+            # Dashed line segments (parts of the same line)
+            [(-43, 4), (-42, 3), (-41, 3), (-40, 3), (-39, 3), (-38, 3), (-37, 3), (-36, 3)],
+            [(-59, 5), (-58, 5), (-57, 5), (-56, 5), (-55, 5), (-54, 5), (-53, 5), (-52, 5)],
+            [(-68, 6), (-67, 6), (-66, 6), (-65, 6), (-64, 6)],
+        ]
+        
+        # Calculate lengths
+        lengths = [calculate_path_length(seg) for seg in segments]
+        print(f"\nPath lengths: {[f'{l:.1f}' for l in lengths]}")
+        
+        # Verify speckle detection
+        self.assertTrue(is_speckle(segments[1]), "Second segment should be detected as speckle")
+        
+        # Merge collinear segments - speckles should merge without angle checks
+        # The speckle at (-8,0) to (-7,0) is 8 pixels from the main diagonal line,
+        # well within merge_dist_tol=50. It should merge into the main line.
+        merged = merge_collinear(segments, merge_dist_tol=50.0, angle_tol=15.0)
+        
+        print(f"Merged from {len(segments)} to {len(merged)} segments")
+        
+        # After merging and simplification, the speckle should have merged with the main line
+        # and been simplified away. The three dashed segments should also merge.
+        self.assertLessEqual(len(merged), 2,
+                        f"Expected <= 2 segments after merging (main line + dashed line), got {len(merged)}")
+        
+        # Verify no very short segments remain (speckle should be merged/simplified away)
+        merged_lengths = [calculate_path_length(seg) for seg in merged]
+        self.assertTrue(all(l >= 5.0 for l in merged_lengths),
+                       f"All merged segments should be >= 5 pixels, got {merged_lengths}")
+        self.assertTrue(any(calculate_path_length(seg) > 18 for seg in merged),
+                       "Main diagonal line should be preserved")
 
     def test_large_dataset_performance(self):
         """Test case 10: Large dataset performance"""

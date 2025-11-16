@@ -181,6 +181,70 @@ def should_close_path(path: list, merge_dist_tol: float, angle_tol: float = 10.0
     except (IndexError, ZeroDivisionError):
         return False
 
+def calculate_path_length(path: list) -> float:
+    """Calculate the total length of a path
+    
+    Args:
+        path: List of points in the path
+        
+    Returns:
+        float: Total Euclidean length of the path
+    """
+    if len(path) < 2:
+        return 0.0
+    
+    total_length = 0.0
+    for i in range(len(path) - 1):
+        p1 = np.array(path[i])
+        p2 = np.array(path[i + 1])
+        total_length += np.linalg.norm(p2 - p1)
+    
+    return total_length
+
+def is_speckle(path: list, speckle_threshold: float = 3.0) -> bool:
+    """Determine if a path is a speckle (very short segment)
+    
+    This is optimized to exit early if the path exceeds the threshold,
+    avoiding calculating the full length for long paths.
+    
+    Args:
+        path: Path to check
+        speckle_threshold: Maximum length to consider a speckle
+        
+    Returns:
+        bool: True if path is a speckle
+    """
+    if len(path) < 2:
+        return True  # Empty or single-point paths are speckles
+    
+    total_length = 0.0
+    for i in range(len(path) - 1):
+        p1 = np.array(path[i])
+        p2 = np.array(path[i + 1])
+        total_length += np.linalg.norm(p2 - p1)
+        
+        # Early exit if we've already exceeded the threshold
+        if total_length >= speckle_threshold:
+            return False
+    
+    return True  # Total length is less than threshold
+
+def filter_unmerged_speckles(segments: list, active: set, speckle_threshold: float = 3.0) -> set:
+    """Remove speckles that remain after merging is complete
+    
+    This should be called AFTER merge_collinear to remove any speckles
+    that couldn't be merged into larger segments.
+    
+    Args:
+        segments: List of all line segments
+        active: Set of active segment indices after merging
+        speckle_threshold: Maximum length to consider a speckle
+        
+    Returns:
+        set: Active indices with unmerged speckles removed
+    """
+    return {idx for idx in active if not is_speckle(segments[idx], speckle_threshold)}
+
 def try_merge_at_endpoint(path: list, idx: int, at_start: bool, segments: list, 
                          active: list, path_index: PathIndex, 
                          merge_dist_tol: float, angle_tol: float) -> tuple:
@@ -210,74 +274,83 @@ def try_merge_at_endpoint(path: list, idx: int, at_start: bool, segments: list,
             
         seg = segments[j]
         
-        # Get direction vectors for both segments
-        if at_start:
-            dir1 = np.array(path[1]) - np.array(path[0])
-            path_points = path[0:2]
-            path_point = np.array(path[0])
-        else:
-            dir1 = np.array(path[-1]) - np.array(path[-2])
-            path_points = path[-2:]
-            path_point = np.array(path[-1])
+        # Check if either segment is a speckle - if so, skip angle checks
+        path_is_speckle = is_speckle(path)
+        seg_is_speckle = is_speckle(seg)
         
-        if match.is_start:
-            dir2 = np.array(seg[1]) - np.array(seg[0])
-            seg_points = seg[0:2]
-            seg_point = np.array(seg[0])
-        else:
-            dir2 = np.array(seg[-1]) - np.array(seg[-2])
-            seg_points = seg[-2:]
-            seg_point = np.array(seg[-1])
+        # If both are speckles or neither is, do normal angle checking
+        # If one is a speckle, allow merge without angle constraint
+        skip_angle_check = path_is_speckle or seg_is_speckle
         
-        # Check if direction vectors are valid
-        if np.linalg.norm(dir1) <= 1e-8 or np.linalg.norm(dir2) <= 1e-8:
-            continue
+        if not skip_angle_check:
+            # Get direction vectors for both segments
+            if at_start:
+                dir1 = np.array(path[1]) - np.array(path[0])
+                path_points = path[0:2]
+                path_point = np.array(path[0])
+            else:
+                dir1 = np.array(path[-1]) - np.array(path[-2])
+                path_points = path[-2:]
+                path_point = np.array(path[-1])
             
-        # Normalize direction vectors
-        dir1 = dir1 / np.linalg.norm(dir1)
-        dir2 = dir2 / np.linalg.norm(dir2)
-        
-        # Check collinearity
-        if not are_segments_collinear(path_points, dir1, seg_points, dir2, angle_tol):
-            continue
-        
-        # Check if segments are offset (parallel but not on same line)
-        offset_tol = merge_dist_tol * 0.5
-        if are_segments_offset(path_point, dir1, seg_point, offset_tol):
-            continue  # Skip this merge - segments are parallel but offset
-        
-        # Check if merging would create a backtracking path
-        # The connection vector between endpoints should be aligned with the segment directions
-        connection_vec = seg_point - path_point
-        connection_dist = np.linalg.norm(connection_vec)
-        
-        if connection_dist > 1e-8:
-            connection_dir = connection_vec / connection_dist
+            if match.is_start:
+                dir2 = np.array(seg[1]) - np.array(seg[0])
+                seg_points = seg[0:2]
+                seg_point = np.array(seg[0])
+            else:
+                dir2 = np.array(seg[-1]) - np.array(seg[-2])
+                seg_points = seg[-2:]
+                seg_point = np.array(seg[-1])
             
-            # Determine the expected direction based on how we're merging
-            if at_start and match.is_start:
-                # Connecting start-to-start: one segment will be reversed
-                # After reversal, connection should align with at least one of the original directions
-                # Check if connection is roughly opposite to dir1 (since path will be reversed)
-                dot1 = np.dot(connection_dir, -dir1)
-                dot2 = np.dot(connection_dir, dir2)
-            elif at_start and not match.is_start:
-                # Connecting start-to-end: connection should align with both directions
-                dot1 = np.dot(connection_dir, -dir1)  # path points backwards from start
-                dot2 = np.dot(connection_dir, dir2)   # seg points forward from end
-            elif not at_start and match.is_start:
-                # Connecting end-to-start: connection should align with both directions
-                dot1 = np.dot(connection_dir, dir1)   # path points forward from end
-                dot2 = np.dot(connection_dir, dir2)   # seg points forward from start
-            else:  # not at_start and not match.is_start
-                # Connecting end-to-end: one segment will be reversed
-                dot1 = np.dot(connection_dir, dir1)
-                dot2 = np.dot(connection_dir, -dir2)
+            # Check if direction vectors are valid
+            if np.linalg.norm(dir1) <= 1e-8 or np.linalg.norm(dir2) <= 1e-8:
+                continue
+                
+            # Normalize direction vectors
+            dir1 = dir1 / np.linalg.norm(dir1)
+            dir2 = dir2 / np.linalg.norm(dir2)
             
-            # Both dots should be positive (or close to zero) for a sensible merge
-            # If either is strongly negative, we're creating a backtracking path
-            if dot1 < -0.5 or dot2 < -0.5:
-                continue  # Skip this merge - would create backtracking
+            # Check collinearity
+            if not are_segments_collinear(path_points, dir1, seg_points, dir2, angle_tol):
+                continue
+            
+            # Check if segments are offset (parallel but not on same line)
+            offset_tol = merge_dist_tol * 0.5
+            if are_segments_offset(path_point, dir1, seg_point, offset_tol):
+                continue  # Skip this merge - segments are parallel but offset
+            
+            # Check if merging would create a backtracking path
+            # The connection vector between endpoints should be aligned with the segment directions
+            connection_vec = seg_point - path_point
+            connection_dist = np.linalg.norm(connection_vec)
+            
+            if connection_dist > 1e-8:
+                connection_dir = connection_vec / connection_dist
+                
+                # Determine the expected direction based on how we're merging
+                if at_start and match.is_start:
+                    # Connecting start-to-start: one segment will be reversed
+                    # After reversal, connection should align with at least one of the original directions
+                    # Check if connection is roughly opposite to dir1 (since path will be reversed)
+                    dot1 = np.dot(connection_dir, -dir1)
+                    dot2 = np.dot(connection_dir, dir2)
+                elif at_start and not match.is_start:
+                    # Connecting start-to-end: connection should align with both directions
+                    dot1 = np.dot(connection_dir, -dir1)  # path points backwards from start
+                    dot2 = np.dot(connection_dir, dir2)   # seg points forward from end
+                elif not at_start and match.is_start:
+                    # Connecting end-to-start: connection should align with both directions
+                    dot1 = np.dot(connection_dir, dir1)   # path points forward from end
+                    dot2 = np.dot(connection_dir, dir2)   # seg points forward from start
+                else:  # not at_start and not match.is_start
+                    # Connecting end-to-end: one segment will be reversed
+                    dot1 = np.dot(connection_dir, dir1)
+                    dot2 = np.dot(connection_dir, -dir2)
+                
+                # Both dots should be positive (or close to zero) for a sensible merge
+                # If either is strongly negative, we're creating a backtracking path
+                if dot1 < -0.5 or dot2 < -0.5:
+                    continue  # Skip this merge - would create backtracking
         
         # Perform the merge
         path_index.remove_path(idx)
@@ -370,6 +443,11 @@ def merge_collinear(segments: list, merge_dist_tol: float = 1.0, angle_tol: floa
     for idx in to_remove:
         if idx in active:
             active.remove(idx)
+
+    # Filter out unmerged speckles
+    active_set = set(active)
+    active_set = filter_unmerged_speckles(segments, active_set)
+    active = list(active_set)
 
     # Add any remaining open paths
     for idx in active:
