@@ -1,0 +1,4 @@
+node_modules/
+deno.lock
+.DS_Store
+*.log
