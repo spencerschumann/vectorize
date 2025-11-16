@@ -230,6 +230,83 @@ class TestCleanup(unittest.TestCase):
 
         self.assertEqual(orig_segs, merged)
 
+    def test_rectangular_frame_with_dashed_sides(self):
+        """Test case 14: Rectangular frame with corner turns and dashed horizontal lines
+        
+        Based on real SVG paths that represent a rectangular frame with:
+        - Left side with corner turns (vertical segments with 45-degree corners)
+        - Right side with vertical segments
+        - Dashed horizontal lines at top and bottom
+        
+        The corner segments should merge with the straight segments properly.
+        """
+        segments = [
+            # Top left corner path with turn
+            [(354.0, 3638.0), (354.0, 3588.0), (357.0, 3585.0), (384.0, 3585.0)],
+            # Top dashed line segments
+            [(411.0, 3585.0), (459.0, 3585.0)],
+            [(486.0, 3585.0), (534.0, 3585.0)],
+            [(560.0, 3585.0), (609.0, 3585.0)],
+            [(635.0, 3585.0), (684.0, 3585.0)],
+            [(711.0, 3585.0), (760.0, 3585.0)],
+            [(786.0, 3585.0), (835.0, 3585.0)],
+            [(860.0, 3585.0), (910.0, 3585.0)],
+            [(936.0, 3585.0), (985.0, 3585.0)],
+            [(1010.0, 3585.0), (1060.0, 3585.0)],
+            [(1086.0, 3585.0), (1114.0, 3585.0)],
+            # Left side vertical segments
+            [(322.0, 3588.0), (322.0, 3637.0)],
+            [(322.0, 3665.0), (322.0, 3713.0)],
+            [(354.0, 3665.0), (354.0, 3713.0)],
+            [(322.0, 3740.0), (322.0, 3788.0)],
+            [(354.0, 3740.0), (354.0, 3788.0)],
+            [(322.0, 3815.0), (322.0, 3866.0)],
+            # Bottom left corner path with turn
+            [(354.0, 3815.0), (354.0, 3866.0), (357.0, 3869.0), (385.0, 3869.0)],
+            # Bottom dashed line segments
+            [(411.0, 3869.0), (460.0, 3869.0)],
+            [(485.0, 3869.0), (535.0, 3869.0)],
+            [(560.0, 3869.0), (609.0, 3869.0)],
+            [(635.0, 3869.0), (685.0, 3869.0)],
+            [(710.0, 3869.0), (760.0, 3869.0)],
+            [(785.0, 3869.0), (834.0, 3869.0)],
+            [(860.0, 3869.0), (910.0, 3869.0)],
+            [(935.0, 3869.0), (985.0, 3869.0)],
+            [(1010.0, 3869.0), (1060.0, 3869.0)],
+            [(1085.0, 3869.0), (1114.0, 3869.0)],
+        ]
+        
+        # Use default tolerances from cleanup.py
+        merged = merge_collinear(segments, merge_dist_tol=50.0, angle_tol=15.0)
+        
+        print(f"\nNumber of merged paths: {len(merged)}")
+        for i, path in enumerate(merged):
+            print(f"Path {i}: {len(path)} points")
+            print(f"  Start: {path[0]}")
+            print(f"  End: {path[-1]}")
+            if len(path) <= 10:
+                print(f"  All points: {path}")
+        
+        # Check for backtracking in paths (y-coordinates shouldn't jank back and forth)
+        for i, path in enumerate(merged):
+            # For vertical paths, check if y-coordinates are monotonic or have major direction changes
+            y_coords = [pt[1] for pt in path]
+            if len(y_coords) >= 3:
+                # Check for direction reversals (going down then up, or up then down)
+                deltas = [y_coords[i+1] - y_coords[i] for i in range(len(y_coords)-1)]
+                # Filter out small movements (< 1 pixel)
+                significant_deltas = [d for d in deltas if abs(d) > 1.0]
+                if len(significant_deltas) >= 2:
+                    # Check if signs change (indicating backtracking)
+                    signs = [1 if d > 0 else -1 for d in significant_deltas]
+                    has_reversal = any(signs[i] != signs[i+1] for i in range(len(signs)-1))
+                    self.assertFalse(has_reversal, 
+                                   f"Path {i} has y-coordinate reversal (backtracking): {path}")
+        
+        # Should merge down to approximately 2 paths (one closed rectangle path)
+        self.assertEqual(len(merged), 2,
+                       f"Expected 2 paths after merging (top and bottom), got {len(merged)}")
+
     def test_large_dataset_performance(self):
         """Test case 10: Large dataset performance"""
         # Test case 10: Large dataset performance

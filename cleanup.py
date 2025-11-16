@@ -246,14 +246,59 @@ def try_merge_at_endpoint(path: list, idx: int, at_start: bool, segments: list,
         if are_segments_offset(path_point, dir1, seg_point, offset_tol):
             continue  # Skip this merge - segments are parallel but offset
         
+        # Check if merging would create a backtracking path
+        # The connection vector between endpoints should be aligned with the segment directions
+        connection_vec = seg_point - path_point
+        connection_dist = np.linalg.norm(connection_vec)
+        
+        if connection_dist > 1e-8:
+            connection_dir = connection_vec / connection_dist
+            
+            # Determine the expected direction based on how we're merging
+            if at_start and match.is_start:
+                # Connecting start-to-start: one segment will be reversed
+                # After reversal, connection should align with at least one of the original directions
+                # Check if connection is roughly opposite to dir1 (since path will be reversed)
+                dot1 = np.dot(connection_dir, -dir1)
+                dot2 = np.dot(connection_dir, dir2)
+            elif at_start and not match.is_start:
+                # Connecting start-to-end: connection should align with both directions
+                dot1 = np.dot(connection_dir, -dir1)  # path points backwards from start
+                dot2 = np.dot(connection_dir, dir2)   # seg points forward from end
+            elif not at_start and match.is_start:
+                # Connecting end-to-start: connection should align with both directions
+                dot1 = np.dot(connection_dir, dir1)   # path points forward from end
+                dot2 = np.dot(connection_dir, dir2)   # seg points forward from start
+            else:  # not at_start and not match.is_start
+                # Connecting end-to-end: one segment will be reversed
+                dot1 = np.dot(connection_dir, dir1)
+                dot2 = np.dot(connection_dir, -dir2)
+            
+            # Both dots should be positive (or close to zero) for a sensible merge
+            # If either is strongly negative, we're creating a backtracking path
+            if dot1 < -0.5 or dot2 < -0.5:
+                continue  # Skip this merge - would create backtracking
+        
         # Perform the merge
         path_index.remove_path(idx)
         path_index.remove_path(j)
         
         if at_start:
-            merged_path = merge_paths(seg, path, not match.is_start, False)
+            # Merging at path's start
+            if match.is_start:
+                # start-to-start: reverse seg so its end connects to path's start
+                merged_path = merge_paths(seg, path, True, False)
+            else:
+                # start-to-end: seg's end connects to path's start  
+                merged_path = merge_paths(seg, path, False, False)
         else:
-            merged_path = merge_paths(path, seg, False, not match.is_start)
+            # Merging at path's end
+            if match.is_start:
+                # end-to-start: path's end connects to seg's start
+                merged_path = merge_paths(path, seg, False, False)
+            else:
+                # end-to-end: reverse seg so path's end connects to seg's start
+                merged_path = merge_paths(path, seg, False, True)
         
         segments[idx] = merged_path
         path_index.insert_path(merged_path, idx)
