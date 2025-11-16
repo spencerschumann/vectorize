@@ -182,23 +182,6 @@ def merge_collinear(segments: list, merge_dist_tol: float = 1.0, angle_tol: floa
     active = [i for i in range(n) if len(segments[i]) >= 2]
 
     while active:
-        # Check for self-closing paths in active, move them to merged_paths
-        to_remove = []
-        for idx in active:
-            path = segments[idx]
-            if should_close_path(path, merge_dist_tol, angle_tol):
-                # Close the path by adding a copy of the exact start point
-                closed_path = path + [tuple(path[0])]
-                segments[idx] = closed_path
-                merged_paths.append(closed_path)
-                path_index.remove_path(idx)
-                to_remove.append(idx)
-        # Remove by value, not by position
-        for idx in to_remove:
-            if idx in active:
-                active.remove(idx)
-        if not active:
-            break
 
         merged = False
         i = 0
@@ -288,6 +271,20 @@ def merge_collinear(segments: list, merge_dist_tol: float = 1.0, angle_tol: floa
             i += 1
         if not merged:
             break
+
+    # After no more merges are possible, close any paths that should be closed
+    to_remove = []
+    for idx in list(active):
+        path = segments[idx]
+        if should_close_path(path, merge_dist_tol, angle_tol):
+            closed_path = path + [tuple(path[0])]
+            segments[idx] = closed_path
+            merged_paths.append(closed_path)
+            path_index.remove_path(idx)
+            to_remove.append(idx)
+    for idx in to_remove:
+        if idx in active:
+            active.remove(idx)
 
     # Add any remaining open paths
     for idx in active:

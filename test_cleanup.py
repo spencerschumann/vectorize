@@ -174,6 +174,43 @@ class TestCleanup(unittest.TestCase):
             self.assertAlmostEqual(min(x_coords), 0, delta=1.0)
             self.assertAlmostEqual(max(x_coords), 130, delta=1.0)
 
+    def test_parallel_dashed_lines_with_closed_ends(self):
+        """Test case 12: Parallel dashed lines with closed end caps.
+
+        Outer dashes are closed into short rectangles at the ends. The
+        algorithm should prefer completing the dashed line merges (one per
+        y-coordinate) rather than closing small rectangles prematurely.
+        """
+        segments = [
+            [(30, 0), (0, 0), (0, 19), (30, 19)],  # closed rectangle at left
+            [(50, 0), (80, 0)],                    # middle dash (top)
+            [(50, 19), (80, 19)],                  # middle dash (bottom)
+            [(100, 0), (130, 0), (130, 19), (100, 19)],  # closed rectangle at right
+        ]
+
+        merged = merge_collinear(segments, merge_dist_tol=25, angle_tol=5.0)
+
+        # Run a round of simplification to clean up redundant points
+        merged = simplify_segments(merged)
+        
+        # We expect one long, closed rectangular path
+        self.assertEqual(len(merged), 1,
+                         f"Expected 1 merged path (closed rectangle), got {len(merged)}")
+        
+        # Verify it's a closed path (first point equals last point)
+        path = merged[0]
+        self.assertTrue(np.allclose(path[0], path[-1], atol=0.1),
+                       f"Path should be closed. Start: {path[0]}, End: {path[-1]}")
+        
+        self.assertEqual(len(path), 5)  # 4 corners + closing point
+
+        # Verify the path contains all 4 corners of the rectangle
+        expected_corners = {(0, 0), (130, 0), (130, 19), (0, 19)}
+        actual_points = {tuple(pt) for pt in path}
+        for corner in expected_corners:
+            self.assertTrue(any(np.allclose(corner, pt, atol=0.1) for pt in path),
+                           f"Missing expected corner {corner} in path")
+        
     def test_large_dataset_performance(self):
         """Test case 10: Large dataset performance"""
         # Test case 10: Large dataset performance
