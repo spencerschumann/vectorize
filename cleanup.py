@@ -161,7 +161,22 @@ def should_close_path(path: list, merge_dist_tol: float, angle_tol: float = 10.0
         dot = np.dot(start_dir, -end_dir)
         angle = np.degrees(np.arccos(np.clip(abs(dot), -1.0, 1.0)))
         
-        return angle < angle_tol
+        if angle >= angle_tol:
+            return False
+        
+        # Check if the closing segment would be offset from the existing segments
+        # Use the same offset check as in merge_collinear
+        offset_tol = merge_dist_tol * 0.5
+        
+        # Check if the start point is offset from the line defined by the end segment
+        if are_segments_offset(end, end_dir, start, offset_tol):
+            return False
+        
+        # Check if the end point is offset from the line defined by the start segment
+        if are_segments_offset(start, start_dir, end, offset_tol):
+            return False
+        
+        return True
         
     except (IndexError, ZeroDivisionError):
         return False
@@ -267,7 +282,6 @@ def merge_collinear(segments: list, merge_dist_tol: float = 1.0, angle_tol: floa
     active = [i for i in range(n) if len(segments[i]) >= 2]
 
     while active:
-
         merged = False
         i = 0
         while i < len(active):
@@ -307,7 +321,6 @@ def merge_collinear(segments: list, merge_dist_tol: float = 1.0, angle_tol: floa
             closed_path = path + [tuple(path[0])]
             segments[idx] = closed_path
             merged_paths.append(closed_path)
-            path_index.remove_path(idx)
             to_remove.append(idx)
     for idx in to_remove:
         if idx in active:
@@ -349,16 +362,17 @@ def svg_lines_to_segments(paths):
     
     return segments
 
-def main(input_svg, output_svg, stroke_color='black', stroke_width=1.0):
+def main(input_svg, output_svg, stroke_color='black', stroke_width=1.0, merge=True):
     print(f"Processing SVG: {input_svg} -> {output_svg}")
     print(f"Stroke color: {stroke_color}, Stroke width: {stroke_width}")
    
     paths, attrs = svg2paths(input_svg)
     segments = svg_lines_to_segments(paths)
     segments = simplify_segments(segments)
-    segments = merge_collinear(segments, merge_dist_tol=d_tol, angle_tol=a_tol)
-    # simplify again after merging
-    segments = simplify_segments(segments)
+    if merge:
+        segments = merge_collinear(segments, merge_dist_tol=d_tol, angle_tol=a_tol)
+        # simplify again after merging
+        segments = simplify_segments(segments)
 
     # Build SVG output - convert segments back to path objects (in original pixel units)
     out_paths = []
@@ -404,5 +418,10 @@ if __name__ == "__main__":
                         help="Stroke color for paths (default: black)")
     parser.add_argument("--stroke-width", type=float, default=1.0,
                         help="Stroke width for paths (default: 1.0)")
+    parser.add_argument("--no-merge", action="store_true",
+                        help="Disable merging of collinear segments")
     args = parser.parse_args()
-    main(args.input_svg, args.output_svg, stroke_color=args.stroke_color, stroke_width=args.stroke_width)
+    main(args.input_svg, args.output_svg,
+         stroke_color=args.stroke_color,
+         stroke_width=args.stroke_width,
+         merge=(not args.no_merge))

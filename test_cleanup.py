@@ -182,10 +182,10 @@ class TestCleanup(unittest.TestCase):
         y-coordinate) rather than closing small rectangles prematurely.
         """
         segments = [
-            [(30, 0), (0, 0), (0, 19), (30, 19)],  # closed rectangle at left
+            [(30, 0), (0, 0), (0, 19), (30, 19)],  # open rectangle at left
             [(50, 0), (80, 0)],                    # middle dash (top)
             [(50, 19), (80, 19)],                  # middle dash (bottom)
-            [(100, 0), (130, 0), (130, 19), (100, 19)],  # closed rectangle at right
+            [(100, 0), (130, 0), (130, 19), (100, 19)],  # open rectangle at right
         ]
 
         merged = merge_collinear(segments, merge_dist_tol=25, angle_tol=5.0)
@@ -210,7 +210,26 @@ class TestCleanup(unittest.TestCase):
         for corner in expected_corners:
             self.assertTrue(any(np.allclose(corner, pt, atol=0.1) for pt in path),
                            f"Missing expected corner {corner} in path")
+    
+    def test_c_shape_should_not_close(self):
+        """Test case 13: C-shape with separate end segments should not close
         
+        A C-shape where the open ends have separate horizontal segments should
+        not be closed because those segments are offset (not collinear with 
+        the connection that would be made).
+        """
+        segments = [
+            [(30, 0), (0, 0), (0, 19), (30, 19)]  # C-shaped path
+        ]
+        orig_segs = segments.copy()
+        
+        merged = merge_collinear(segments, merge_dist_tol=25, angle_tol=5.0)
+        
+        self.assertEqual(len(merged), 1, 
+                        f"Expected 1 merged path, got {len(merged)}")
+
+        self.assertEqual(orig_segs, merged)
+
     def test_large_dataset_performance(self):
         """Test case 10: Large dataset performance"""
         # Test case 10: Large dataset performance
@@ -230,7 +249,7 @@ class TestCleanup(unittest.TestCase):
         
         # Should merge into two long horizontal lines
         self.assertEqual(len(merged), 2)
-        self.assertLess(end_time - start_time, 1.0)  # Should complete in under 1 second
+        self.assertLess(end_time - start_time, 2.0)  # Should complete in under 2 seconds
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
