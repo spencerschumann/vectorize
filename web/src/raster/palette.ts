@@ -30,6 +30,13 @@ export const DEFAULT_PALETTE_16: Uint32Array = new Uint32Array([
 ]);
 
 /**
+ * Default 16-color palette as RGBA bytes (for GPU)
+ */
+export const DEFAULT_PALETTE_16_RGBA = new Uint8ClampedArray(
+    new Uint32Array(DEFAULT_PALETTE_16).buffer
+);
+
+/**
  * Convert RGBA image to 16-color palettized image
  * Uses nearest color matching, no dithering
  */

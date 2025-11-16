@@ -71,6 +71,33 @@ export function setPixelPal(
 }
 
 /**
+ * Convert palettized image back to RGBA for export
+ */
+export function palettizedToRGBA(img: PalettizedImage): { width: number; height: number; data: Uint8ClampedArray } {
+    const palette = img.palette || DEFAULT_PALETTE_16;
+    const rgbaData = new Uint8ClampedArray(img.width * img.height * 4);
+    
+    for (let y = 0; y < img.height; y++) {
+        for (let x = 0; x < img.width; x++) {
+            const paletteIdx = getPixelPal(img, x, y);
+            const color = palette[paletteIdx];
+            
+            const pixelOffset = (y * img.width + x) * 4;
+            rgbaData[pixelOffset] = color & 0xFF;           // R
+            rgbaData[pixelOffset + 1] = (color >> 8) & 0xFF;  // G
+            rgbaData[pixelOffset + 2] = (color >> 16) & 0xFF; // B
+            rgbaData[pixelOffset + 3] = (color >> 24) & 0xFF; // A
+        }
+    }
+    
+    return {
+        width: img.width,
+        height: img.height,
+        data: rgbaData,
+    };
+}
+
+/**
  * Default 16-color palette
  * Based on the original Python implementation
  */
