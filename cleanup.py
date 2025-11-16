@@ -166,6 +166,91 @@ def should_close_path(path: list, merge_dist_tol: float, angle_tol: float = 10.0
     except (IndexError, ZeroDivisionError):
         return False
 
+def try_merge_at_endpoint(path: list, idx: int, at_start: bool, segments: list, 
+                         active: list, path_index: PathIndex, 
+                         merge_dist_tol: float, angle_tol: float) -> tuple:
+    """Try to merge a path at one of its endpoints
+    
+    Args:
+        path: The path to try merging
+        idx: Index of the path in segments array
+        at_start: True to merge at start, False to merge at end
+        segments: All segments (will be modified if merge succeeds)
+        active: List of active segment indices
+        path_index: Spatial index for finding nearby endpoints
+        merge_dist_tol: Distance tolerance for merging
+        angle_tol: Angle tolerance for collinearity check
+        
+    Returns:
+        tuple: (merged_path or None, matched_index or None)
+    """
+    # Get the endpoint to search from
+    endpoint = tuple(path[0] if at_start else path[-1])
+    matches = path_index.find_endpoints_in_radius(endpoint, merge_dist_tol)
+    
+    for match in matches:
+        j = match.path_index
+        if j == idx or j not in active or len(segments[j]) < 2:
+            continue
+            
+        seg = segments[j]
+        
+        # Get direction vectors for both segments
+        if at_start:
+            dir1 = np.array(path[1]) - np.array(path[0])
+            path_points = path[0:2]
+            path_point = np.array(path[0])
+        else:
+            dir1 = np.array(path[-1]) - np.array(path[-2])
+            path_points = path[-2:]
+            path_point = np.array(path[-1])
+        
+        if match.is_start:
+            dir2 = np.array(seg[1]) - np.array(seg[0])
+            seg_points = seg[0:2]
+            seg_point = np.array(seg[0])
+        else:
+            dir2 = np.array(seg[-1]) - np.array(seg[-2])
+            seg_points = seg[-2:]
+            seg_point = np.array(seg[-1])
+        
+        # Check if direction vectors are valid
+        if np.linalg.norm(dir1) <= 1e-8 or np.linalg.norm(dir2) <= 1e-8:
+            continue
+            
+        # Normalize direction vectors
+        dir1 = dir1 / np.linalg.norm(dir1)
+        dir2 = dir2 / np.linalg.norm(dir2)
+        
+        # Check collinearity
+        if not are_segments_collinear(path_points, dir1, seg_points, dir2, angle_tol):
+            continue
+        
+        # Check if segments are offset (parallel but not on same line)
+        offset_tol = merge_dist_tol * 0.5
+        if are_segments_offset(path_point, dir1, seg_point, offset_tol):
+            continue  # Skip this merge - segments are parallel but offset
+        
+        # Perform the merge
+        path_index.remove_path(idx)
+        path_index.remove_path(j)
+        
+        if at_start:
+            merged_path = merge_paths(seg, path, not match.is_start, False)
+        else:
+            merged_path = merge_paths(path, seg, False, not match.is_start)
+        
+        segments[idx] = merged_path
+        path_index.insert_path(merged_path, idx)
+        
+        # Remove j from active
+        if j in active:
+            active.remove(j)
+        
+        return merged_path, j
+    
+    return None, None
+
 def merge_collinear(segments: list, merge_dist_tol: float = 1.0, angle_tol: float = 10.0) -> list:
     """Merge collinear segments that have endpoints within merge_dist_tol distance.
     
@@ -186,89 +271,31 @@ def merge_collinear(segments: list, merge_dist_tol: float = 1.0, angle_tol: floa
         merged = False
         i = 0
         while i < len(active):
-            idx = active[i]  # idx is always the original segment index
+            idx = active[i]
             path = segments[idx]
+            
             # Try to merge at end
-            end = tuple(path[-1])
-            matches = path_index.find_endpoints_in_radius(end, merge_dist_tol)
-            merged_this_path = False
-            for match in matches:
-                j = match.path_index  # j is also an original segment index
-                if j == idx or j not in active or len(segments[j]) < 2:
-                    continue
-                seg = segments[j]
-                if match.is_start:
-                    dir2 = np.array(seg[1]) - np.array(seg[0])
-                else:
-                    dir2 = np.array(seg[-1]) - np.array(seg[-2])
-                dir1 = np.array(path[-1]) - np.array(path[-2])
-                if np.linalg.norm(dir1) > 1e-8 and np.linalg.norm(dir2) > 1e-8:
-                    dir1 = dir1 / np.linalg.norm(dir1)
-                    dir2 = dir2 / np.linalg.norm(dir2)
-                    if are_segments_collinear(path[-2:], dir1,
-                                            seg[0:2] if match.is_start else seg[-2:],
-                                            dir2, angle_tol):
-                        # Check if segments are offset (parallel but not on same line)
-                        # Use a tolerance based on merge_dist_tol
-                        offset_tol = merge_dist_tol * 0.5  # Half the merge distance
-                        seg_point = np.array(seg[0] if match.is_start else seg[-1])
-                        path_point = np.array(path[-1])
-                        if are_segments_offset(path_point, dir1, seg_point, offset_tol):
-                            continue  # Skip this merge - segments are parallel but offset
-                        
-                        path_index.remove_path(idx)
-                        path_index.remove_path(j)
-                        path = merge_paths(path, seg, False, not match.is_start)
-                        segments[idx] = path
-                        path_index.insert_path(path, idx)
-                        # Remove j from active by value, not by position
-                        if j in active:
-                            active.remove(j)
-                        merged = True
-                        merged_this_path = True
-                        break
-            if merged_this_path:
+            merged_path, _ = try_merge_at_endpoint(
+                path, idx, at_start=False, segments=segments, active=active,
+                path_index=path_index, merge_dist_tol=merge_dist_tol, angle_tol=angle_tol
+            )
+            
+            if merged_path is not None:
+                merged = True
                 continue  # Try to merge this path again
+            
             # Try to merge at start
-            start = tuple(path[0])
-            matches = path_index.find_endpoints_in_radius(start, merge_dist_tol)
-            for match in matches:
-                j = match.path_index
-                if j == idx or j not in active or len(segments[j]) < 2:
-                    continue
-                seg = segments[j]
-                if match.is_start:
-                    dir2 = np.array(seg[1]) - np.array(seg[0])
-                else:
-                    dir2 = np.array(seg[-1]) - np.array(seg[-2])
-                dir1 = np.array(path[1]) - np.array(path[0])
-                if np.linalg.norm(dir1) > 1e-8 and np.linalg.norm(dir2) > 1e-8:
-                    dir1 = dir1 / np.linalg.norm(dir1)
-                    dir2 = dir2 / np.linalg.norm(dir2)
-                    if are_segments_collinear(path[0:2], dir1,
-                                            seg[0:2] if match.is_start else seg[-2:],
-                                            dir2, angle_tol):
-                        # Check if segments are offset (parallel but not on same line)
-                        # Use a tolerance based on merge_dist_tol
-                        offset_tol = merge_dist_tol * 0.5  # Half the merge distance
-                        seg_point = np.array(seg[0] if match.is_start else seg[-1])
-                        path_point = np.array(path[0])
-                        if are_segments_offset(path_point, dir1, seg_point, offset_tol):
-                            continue  # Skip this merge - segments are parallel but offset
-                        
-                        path_index.remove_path(idx)
-                        path_index.remove_path(j)
-                        path = merge_paths(seg, path, not match.is_start, False)
-                        segments[idx] = path
-                        path_index.insert_path(path, idx)
-                        if j in active:
-                            active.remove(j)
-                        merged = True
-                        merged_this_path = True
-                        break
-            if merged_this_path:
+            merged_path, _ = try_merge_at_endpoint(
+                path, idx, at_start=True, segments=segments, active=active,
+                path_index=path_index, merge_dist_tol=merge_dist_tol, angle_tol=angle_tol
+            )
+            
+            if merged_path is not None:
+                merged = True
                 continue  # Try to merge this path again
+            
             i += 1
+        
         if not merged:
             break
 
