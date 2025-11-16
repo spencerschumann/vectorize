@@ -102,6 +102,9 @@ class PathIndex:
 
     def insert_path(self, path: List[Tuple[float, float]], path_index: int):
         """Insert endpoints for a new or updated path."""
+        # Remove from excluded set if it was there
+        self.excluded.discard(path_index)
+        
         if self._is_closed_path(path):
             self.excluded.add(path_index)
             return

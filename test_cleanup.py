@@ -307,6 +307,46 @@ class TestCleanup(unittest.TestCase):
         self.assertEqual(len(merged), 2,
                        f"Expected 2 paths after merging (top and bottom), got {len(merged)}")
 
+    def test_horizontal_line_with_small_gaps(self):
+        """Test case 15: Horizontal line segments with small gaps should merge
+        
+        Real-world case: horizontal line at y=1785 with segments separated by
+        small gaps (3-29 pixels). All segments should merge into a single line
+        with default tolerances (merge_dist_tol=50).
+        """
+        segments = [
+            [(2242.0, 1785.0), (2323.0, 1785.0)],  # gap of 3 to next
+            [(2326.0, 1785.0), (2363.0, 1785.0)],  # gap of 29 to next (after reorder)
+            [(2042.0, 1785.0), (2163.0, 1785.0)],  # gap of 29 to next
+            [(2192.0, 1785.0), (2201.0, 1785.0)],  # gap of 11 to next
+            [(2212.0, 1785.0), (2214.0, 1785.0)],  # gap of 28 to next (after reorder)
+            [(2392.0, 1785.0), (2403.0, 1785.0)],  # gap of 6 to next
+            [(2409.0, 1785.0), (2414.0, 1785.0)],  # gap of 28 to next
+            [(2442.0, 1785.0), (2563.0, 1785.0)],
+        ]
+        
+        merged = merge_collinear(segments, merge_dist_tol=50.0, angle_tol=15.0)
+        
+        print(f"\nNumber of merged paths: {len(merged)}")
+        for i, path in enumerate(merged):
+            x_coords = [pt[0] for pt in path]
+            print(f"Path {i}: {len(path)} points, x-range: {min(x_coords):.0f} to {max(x_coords):.0f}")
+        
+        # All segments are collinear and within merge distance, should merge into 1 path
+        self.assertEqual(len(merged), 1,
+                        f"Expected 1 merged path, got {len(merged)}")
+        
+        # The merged path should span from 2042 to 2563
+        path = merged[0]
+        x_coords = [pt[0] for pt in path]
+        self.assertAlmostEqual(min(x_coords), 2042.0, delta=1.0)
+        self.assertAlmostEqual(max(x_coords), 2563.0, delta=1.0)
+        
+        # All points should be at y=1785
+        y_coords = [pt[1] for pt in path]
+        self.assertTrue(all(abs(y - 1785.0) < 0.1 for y in y_coords),
+                       f"All points should be at y=1785, got y-coords: {set(y_coords)}")
+
     def test_large_dataset_performance(self):
         """Test case 10: Large dataset performance"""
         # Test case 10: Large dataset performance
