@@ -75,10 +75,9 @@ docker run --rm -i -v "$(pwd -W)":/data vectorize-magick-autotrace bash -l <<EOF
     magick \
         -density 200.02 \
         pdf:${INPUT_FILE}[${PAGE_NUMBER}] \
-        -white-threshold 85% \
         -crop 6000x4000+620+280 +repage \
-        -statistic median 3x3 \
         +dither -remap out/palette.png \
+        -statistic median 3x3 \
         out/page.png
 
     echo "Extracting black lines..."
