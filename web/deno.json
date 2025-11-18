@@ -2,7 +2,8 @@
     "nodeModulesDir": "auto",
     "tasks": {
         "build": "deno run -A npm:esbuild browser-app/main.ts --bundle --format=esm --outfile=browser-app/bundle.js --platform=browser",
-        "dev": "deno task build && deno run --allow-net --allow-read --allow-write --watch browser-app/server.ts",
+        "build:watch": "deno run -A npm:esbuild browser-app/main.ts --bundle --format=esm --outfile=browser-app/bundle.js --platform=browser --watch",
+        "dev": "deno task build:watch & deno run --allow-net --allow-read --allow-write --watch browser-app/server.ts",
         "start": "deno run --allow-net --allow-read browser-app/server.ts",
         "cli": "deno run --allow-read --allow-write --allow-env --allow-run --unstable-webgpu deno-app/cli.ts",
         "test": "deno test --allow-read --allow-write"

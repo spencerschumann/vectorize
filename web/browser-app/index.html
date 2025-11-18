@@ -15,6 +15,137 @@
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: #f5f5f5;
+            margin: 0;
+            display: flex;
+            height: 100vh;
+        }
+
+        .sidebar {
+            width: 300px;
+            background: white;
+            border-right: 1px solid #ddd;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .sidebar-header {
+            padding: 1rem;
+            border-bottom: 1px solid #ddd;
+            background: #f9fafb;
+        }
+
+        .sidebar-header h2 {
+            margin: 0 0 0.5rem 0;
+            font-size: 1.1rem;
+        }
+
+        .sidebar-actions {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .sidebar-actions button {
+            flex: 1;
+            padding: 0.5rem;
+            font-size: 0.9rem;
+            background: #4f46e5;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .sidebar-actions button:hover {
+            background: #4338ca;
+        }
+
+        .sidebar-actions button.danger {
+            background: #ef4444;
+        }
+
+        .sidebar-actions button.danger:hover {
+            background: #dc2626;
+        }
+
+        .file-list {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .file-item {
+            padding: 0.75rem;
+            border-bottom: 1px solid #f0f0f0;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            transition: background 0.2s;
+        }
+
+        .file-item:hover {
+            background: #f9fafb;
+        }
+
+        .file-item.active {
+            background: #eef2ff;
+            border-left: 3px solid #4f46e5;
+        }
+
+        .file-thumbnail {
+            width: 48px;
+            height: 48px;
+            border-radius: 4px;
+            background: #f0f0f0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            flex-shrink: 0;
+        }
+
+        .file-thumbnail img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 4px;
+        }
+
+        .file-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .file-name {
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-size: 0.9rem;
+        }
+
+        .file-meta {
+            font-size: 0.8rem;
+            color: #666;
+        }
+
+        .file-delete {
+            padding: 0.25rem 0.5rem;
+            font-size: 0.8rem;
+            background: #fee;
+            color: #dc2626;
+            border: 1px solid #fecaca;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .file-delete:hover {
+            background: #fecaca;
+        }
+
+        .main-content {
+            flex: 1;
+            overflow-y: auto;
             padding: 2rem;
         }
 
@@ -73,6 +204,62 @@
         .hidden {
             display: none;
         }
+
+        .controls {
+            margin: 1rem 0;
+            padding: 1rem;
+            background: #f9fafb;
+            border-radius: 4px;
+        }
+
+        .control-group {
+            margin-bottom: 1rem;
+        }
+
+        .control-group label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+
+        .control-group input,
+        .control-group select,
+        .control-group button {
+            padding: 0.5rem;
+            font-size: 1rem;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        .control-group button {
+            background: #4f46e5;
+            color: white;
+            border: none;
+            cursor: pointer;
+            margin-right: 0.5rem;
+        }
+
+        .control-group button:hover {
+            background: #4338ca;
+        }
+
+        .control-group button:disabled {
+            background: #cbd5e1;
+            cursor: not-allowed;
+        }
+
+        #previewCanvas {
+            max-width: 100%;
+            border: 1px solid #ccc;
+            cursor: crosshair;
+            margin-top: 1rem;
+        }
+
+        .crop-info {
+            margin-top: 0.5rem;
+            font-size: 0.9rem;
+            color: #666;
+        }
     </style>
     <script type="importmap">
     {
@@ -82,22 +269,63 @@
         }
     }
     </script>
+    <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.394/build/pdf.min.mjs" type="module"></script>
+    <script type="module">
+        import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.394/build/pdf.min.mjs';
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.394/build/pdf.worker.min.mjs';
+        window.pdfjsLib = pdfjsLib;
+    </script>
 </head>
 
 <body>
-    <div class="container">
-        <h1>🎨 CleanPlans Vectorizer</h1>
-        <p>WebGPU-powered image processing pipeline (TypeScript)</p>
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <h2>📁 Saved Files</h2>
+            <div class="sidebar-actions">
+                <button id="uploadBtn">Upload</button>
+                <button id="clearAllBtn" class="danger">Clear All</button>
+            </div>
+        </div>
+        <div id="fileList" class="file-list">
+            <div style="padding: 2rem; text-align: center; color: #999;">
+                No files yet<br>Upload a PDF or image
+            </div>
+        </div>
+    </div>
 
-        <div id="dropZone" class="drop-zone">
-            <p style="font-size: 1.5rem;">🖼️ Drop PNG image here</p>
-            <p>or click to browse</p>
-            <input type="file" id="fileInput" accept="image/png,image/jpeg" hidden>
+    <div class="main-content">
+        <div class="container">
+            <h1>🎨 CleanPlans Vectorizer</h1>
+            <p>WebGPU-powered image processing pipeline (TypeScript)</p>
+
+            <div id="dropZone" class="drop-zone">
+                <p style="font-size: 1.5rem;">📄 Drop PDF or PNG here</p>
+                <p>or click to browse</p>
+                <input type="file" id="fileInput" accept="application/pdf,image/png,image/jpeg" hidden>
+            </div>
+
+            <div id="controls" class="controls hidden">
+            <div class="control-group" id="pageSelectGroup" style="display: none;">
+                <label for="pageSelect">Page:</label>
+                <select id="pageSelect"></select>
+                <button id="renderPageBtn">Render Page</button>
+            </div>
+
+            <div class="control-group" id="cropGroup" style="display: none;">
+                <label>Crop Region:</label>
+                <button id="selectCropBtn">Select Crop Area</button>
+                <button id="resetCropBtn">Reset</button>
+                <button id="processBtn">Process Image</button>
+                <div class="crop-info" id="cropInfo">Click and drag on the image to select crop area</div>
+            </div>
         </div>
 
-        <div id="status" class="status"></div>
+        <canvas id="previewCanvas" class="hidden"></canvas>
+
+        <div id="status" class="status hidden"></div>
 
         <div id="results"></div>
+        </div>
     </div>
 
     <script type="module" src="/browser-app/bundle.js"></script>

@@ -28,6 +28,35 @@ function loadImageFromFile(file) {
   });
 }
 
+// src/pdf/pdf_render.ts
+async function renderPdfPage(options, backend, pdfjsLib2) {
+  const { file, pageNumber, scale = 2 } = options;
+  const loadingTask = pdfjsLib2.getDocument({ data: file });
+  const pdf = await loadingTask.promise;
+  if (pageNumber < 1 || pageNumber > pdf.numPages) {
+    throw new Error(
+      `Page ${pageNumber} out of range (1-${pdf.numPages})`
+    );
+  }
+  const page = await pdf.getPage(pageNumber);
+  const viewport = page.getViewport({ scale });
+  const canvas = backend.createCanvas(viewport.width, viewport.height);
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("Failed to get 2D context");
+  }
+  await page.render({
+    canvasContext: context,
+    viewport
+  }).promise;
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  return {
+    width: imageData.width,
+    height: imageData.height,
+    data: imageData.data
+  };
+}
+
 // src/gpu/gpu_context.ts
 var cachedContext = null;
 var isInitializing = false;
@@ -642,6 +671,109 @@ function extractBlack(img, options = {}) {
   return binary;
 }
 
+// browser-app/storage.ts
+var DB_NAME = "CleanPlansDB";
+var DB_VERSION = 1;
+var STORE_NAME = "files";
+var db = null;
+async function openDB() {
+  if (db) return db;
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      db = request.result;
+      resolve(db);
+    };
+    request.onupgradeneeded = (event) => {
+      const db2 = event.target.result;
+      if (!db2.objectStoreNames.contains(STORE_NAME)) {
+        const store = db2.createObjectStore(STORE_NAME, { keyPath: "id" });
+        store.createIndex("uploadedAt", "uploadedAt", { unique: false });
+      }
+    };
+  });
+}
+async function saveFile(file, thumbnail) {
+  const db2 = await openDB();
+  const id = crypto.randomUUID();
+  const arrayBuffer = await file.arrayBuffer();
+  const storedFile = {
+    id,
+    name: file.name,
+    type: file.type,
+    data: new Uint8Array(arrayBuffer),
+    uploadedAt: Date.now(),
+    thumbnail
+  };
+  return new Promise((resolve, reject) => {
+    const transaction = db2.transaction([STORE_NAME], "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.add(storedFile);
+    request.onsuccess = () => resolve(id);
+    request.onerror = () => reject(request.error);
+  });
+}
+async function updateFile(id, updates) {
+  const db2 = await openDB();
+  const existing = await getFile(id);
+  if (!existing) {
+    throw new Error(`File ${id} not found`);
+  }
+  const updated = { ...existing, ...updates };
+  return new Promise((resolve, reject) => {
+    const transaction = db2.transaction([STORE_NAME], "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.put(updated);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+async function getFile(id) {
+  const db2 = await openDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db2.transaction([STORE_NAME], "readonly");
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.get(id);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  });
+}
+async function listFiles() {
+  const db2 = await openDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db2.transaction([STORE_NAME], "readonly");
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.getAll();
+    request.onsuccess = () => {
+      const files = request.result;
+      files.sort((a, b) => b.uploadedAt - a.uploadedAt);
+      resolve(files);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+async function deleteFile(id) {
+  const db2 = await openDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db2.transaction([STORE_NAME], "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.delete(id);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+async function clearAllFiles() {
+  const db2 = await openDB();
+  return new Promise((resolve, reject) => {
+    const transaction = db2.transaction([STORE_NAME], "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.clear();
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
 // browser-app/main.ts
 function paletteToRGBA(palette) {
   const rgba = new Uint8ClampedArray(palette.length * 4);
@@ -655,43 +787,256 @@ function paletteToRGBA(palette) {
   return rgba;
 }
 var PALETTE_RGBA = paletteToRGBA(DEFAULT_PALETTE_16);
+var browserCanvasBackend = {
+  createCanvas(width, height) {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    return canvas;
+  }
+};
+var currentFileId = null;
+var currentFile = null;
+var currentPdfData = null;
+var currentImage = null;
+var pdfPageCount = 0;
+var cropRegion = null;
+var isSelectingCrop = false;
+var cropStart = null;
 var dropZone = document.getElementById("dropZone");
 var fileInput = document.getElementById("fileInput");
 var statusEl = document.getElementById("status");
 var resultsEl = document.getElementById("results");
-dropZone?.addEventListener("click", () => fileInput?.click());
-dropZone?.addEventListener("dragover", (e) => {
+var controlsEl = document.getElementById("controls");
+var pageSelectGroup = document.getElementById("pageSelectGroup");
+var pageSelect = document.getElementById("pageSelect");
+var renderPageBtn = document.getElementById("renderPageBtn");
+var cropGroup = document.getElementById("cropGroup");
+var selectCropBtn = document.getElementById("selectCropBtn");
+var resetCropBtn = document.getElementById("resetCropBtn");
+var processBtn = document.getElementById("processBtn");
+var cropInfo = document.getElementById("cropInfo");
+var previewCanvas = document.getElementById("previewCanvas");
+var fileListEl = document.getElementById("fileList");
+var uploadBtn = document.getElementById("uploadBtn");
+var clearAllBtn = document.getElementById("clearAllBtn");
+dropZone.addEventListener("click", () => fileInput.click());
+uploadBtn.addEventListener("click", () => fileInput.click());
+dropZone.addEventListener("dragover", (e) => {
   e.preventDefault();
   dropZone.classList.add("drag-over");
 });
-dropZone?.addEventListener("dragleave", () => {
+dropZone.addEventListener("dragleave", () => {
   dropZone.classList.remove("drag-over");
 });
-dropZone?.addEventListener("drop", (e) => {
+dropZone.addEventListener("drop", (e) => {
   e.preventDefault();
   dropZone.classList.remove("drag-over");
   const files = e.dataTransfer?.files;
   if (files && files.length > 0) {
-    processImage(files[0]);
+    handleFileLoad(files[0]);
   }
 });
-fileInput?.addEventListener("change", (e) => {
+fileInput.addEventListener("change", (e) => {
   const files = e.target.files;
   if (files && files.length > 0) {
-    processImage(files[0]);
+    handleFileLoad(files[0]);
   }
 });
-async function processImage(file) {
+renderPageBtn.addEventListener("click", async () => {
+  const pageNum = parseInt(pageSelect.value);
+  await renderPdfPageToCanvas(pageNum);
+});
+selectCropBtn.addEventListener("click", () => {
+  isSelectingCrop = true;
+  previewCanvas.style.cursor = "crosshair";
+  cropInfo.textContent = "Click and drag to select crop area";
+});
+resetCropBtn.addEventListener("click", () => {
+  cropRegion = null;
+  isSelectingCrop = false;
+  previewCanvas.style.cursor = "default";
+  redrawPreview();
+  cropInfo.textContent = "No crop selected - full image will be processed";
+});
+processBtn.addEventListener("click", () => {
+  if (currentImage) {
+    processImagePipeline(currentImage);
+  }
+});
+previewCanvas.addEventListener("mousedown", (e) => {
+  if (!isSelectingCrop) return;
+  const rect = previewCanvas.getBoundingClientRect();
+  const scaleX = previewCanvas.width / rect.width;
+  const scaleY = previewCanvas.height / rect.height;
+  cropStart = {
+    x: (e.clientX - rect.left) * scaleX,
+    y: (e.clientY - rect.top) * scaleY
+  };
+});
+previewCanvas.addEventListener("mousemove", (e) => {
+  if (!isSelectingCrop || !cropStart) return;
+  const rect = previewCanvas.getBoundingClientRect();
+  const scaleX = previewCanvas.width / rect.width;
+  const scaleY = previewCanvas.height / rect.height;
+  const currentX = (e.clientX - rect.left) * scaleX;
+  const currentY = (e.clientY - rect.top) * scaleY;
+  const x = Math.min(cropStart.x, currentX);
+  const y = Math.min(cropStart.y, currentY);
+  const width = Math.abs(currentX - cropStart.x);
+  const height = Math.abs(currentY - cropStart.y);
+  cropRegion = { x, y, width, height };
+  redrawPreview();
+});
+previewCanvas.addEventListener("mouseup", () => {
+  if (isSelectingCrop && cropStart) {
+    isSelectingCrop = false;
+    cropStart = null;
+    previewCanvas.style.cursor = "default";
+    if (cropRegion) {
+      cropInfo.textContent = `Crop: ${Math.round(cropRegion.width)}\xD7${Math.round(cropRegion.height)} at (${Math.round(cropRegion.x)}, ${Math.round(cropRegion.y)})`;
+    }
+  }
+});
+async function handleFileLoad(file) {
   try {
+    currentFile = file;
     showStatus(`Loading: ${file.name}...`);
-    const start = performance.now();
-    const image = await loadImageFromFile(file);
-    const loadTime = performance.now() - start;
-    showStatus(`Loaded: ${image.width}x${image.height} (${loadTime.toFixed(1)}ms)`);
-    displayImage(image, "Original");
+    resultsEl.innerHTML = "";
+    if (!currentFileId) {
+      try {
+        currentFileId = await saveFile(file);
+        console.log(`File saved with ID: ${currentFileId}`);
+        await refreshFileList();
+      } catch (err) {
+        console.error("Error saving file:", err);
+      }
+    }
+    if (file.type === "application/pdf") {
+      await handlePdfFile(file);
+    } else {
+      await handleImageFile(file);
+    }
+    if (currentImage && currentFileId) {
+      const thumbnail = generateThumbnail(currentImage);
+      const stored = await getFile(currentFileId);
+      if (stored && !stored.thumbnail) {
+        await updateFile(currentFileId, { thumbnail });
+        await refreshFileList();
+      }
+    }
+  } catch (error) {
+    const err = error;
+    showStatus(`Error: ${err.message}`, true);
+    console.error(error);
+  }
+}
+async function handlePdfFile(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const copy = new Uint8Array(arrayBuffer.byteLength);
+  copy.set(new Uint8Array(arrayBuffer));
+  currentPdfData = copy;
+  const initialCopy = currentPdfData.slice();
+  const loadingTask = pdfjsLib.getDocument({ data: initialCopy });
+  const pdf = await loadingTask.promise;
+  pdfPageCount = pdf.numPages;
+  showStatus(`PDF loaded: ${pdfPageCount} pages`);
+  pageSelect.innerHTML = "";
+  for (let i = 1; i <= pdfPageCount; i++) {
+    const option = document.createElement("option");
+    option.value = i.toString();
+    option.textContent = `Page ${i}`;
+    pageSelect.appendChild(option);
+  }
+  controlsEl.classList.remove("hidden");
+  pageSelectGroup.style.display = "block";
+  cropGroup.style.display = "none";
+  await renderPdfPageToCanvas(1);
+}
+async function renderPdfPageToCanvas(pageNum) {
+  if (!currentPdfData) return;
+  showStatus(`Rendering page ${pageNum}...`);
+  const start = performance.now();
+  const pdfDataCopy = currentPdfData.slice();
+  const image = await renderPdfPage(
+    { file: pdfDataCopy, pageNumber: pageNum, scale: 2 },
+    browserCanvasBackend,
+    pdfjsLib
+  );
+  const loadTime = performance.now() - start;
+  currentImage = image;
+  showStatus(`Page ${pageNum} rendered: ${image.width}\xD7${image.height} (${loadTime.toFixed(1)}ms)`);
+  previewCanvas.width = image.width;
+  previewCanvas.height = image.height;
+  const ctx = previewCanvas.getContext("2d");
+  if (ctx) {
+    const imageData = new ImageData(
+      new Uint8ClampedArray(image.data),
+      image.width,
+      image.height
+    );
+    ctx.putImageData(imageData, 0, 0);
+  }
+  previewCanvas.classList.remove("hidden");
+  cropGroup.style.display = "block";
+  cropRegion = null;
+  cropInfo.textContent = "Click 'Select Crop Area' to choose a region, or 'Process Image' for full image";
+}
+async function handleImageFile(file) {
+  const start = performance.now();
+  const image = await loadImageFromFile(file);
+  const loadTime = performance.now() - start;
+  currentImage = image;
+  showStatus(`Loaded: ${image.width}\xD7${image.height} (${loadTime.toFixed(1)}ms)`);
+  previewCanvas.width = image.width;
+  previewCanvas.height = image.height;
+  const ctx = previewCanvas.getContext("2d");
+  if (ctx) {
+    const imageData = new ImageData(
+      new Uint8ClampedArray(image.data),
+      image.width,
+      image.height
+    );
+    ctx.putImageData(imageData, 0, 0);
+  }
+  previewCanvas.classList.remove("hidden");
+  controlsEl.classList.remove("hidden");
+  pageSelectGroup.style.display = "none";
+  cropGroup.style.display = "block";
+  cropRegion = null;
+  cropInfo.textContent = "Click 'Select Crop Area' to choose a region, or 'Process Image' for full image";
+}
+function redrawPreview() {
+  if (!currentImage) return;
+  const ctx = previewCanvas.getContext("2d");
+  if (!ctx) return;
+  const imageData = new ImageData(
+    new Uint8ClampedArray(currentImage.data),
+    currentImage.width,
+    currentImage.height
+  );
+  ctx.putImageData(imageData, 0, 0);
+  if (cropRegion) {
+    ctx.strokeStyle = "#4f46e5";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(cropRegion.x, cropRegion.y, cropRegion.width, cropRegion.height);
+  }
+}
+async function processImagePipeline(image) {
+  try {
+    resultsEl.innerHTML = "";
+    let processImage = image;
+    if (cropRegion && cropRegion.width > 0 && cropRegion.height > 0) {
+      showStatus("Cropping image...");
+      processImage = cropImage(image, cropRegion);
+      displayImage(processImage, "Cropped");
+    } else {
+      displayImage(image, "Original");
+    }
     showStatus("Initializing WebGPU...");
+    statusEl.classList.remove("hidden");
     const t1 = performance.now();
-    const thresholded = await whiteThresholdGPU(image, 0.85);
+    const thresholded = await whiteThresholdGPU(processImage, 0.85);
     const t2 = performance.now();
     showStatus(`White threshold: ${(t2 - t1).toFixed(1)}ms`);
     displayImage(thresholded, "1. White Threshold");
@@ -714,6 +1059,26 @@ async function processImage(file) {
     showStatus(`Error: ${err.message}`, true);
     console.error(error);
   }
+}
+function cropImage(image, region) {
+  const x = Math.max(0, Math.floor(region.x));
+  const y = Math.max(0, Math.floor(region.y));
+  const width = Math.min(image.width - x, Math.floor(region.width));
+  const height = Math.min(image.height - y, Math.floor(region.height));
+  const croppedData = new Uint8ClampedArray(width * height * 4);
+  for (let row = 0; row < height; row++) {
+    const srcOffset = ((y + row) * image.width + x) * 4;
+    const dstOffset = row * width * 4;
+    croppedData.set(
+      image.data.subarray(srcOffset, srcOffset + width * 4),
+      dstOffset
+    );
+  }
+  return {
+    width,
+    height,
+    data: croppedData
+  };
 }
 function displayImage(image, label) {
   const canvas = document.createElement("canvas");
@@ -741,9 +1106,122 @@ function displayImage(image, label) {
   resultsEl?.appendChild(container);
 }
 function showStatus(message, isError = false) {
-  if (statusEl) {
-    statusEl.textContent = message;
-    statusEl.style.color = isError ? "#ef4444" : "#000";
+  statusEl.textContent = message;
+  statusEl.classList.remove("hidden");
+  if (isError) {
+    statusEl.classList.add("error");
+  } else {
+    statusEl.classList.remove("error");
   }
   console.log(message);
 }
+uploadBtn.addEventListener("click", () => fileInput.click());
+clearAllBtn.addEventListener("click", async () => {
+  if (confirm("Delete all saved files?")) {
+    await clearAllFiles();
+    await refreshFileList();
+    showStatus("All files cleared");
+  }
+});
+async function refreshFileList() {
+  const files = await listFiles();
+  console.log(`Refreshing file list: ${files.length} files`);
+  if (files.length === 0) {
+    fileListEl.innerHTML = `
+      <div style="padding: 2rem; text-align: center; color: #999;">
+        No files yet<br>Upload a PDF or image
+      </div>
+    `;
+    return;
+  }
+  fileListEl.innerHTML = "";
+  for (const file of files) {
+    const item = document.createElement("div");
+    item.className = "file-item";
+    if (file.id === currentFileId) {
+      item.classList.add("active");
+    }
+    const thumbnail = document.createElement("div");
+    thumbnail.className = "file-thumbnail";
+    if (file.thumbnail) {
+      const img = document.createElement("img");
+      img.src = file.thumbnail;
+      thumbnail.appendChild(img);
+    } else {
+      thumbnail.textContent = file.type.includes("pdf") ? "\u{1F4C4}" : "\u{1F5BC}\uFE0F";
+    }
+    const info = document.createElement("div");
+    info.className = "file-info";
+    const name = document.createElement("div");
+    name.className = "file-name";
+    name.textContent = file.name;
+    name.title = file.name;
+    const meta = document.createElement("div");
+    meta.className = "file-meta";
+    const date = new Date(file.uploadedAt);
+    const size = (file.data.length / 1024).toFixed(0);
+    meta.textContent = `${size} KB \u2022 ${date.toLocaleDateString()}`;
+    info.appendChild(name);
+    info.appendChild(meta);
+    const deleteBtn = document.createElement("button");
+    deleteBtn.className = "file-delete";
+    deleteBtn.textContent = "\xD7";
+    deleteBtn.title = "Delete file";
+    deleteBtn.onclick = async (e) => {
+      e.stopPropagation();
+      if (confirm(`Delete ${file.name}?`)) {
+        await deleteFile(file.id);
+        if (file.id === currentFileId) {
+          currentFileId = null;
+          currentPdfData = null;
+          currentImage = null;
+        }
+        await refreshFileList();
+        showStatus(`Deleted ${file.name}`);
+      }
+    };
+    item.appendChild(thumbnail);
+    item.appendChild(info);
+    item.appendChild(deleteBtn);
+    item.onclick = () => loadStoredFile(file.id);
+    fileListEl.appendChild(item);
+  }
+}
+async function loadStoredFile(id) {
+  const stored = await getFile(id);
+  if (!stored) {
+    showStatus("File not found", true);
+    return;
+  }
+  currentFileId = id;
+  const data = new Uint8Array(stored.data);
+  const blob = new Blob([data], { type: stored.type });
+  const file = new File([blob], stored.name, { type: stored.type });
+  await refreshFileList();
+  await handleFileLoad(file);
+}
+function generateThumbnail(image) {
+  const maxSize = 48;
+  const scale = Math.min(maxSize / image.width, maxSize / image.height);
+  const thumbWidth = Math.floor(image.width * scale);
+  const thumbHeight = Math.floor(image.height * scale);
+  const canvas = document.createElement("canvas");
+  canvas.width = thumbWidth;
+  canvas.height = thumbHeight;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+  const tempCanvas = document.createElement("canvas");
+  tempCanvas.width = image.width;
+  tempCanvas.height = image.height;
+  const tempCtx = tempCanvas.getContext("2d");
+  if (!tempCtx) return "";
+  const imageData = new ImageData(
+    new Uint8ClampedArray(image.data),
+    image.width,
+    image.height
+  );
+  tempCtx.putImageData(imageData, 0, 0);
+  ctx.drawImage(tempCanvas, 0, 0, thumbWidth, thumbHeight);
+  return canvas.toDataURL("image/jpeg", 0.7);
+}
+refreshFileList();

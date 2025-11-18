@@ -44,7 +44,7 @@ export interface ImageDataLike {
  * PDF rendering options
  */
 export interface PDFRenderOptions {
-    file: ArrayBuffer;
+    file: ArrayBuffer | Uint8Array;
     pageNumber: number;
     dpi?: number;
     scale?: number;
