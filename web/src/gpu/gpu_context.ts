@@ -39,6 +39,26 @@ export async function getGPUContext(): Promise<GPUContext> {
 
         const device = await adapter.requestDevice();
         
+        // Set up error handling
+        device.addEventListener('uncapturederror', (event: Event) => {
+            const gpuEvent = event as GPUUncapturedErrorEvent;
+            console.error('WebGPU uncaptured error:');
+            console.error('  Type:', gpuEvent.error.constructor.name);
+            console.error('  Message:', gpuEvent.error.message);
+            console.error('  Full error:', gpuEvent.error);
+        });
+        
+        // Log adapter limits for debugging
+        console.log("WebGPU Adapter Limits:");
+        console.log(`  maxStorageBufferBindingSize: ${adapter.limits.maxStorageBufferBindingSize}`);
+        console.log(`  maxBufferSize: ${adapter.limits.maxBufferSize}`);
+        console.log(`  maxComputeWorkgroupStorageSize: ${adapter.limits.maxComputeWorkgroupStorageSize}`);
+        console.log(`  maxComputeInvocationsPerWorkgroup: ${adapter.limits.maxComputeInvocationsPerWorkgroup}`);
+        console.log(`  maxComputeWorkgroupsPerDimension: ${adapter.limits.maxComputeWorkgroupsPerDimension}`);
+        console.log(`  maxComputeWorkgroupSizeX: ${adapter.limits.maxComputeWorkgroupSizeX}`);
+        console.log(`  maxComputeWorkgroupSizeY: ${adapter.limits.maxComputeWorkgroupSizeY}`);
+        console.log(`  maxComputeWorkgroupSizeZ: ${adapter.limits.maxComputeWorkgroupSizeZ}`);
+        
         cachedContext = { device, adapter };
         isInitializing = false;
         return cachedContext;

@@ -126,10 +126,52 @@ Examples:
             }
 
             console.log("2. White threshold (GPU, 85%)...");
+            
+            // Debug: histogram of INPUT
+            console.log(`   Debug - INPUT histogram (top 16)...`);
+            const inputHistogram = new Map<string, number>();
+            for (let i = 0; i < processedImage.data.length; i += 4) {
+                const r = processedImage.data[i];
+                const g = processedImage.data[i + 1];
+                const b = processedImage.data[i + 2];
+                const a = processedImage.data[i + 3];
+                const key = `${r},${g},${b},${a}`;
+                inputHistogram.set(key, (inputHistogram.get(key) || 0) + 1);
+            }
+            const inputSorted = Array.from(inputHistogram.entries())
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 16);
+            for (const [color, count] of inputSorted) {
+                const [r, g, b, a] = color.split(',');
+                console.log(`     R=${r} G=${g} B=${b} A=${a}: ${count} pixels`);
+            }
+            
             start = performance.now();
             const thresholded = await whiteThresholdGPU(processedImage, 0.85);
             stepTime = performance.now() - start;
             console.log(`   Done (${stepTime.toFixed(1)}ms)`);
+            
+            // Debug: build histogram of pixel values
+            console.log(`   Debug - OUTPUT histogram (top 16)...`);
+            const histogram = new Map<string, number>();
+            for (let i = 0; i < thresholded.data.length; i += 4) {
+                const r = thresholded.data[i];
+                const g = thresholded.data[i + 1];
+                const b = thresholded.data[i + 2];
+                const a = thresholded.data[i + 3];
+                const key = `${r},${g},${b},${a}`;
+                histogram.set(key, (histogram.get(key) || 0) + 1);
+            }
+            
+            // Sort by count and show top 16
+            const sorted = Array.from(histogram.entries())
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 16);
+            console.log(`   Top 16 most common pixel values:`);
+            for (const [color, count] of sorted) {
+                const [r, g, b, a] = color.split(',');
+                console.log(`     R=${r} G=${g} B=${b} A=${a}: ${count} pixels`);
+            }
             
             // Save white thresholded image
             start = performance.now();

@@ -74,26 +74,33 @@
             display: none;
         }
     </style>
+    <script type="importmap">
+    {
+        "imports": {
+            "@std/": "https://deno.land/std@0.224.0/",
+            "pngjs": "https://esm.sh/pngjs@7.0.0"
+        }
+    }
+    </script>
 </head>
 
 <body>
     <div class="container">
         <h1>🎨 CleanPlans Vectorizer</h1>
-        <p>WebGPU-powered PDF to vector conversion (TypeScript + Deno)</p>
+        <p>WebGPU-powered image processing pipeline (TypeScript)</p>
 
         <div id="dropZone" class="drop-zone">
-            <p style="font-size: 1.5rem;">📄 Drop PDF here</p>
+            <p style="font-size: 1.5rem;">🖼️ Drop PNG image here</p>
             <p>or click to browse</p>
-            <input type="file" id="fileInput" accept="application/pdf" hidden>
+            <input type="file" id="fileInput" accept="image/png,image/jpeg" hidden>
         </div>
 
-        <div id="status" class="status hidden"></div>
+        <div id="status" class="status"></div>
 
-        <canvas id="canvas" class="hidden"></canvas>
+        <div id="results"></div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.0.379/build/pdf.min.js"></script>
-    <script type="module" src="./main.ts"></script>
+    <script type="module" src="/browser-app/bundle.js"></script>
 </body>
 
 </html>
