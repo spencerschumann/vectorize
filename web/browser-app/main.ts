@@ -1,4 +1,4 @@
-// Browser application entry point
+// Browser application entry point - New UI
 import { loadImageFromFile } from "../src/pdf/image_load.ts";
 import { renderPdfPage } from "../src/pdf/pdf_render.ts";
 import type { CanvasBackend } from "../src/pdf/pdf_render.ts";
@@ -15,10 +15,10 @@ function paletteToRGBA(palette: Uint32Array): Uint8ClampedArray {
   const rgba = new Uint8ClampedArray(palette.length * 4);
   for (let i = 0; i < palette.length; i++) {
     const color = palette[i];
-    rgba[i * 4] = (color >> 24) & 0xff;     // R
-    rgba[i * 4 + 1] = (color >> 16) & 0xff; // G
-    rgba[i * 4 + 2] = (color >> 8) & 0xff;  // B
-    rgba[i * 4 + 3] = color & 0xff;         // A
+    rgba[i * 4] = (color >> 24) & 0xff;
+    rgba[i * 4 + 1] = (color >> 16) & 0xff;
+    rgba[i * 4 + 2] = (color >> 8) & 0xff;
+    rgba[i * 4 + 3] = color & 0xff;
   }
   return rgba;
 }
@@ -35,143 +35,283 @@ const browserCanvasBackend: CanvasBackend = {
   },
 };
 
-// Global state
+// Declare global pdfjsLib from CDN script
+// deno-lint-ignore no-explicit-any
+declare const pdfjsLib: any;
+
+// UI State
+type AppMode = "upload" | "pageSelection" | "crop";
+let currentMode: AppMode = "upload";
 let currentFileId: string | null = null;
 let currentFile: File | null = null;
 let currentPdfData: Uint8Array | null = null;
 let currentImage: RGBAImage | null = null;
 let pdfPageCount = 0;
-let cropRegion: { x: number; y: number; width: number; height: number } | null = null;
-let isSelectingCrop = false;
-let cropStart: { x: number; y: number } | null = null;
 
-// DOM elements
-const dropZone = document.getElementById("dropZone") as HTMLDivElement;
-const fileInput = document.getElementById("fileInput") as HTMLInputElement;
-const statusEl = document.getElementById("status") as HTMLDivElement;
-const resultsEl = document.getElementById("results") as HTMLDivElement;
-const controlsEl = document.getElementById("controls") as HTMLDivElement;
-const pageSelectGroup = document.getElementById("pageSelectGroup") as HTMLDivElement;
-const pageSelect = document.getElementById("pageSelect") as HTMLSelectElement;
-const renderPageBtn = document.getElementById("renderPageBtn") as HTMLButtonElement;
-const cropGroup = document.getElementById("cropGroup") as HTMLDivElement;
-const selectCropBtn = document.getElementById("selectCropBtn") as HTMLButtonElement;
-const resetCropBtn = document.getElementById("resetCropBtn") as HTMLButtonElement;
-const processBtn = document.getElementById("processBtn") as HTMLButtonElement;
-const cropInfo = document.getElementById("cropInfo") as HTMLDivElement;
-const previewCanvas = document.getElementById("previewCanvas") as HTMLCanvasElement;
+// Canvas/Viewport State
+let zoom = 1.0;
+let panX = 0;
+let panY = 0;
+let isPanning = false;
+let isCropping = false;
+let cropStart: { x: number; y: number } | null = null;
+let cropRegion: { x: number; y: number; width: number; height: number } | null = null;
+let lastPanX = 0;
+let lastPanY = 0;
+
+// DOM Elements
+const sidebar = document.getElementById("sidebar") as HTMLDivElement;
+const sidebarToggle = document.getElementById("sidebarToggle") as HTMLButtonElement;
 const fileListEl = document.getElementById("fileList") as HTMLDivElement;
 const uploadBtn = document.getElementById("uploadBtn") as HTMLButtonElement;
 const clearAllBtn = document.getElementById("clearAllBtn") as HTMLButtonElement;
+const fileInput = document.getElementById("fileInput") as HTMLInputElement;
 
-// Event listeners for file input
-dropZone.addEventListener("click", () => fileInput.click());
+const uploadScreen = document.getElementById("uploadScreen") as HTMLDivElement;
+const uploadBox = document.getElementById("uploadBox") as HTMLDivElement;
+
+const pageSelectionScreen = document.getElementById("pageSelectionScreen") as HTMLDivElement;
+const pdfFileName = document.getElementById("pdfFileName") as HTMLHeadingElement;
+const pageGrid = document.getElementById("pageGrid") as HTMLDivElement;
+const backToFilesBtn = document.getElementById("backToFilesBtn") as HTMLButtonElement;
+
+const cropScreen = document.getElementById("cropScreen") as HTMLDivElement;
+const canvasContainer = document.getElementById("canvasContainer") as HTMLDivElement;
+const mainCanvas = document.getElementById("mainCanvas") as HTMLCanvasElement;
+const ctx = mainCanvas.getContext("2d")!;
+
+const zoomInBtn = document.getElementById("zoomInBtn") as HTMLButtonElement;
+const zoomOutBtn = document.getElementById("zoomOutBtn") as HTMLButtonElement;
+const zoomLevel = document.getElementById("zoomLevel") as HTMLDivElement;
+const fitToScreenBtn = document.getElementById("fitToScreenBtn") as HTMLButtonElement;
+const startCropBtn = document.getElementById("startCropBtn") as HTMLButtonElement;
+const clearCropBtn = document.getElementById("clearCropBtn") as HTMLButtonElement;
+const cropInfo = document.getElementById("cropInfo") as HTMLDivElement;
+const processBtn = document.getElementById("processBtn") as HTMLButtonElement;
+const backFromCropBtn = document.getElementById("backFromCropBtn") as HTMLButtonElement;
+const statusText = document.getElementById("statusText") as HTMLDivElement;
+const resultsPanel = document.getElementById("resultsPanel") as HTMLDivElement;
+const resultsContainer = document.getElementById("resultsContainer") as HTMLDivElement;
+
+// Initialize
+refreshFileList();
+setMode("upload");
+
+// Sidebar toggle
+sidebarToggle.addEventListener("click", () => {
+  sidebar.classList.toggle("collapsed");
+});
+
+// File management
 uploadBtn.addEventListener("click", () => fileInput.click());
-
-dropZone.addEventListener("dragover", (e) => {
-  e.preventDefault();
-  dropZone.classList.add("drag-over");
-});
-
-dropZone.addEventListener("dragleave", () => {
-  dropZone.classList.remove("drag-over");
-});
-
-dropZone.addEventListener("drop", (e) => {
-  e.preventDefault();
-  dropZone.classList.remove("drag-over");
-  const files = e.dataTransfer?.files;
-  if (files && files.length > 0) {
-    handleFileLoad(files[0]);
-  }
-});
+uploadBox.addEventListener("click", () => fileInput.click());
 
 fileInput.addEventListener("change", (e) => {
   const files = (e.target as HTMLInputElement).files;
   if (files && files.length > 0) {
-    handleFileLoad(files[0]);
+    handleFileUpload(files[0]);
   }
 });
 
-// Page selection
-renderPageBtn.addEventListener("click", async () => {
-  const pageNum = parseInt(pageSelect.value);
-  await renderPdfPageToCanvas(pageNum);
+uploadBox.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  uploadBox.classList.add("drag-over");
+});
+
+uploadBox.addEventListener("dragleave", () => {
+  uploadBox.classList.remove("drag-over");
+});
+
+uploadBox.addEventListener("drop", (e) => {
+  e.preventDefault();
+  uploadBox.classList.remove("drag-over");
+  const files = e.dataTransfer?.files;
+  if (files && files.length > 0) {
+    handleFileUpload(files[0]);
+  }
+});
+
+clearAllBtn.addEventListener("click", async () => {
+  if (confirm("Delete all saved files?")) {
+    await clearAllFiles();
+    await refreshFileList();
+    showStatus("All files cleared");
+  }
+});
+
+backToFilesBtn.addEventListener("click", () => {
+  setMode("upload");
+});
+
+backFromCropBtn.addEventListener("click", () => {
+  if (currentFile?.type === "application/pdf") {
+    setMode("pageSelection");
+  } else {
+    setMode("upload");
+  }
+});
+
+// Zoom controls
+zoomInBtn.addEventListener("click", () => {
+  zoom *= 1.2;
+  updateZoom();
+  redrawCanvas();
+});
+
+zoomOutBtn.addEventListener("click", () => {
+  zoom /= 1.2;
+  updateZoom();
+  redrawCanvas();
+});
+
+fitToScreenBtn.addEventListener("click", () => {
+  fitToScreen();
 });
 
 // Crop controls
-selectCropBtn.addEventListener("click", () => {
-  isSelectingCrop = true;
-  previewCanvas.style.cursor = "crosshair";
+startCropBtn.addEventListener("click", () => {
+  isCropping = true;
+  canvasContainer.classList.add("cropping");
+  startCropBtn.classList.add("active");
   cropInfo.textContent = "Click and drag to select crop area";
 });
 
-resetCropBtn.addEventListener("click", () => {
+clearCropBtn.addEventListener("click", () => {
   cropRegion = null;
-  isSelectingCrop = false;
-  previewCanvas.style.cursor = "default";
-  redrawPreview();
-  cropInfo.textContent = "No crop selected - full image will be processed";
+  isCropping = false;
+  canvasContainer.classList.remove("cropping");
+  startCropBtn.classList.remove("active");
+  cropInfo.textContent = "No crop selected";
+  redrawCanvas();
 });
 
 processBtn.addEventListener("click", () => {
   if (currentImage) {
-    processImagePipeline(currentImage);
+    processImage(currentImage);
   }
 });
 
-// Canvas mouse events for cropping
-previewCanvas.addEventListener("mousedown", (e) => {
-  if (!isSelectingCrop) return;
-  
-  const rect = previewCanvas.getBoundingClientRect();
-  const scaleX = previewCanvas.width / rect.width;
-  const scaleY = previewCanvas.height / rect.height;
-  
-  cropStart = {
-    x: (e.clientX - rect.left) * scaleX,
-    y: (e.clientY - rect.top) * scaleY,
-  };
+// Canvas interaction
+canvasContainer.addEventListener("mousedown", (e) => {
+  if (isCropping) {
+    const rect = canvasContainer.getBoundingClientRect();
+    const x = (e.clientX - rect.left - panX) / zoom;
+    const y = (e.clientY - rect.top - panY) / zoom;
+    cropStart = { x, y };
+  } else {
+    isPanning = true;
+    lastPanX = e.clientX;
+    lastPanY = e.clientY;
+    canvasContainer.classList.add("grabbing");
+  }
 });
 
-previewCanvas.addEventListener("mousemove", (e) => {
-  if (!isSelectingCrop || !cropStart) return;
-  
-  const rect = previewCanvas.getBoundingClientRect();
-  const scaleX = previewCanvas.width / rect.width;
-  const scaleY = previewCanvas.height / rect.height;
-  
-  const currentX = (e.clientX - rect.left) * scaleX;
-  const currentY = (e.clientY - rect.top) * scaleY;
-  
-  const x = Math.min(cropStart.x, currentX);
-  const y = Math.min(cropStart.y, currentY);
-  const width = Math.abs(currentX - cropStart.x);
-  const height = Math.abs(currentY - cropStart.y);
-  
-  cropRegion = { x, y, width, height };
-  redrawPreview();
-});
-
-previewCanvas.addEventListener("mouseup", () => {
-  if (isSelectingCrop && cropStart) {
-    isSelectingCrop = false;
-    cropStart = null;
-    previewCanvas.style.cursor = "default";
+canvasContainer.addEventListener("mousemove", (e) => {
+  if (isCropping && cropStart) {
+    const rect = canvasContainer.getBoundingClientRect();
+    const x = (e.clientX - rect.left - panX) / zoom;
+    const y = (e.clientY - rect.top - panY) / zoom;
     
-    if (cropRegion) {
+    const minX = Math.min(cropStart.x, x);
+    const minY = Math.min(cropStart.y, y);
+    const maxX = Math.max(cropStart.x, x);
+    const maxY = Math.max(cropStart.y, y);
+    
+    cropRegion = {
+      x: Math.max(0, minX),
+      y: Math.max(0, minY),
+      width: Math.min(currentImage!.width - minX, maxX - minX),
+      height: Math.min(currentImage!.height - minY, maxY - minY),
+    };
+    
+    redrawCanvas();
+  } else if (isPanning) {
+    const dx = e.clientX - lastPanX;
+    const dy = e.clientY - lastPanY;
+    panX += dx;
+    panY += dy;
+    lastPanX = e.clientX;
+    lastPanY = e.clientY;
+    redrawCanvas();
+  }
+});
+
+canvasContainer.addEventListener("mouseup", () => {
+  if (isCropping && cropStart) {
+    isCropping = false;
+    cropStart = null;
+    canvasContainer.classList.remove("cropping");
+    startCropBtn.classList.remove("active");
+    
+    if (cropRegion && cropRegion.width > 0 && cropRegion.height > 0) {
       cropInfo.textContent = `Crop: ${Math.round(cropRegion.width)}×${Math.round(cropRegion.height)} at (${Math.round(cropRegion.x)}, ${Math.round(cropRegion.y)})`;
     }
   }
+  
+  if (isPanning) {
+    isPanning = false;
+    canvasContainer.classList.remove("grabbing");
+  }
 });
 
-async function handleFileLoad(file: File) {
+canvasContainer.addEventListener("mouseleave", () => {
+  isPanning = false;
+  canvasContainer.classList.remove("grabbing");
+});
+
+canvasContainer.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const delta = e.deltaY > 0 ? 0.9 : 1.1;
+  zoom *= delta;
+  updateZoom();
+  redrawCanvas();
+});
+
+// Mode management
+function setMode(mode: AppMode) {
+  console.log("setMode called:", mode);
+  currentMode = mode;
+  
+  uploadScreen.classList.remove("active");
+  pageSelectionScreen.classList.remove("active");
+  cropScreen.classList.remove("active");
+  
+  switch (mode) {
+    case "upload":
+      uploadScreen.classList.add("active");
+      console.log("Upload screen activated");
+      break;
+    case "pageSelection":
+      pageSelectionScreen.classList.add("active");
+      // Force display as a test
+      pageSelectionScreen.style.display = "flex";
+      console.log("Page selection screen activated, pageGrid children:", pageGrid.children.length);
+      console.log("pageSelectionScreen display:", globalThis.getComputedStyle(pageSelectionScreen).display);
+      console.log("pageSelectionScreen visibility:", globalThis.getComputedStyle(pageSelectionScreen).visibility);
+      break;
+    case "crop":
+      cropScreen.classList.add("active");
+      console.log("Crop screen activated");
+      break;
+  }
+}
+
+function showStatus(message: string, isError = false) {
+  statusText.textContent = message;
+  if (isError) {
+    statusText.classList.add("status-error");
+  } else {
+    statusText.classList.remove("status-error");
+  }
+  console.log(message);
+}
+
+async function handleFileUpload(file: File) {
   try {
     currentFile = file;
     showStatus(`Loading: ${file.name}...`);
-    resultsEl.innerHTML = "";
     
-    // Save to storage immediately if not already saved
+    // Save to storage if not already saved
     if (!currentFileId) {
       try {
         currentFileId = await saveFile(file);
@@ -183,140 +323,225 @@ async function handleFileLoad(file: File) {
     }
     
     if (file.type === "application/pdf") {
-      await handlePdfFile(file);
+      console.log("handleFileUpload: Detected PDF, calling loadPdf");
+      await loadPdf(file);
+      console.log("handleFileUpload: loadPdf complete, switching to pageSelection mode");
+      setMode("pageSelection");
     } else {
-      await handleImageFile(file);
-    }
-    
-    // Update thumbnail after we have the image
-    if (currentImage && currentFileId) {
-      const thumbnail = generateThumbnail(currentImage);
-      const stored = await getFile(currentFileId);
-      if (stored && !stored.thumbnail) {
-        await updateFile(currentFileId, { thumbnail });
-        await refreshFileList();
-      }
+      console.log("handleFileUpload: Detected image, loading directly");
+      const image = await loadImageFromFile(file);
+      await loadImage(image);
+      setMode("crop");
     }
   } catch (error) {
-    const err = error as Error;
-    showStatus(`Error: ${err.message}`, true);
+    showStatus(`Error: ${(error as Error).message}`, true);
     console.error(error);
   }
 }
 
-async function handlePdfFile(file: File) {
-  // Load PDF and make a copy to avoid detachment
-  const arrayBuffer = await file.arrayBuffer();
-  const copy = new Uint8Array(arrayBuffer.byteLength);
-  copy.set(new Uint8Array(arrayBuffer));
-  currentPdfData = copy;
-  
-  // Use a copy for getDocument to avoid detaching currentPdfData
-  const initialCopy = currentPdfData.slice();
-  
-  // @ts-ignore - pdfjsLib is loaded from CDN
-  const loadingTask = pdfjsLib.getDocument({ data: initialCopy });
-  const pdf = await loadingTask.promise;
-  pdfPageCount = pdf.numPages;
-  
-  showStatus(`PDF loaded: ${pdfPageCount} pages`);
-  
-  // Populate page selector
-  pageSelect.innerHTML = "";
-  for (let i = 1; i <= pdfPageCount; i++) {
-    const option = document.createElement("option");
-    option.value = i.toString();
-    option.textContent = `Page ${i}`;
-    pageSelect.appendChild(option);
+async function loadPdf(file: File) {
+  try {
+    console.log("loadPdf: Starting to load", file.name);
+    const arrayBuffer = await file.arrayBuffer();
+    console.log("loadPdf: Got arrayBuffer, length:", arrayBuffer.byteLength);
+    const copy = new Uint8Array(arrayBuffer.byteLength);
+    copy.set(new Uint8Array(arrayBuffer));
+    currentPdfData = copy;
+    console.log("loadPdf: Created copy", copy.length);
+    
+    const initialCopy = currentPdfData.slice();
+    console.log("loadPdf: Calling getDocument");
+    const loadingTask = pdfjsLib.getDocument({ data: initialCopy });
+    const pdf = await loadingTask.promise;
+    pdfPageCount = pdf.numPages;
+    console.log("loadPdf: PDF loaded, pages:", pdfPageCount);
+    
+    showStatus(`PDF loaded: ${pdfPageCount} pages`);
+    console.log("loadPdf: About to set pdfFileName, element:", pdfFileName);
+    try {
+      pdfFileName.textContent = file.name;
+      console.log("loadPdf: pdfFileName set successfully");
+    } catch (e) {
+      console.error("loadPdf: Error setting pdfFileName:", e);
+    }
+    console.log("loadPdf: pdfFileName set, about to generate thumbnails");
+    
+    // Generate page thumbnails
+    console.log("loadPdf: Generating page thumbnails, clearing pageGrid");
+    console.log("loadPdf: pageGrid element:", pageGrid);
+    pageGrid.innerHTML = "";
+    console.log("loadPdf: pageGrid cleared, adding", pdfPageCount, "cards");
+    for (let i = 1; i <= pdfPageCount; i++) {
+      const card = document.createElement("div");
+      card.className = "page-card";
+      
+      const imageDiv = document.createElement("div");
+      imageDiv.className = "page-card-image";
+      imageDiv.textContent = "📄";
+      
+      const label = document.createElement("div");
+      label.className = "page-card-label";
+      label.textContent = `Page ${i}`;
+      
+      card.appendChild(imageDiv);
+      card.appendChild(label);
+      card.addEventListener("click", () => {
+        // Add loading state immediately
+        card.style.opacity = "0.5";
+        card.style.pointerEvents = "none";
+        selectPdfPage(i);
+      });
+      
+      pageGrid.appendChild(card);
+      
+      // Generate thumbnail asynchronously
+      generatePageThumbnail(i, imageDiv);
+    }
+  } catch (error) {
+    console.error("loadPdf error:", error);
+    showStatus(`PDF load error: ${(error as Error).message}`, true);
+    throw error;
   }
-  
-  // Show controls
-  controlsEl.classList.remove("hidden");
-  pageSelectGroup.style.display = "block";
-  cropGroup.style.display = "none";
-  
-  // Render first page
-  await renderPdfPageToCanvas(1);
 }
 
-async function renderPdfPageToCanvas(pageNum: number) {
-  if (!currentPdfData) return;
+async function generatePageThumbnail(pageNum: number, container: HTMLElement) {
+  try {
+    if (!currentPdfData) return;
+    
+    const pdfDataCopy = currentPdfData.slice();
+    const image = await renderPdfPage(
+      { file: pdfDataCopy, pageNumber: pageNum, scale: 0.8 },
+      browserCanvasBackend,
+      pdfjsLib,
+    );
+    
+    // Set the container's aspect ratio based on actual page dimensions
+    const aspectRatio = image.width / image.height;
+    container.style.aspectRatio = aspectRatio.toString();
+    container.style.width = (250 * aspectRatio) + "px";
+    
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      const imageData = new ImageData(
+        new Uint8ClampedArray(image.data),
+        image.width,
+        image.height,
+      );
+      ctx.putImageData(imageData, 0, 0);
+      
+      const img = document.createElement("img");
+      img.src = canvas.toDataURL();
+      container.innerHTML = "";
+      container.appendChild(img);
+    }
+  } catch (err) {
+    console.error(`Error generating thumbnail for page ${pageNum}:`, err);
+  }
+}
+
+async function selectPdfPage(pageNum: number) {
+  try {
+    console.log("selectPdfPage: Starting, page:", pageNum);
+    if (!currentPdfData) {
+      console.error("selectPdfPage: No PDF data!");
+      showStatus("No PDF loaded", true);
+      return;
+    }
+    
+    // Switch to crop screen immediately with loading state
+    setMode("crop");
+    showStatus(`⏳ Rendering page ${pageNum} at 200 DPI...`);
+    canvasContainer.style.opacity = "0.5";
+    
+    console.log("selectPdfPage: Creating copy");
+    const pdfDataCopy = currentPdfData.slice();
+    console.log("selectPdfPage: Calling renderPdfPage");
+    // Scale 2.78 ≈ 200 DPI (72 * 2.78 ≈ 200)
+    const image = await renderPdfPage(
+      { file: pdfDataCopy, pageNumber: pageNum, scale: 2.78 },
+      browserCanvasBackend,
+      pdfjsLib,
+    );
+    console.log("selectPdfPage: Got image", image.width, "x", image.height);
+    
+    canvasContainer.style.opacity = "1";
+    await loadImage(image);
+    showStatus(`✓ Page ${pageNum} loaded: ${image.width}×${image.height}`);
+    
+    // Update thumbnail in storage
+    if (currentFileId && currentImage) {
+      const thumbnail = generateThumbnail(currentImage);
+      await updateFile(currentFileId, { thumbnail });
+      await refreshFileList();
+    }
+  } catch (error) {
+    showStatus(`Error: ${(error as Error).message}`, true);
+    console.error(error);
+  }
+}
+
+function loadImage(image: RGBAImage) {
+  currentImage = image;
   
-  showStatus(`Rendering page ${pageNum}...`);
+  // Set up canvas
+  mainCanvas.width = image.width;
+  mainCanvas.height = image.height;
   
-  const start = performance.now();
+  // Make sure canvas is visible
+  mainCanvas.style.display = "block";
+  canvasContainer.style.opacity = "1";
   
-  // Create a fresh copy for each render to avoid detachment issues
-  // Use slice() to create a true copy of the underlying buffer
-  const pdfDataCopy = currentPdfData.slice();
+  // Reset view
+  cropRegion = null;
+  cropInfo.textContent = "No crop selected";
   
-  // @ts-ignore - pdfjsLib is loaded from CDN
-  const image = await renderPdfPage(
-    { file: pdfDataCopy, pageNumber: pageNum, scale: 2.0 },
-    browserCanvasBackend,
-    pdfjsLib,
+  // Draw the image first
+  const imageData = new ImageData(
+    new Uint8ClampedArray(image.data),
+    image.width,
+    image.height,
   );
+  ctx.putImageData(imageData, 0, 0);
   
-  const loadTime = performance.now() - start;
-  currentImage = image;
+  // Then fit to screen
+  fitToScreen();
   
-  showStatus(`Page ${pageNum} rendered: ${image.width}×${image.height} (${loadTime.toFixed(1)}ms)`);
-  
-  // Display preview
-  previewCanvas.width = image.width;
-  previewCanvas.height = image.height;
-  const ctx = previewCanvas.getContext("2d");
-  if (ctx) {
-    const imageData = new ImageData(
-      new Uint8ClampedArray(image.data),
-      image.width,
-      image.height,
-    );
-    ctx.putImageData(imageData, 0, 0);
-  }
-  
-  previewCanvas.classList.remove("hidden");
-  cropGroup.style.display = "block";
-  cropRegion = null;
-  cropInfo.textContent = "Click 'Select Crop Area' to choose a region, or 'Process Image' for full image";
+  showStatus(`✓ Ready: ${image.width}×${image.height} pixels`);
 }
 
-async function handleImageFile(file: File) {
-  const start = performance.now();
-  const image = await loadImageFromFile(file);
-  const loadTime = performance.now() - start;
-  currentImage = image;
-  
-  showStatus(`Loaded: ${image.width}×${image.height} (${loadTime.toFixed(1)}ms)`);
-  
-  // Display preview
-  previewCanvas.width = image.width;
-  previewCanvas.height = image.height;
-  const ctx = previewCanvas.getContext("2d");
-  if (ctx) {
-    const imageData = new ImageData(
-      new Uint8ClampedArray(image.data),
-      image.width,
-      image.height,
-    );
-    ctx.putImageData(imageData, 0, 0);
-  }
-  
-  previewCanvas.classList.remove("hidden");
-  controlsEl.classList.remove("hidden");
-  pageSelectGroup.style.display = "none";
-  cropGroup.style.display = "block";
-  cropRegion = null;
-  cropInfo.textContent = "Click 'Select Crop Area' to choose a region, or 'Process Image' for full image";
-}
-
-function redrawPreview() {
+function fitToScreen() {
   if (!currentImage) return;
   
-  const ctx = previewCanvas.getContext("2d");
-  if (!ctx) return;
+  const containerWidth = canvasContainer.clientWidth;
+  const containerHeight = canvasContainer.clientHeight;
+  const imageWidth = currentImage.width;
+  const imageHeight = currentImage.height;
   
-  // Redraw image
+  const scaleX = containerWidth / imageWidth;
+  const scaleY = containerHeight / imageHeight;
+  zoom = Math.min(scaleX, scaleY) * 0.9; // 90% to add padding
+  
+  panX = (containerWidth - imageWidth * zoom) / 2;
+  panY = (containerHeight - imageHeight * zoom) / 2;
+  
+  updateZoom();
+  redrawCanvas();
+}
+
+function updateZoom() {
+  zoomLevel.textContent = `${Math.round(zoom * 100)}%`;
+}
+
+function redrawCanvas() {
+  if (!currentImage) return;
+  
+  // Clear
+  ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
+  
+  // Draw image
   const imageData = new ImageData(
     new Uint8ClampedArray(currentImage.data),
     currentImage.width,
@@ -327,45 +552,69 @@ function redrawPreview() {
   // Draw crop region
   if (cropRegion) {
     ctx.strokeStyle = "#4f46e5";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(cropRegion.x, cropRegion.y, cropRegion.width, cropRegion.height);
+    ctx.lineWidth = 3 / zoom; // Scale line width inversely to zoom
+    ctx.strokeRect(
+      cropRegion.x,
+      cropRegion.y,
+      cropRegion.width,
+      cropRegion.height,
+    );
+    
+    // Draw handles
+    const handleSize = 10 / zoom;
+    ctx.fillStyle = "#4f46e5";
+    const corners = [
+      [cropRegion.x, cropRegion.y],
+      [cropRegion.x + cropRegion.width, cropRegion.y],
+      [cropRegion.x, cropRegion.y + cropRegion.height],
+      [cropRegion.x + cropRegion.width, cropRegion.y + cropRegion.height],
+    ];
+    for (const [x, y] of corners) {
+      ctx.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
+    }
   }
+  
+  // Apply transform for viewport
+  mainCanvas.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  mainCanvas.style.transformOrigin = "0 0";
 }
 
-async function processImagePipeline(image: RGBAImage) {
+async function processImage(image: RGBAImage) {
   try {
-    resultsEl.innerHTML = "";
+    resultsContainer.innerHTML = "";
+    resultsPanel.classList.add("active");
     
     // Apply crop if selected
     let processImage = image;
     if (cropRegion && cropRegion.width > 0 && cropRegion.height > 0) {
       showStatus("Cropping image...");
       processImage = cropImage(image, cropRegion);
-      displayImage(processImage, "Cropped");
+      displayResult(processImage, "Cropped");
     } else {
-      displayImage(image, "Original");
+      displayResult(image, "Original");
     }
     
     // Run GPU pipeline
-    showStatus("Initializing WebGPU...");
-    statusEl.classList.remove("hidden");
-    
+    showStatus("Running white threshold...");
     const t1 = performance.now();
     const thresholded = await whiteThresholdGPU(processImage, 0.85);
     const t2 = performance.now();
     showStatus(`White threshold: ${(t2 - t1).toFixed(1)}ms`);
-    displayImage(thresholded, "1. White Threshold");
+    displayResult(thresholded, "1. White Threshold");
     
+    showStatus("Palettizing...");
     const t3 = performance.now();
     const palettized = await palettizeGPU(thresholded, PALETTE_RGBA);
     const t4 = performance.now();
     showStatus(`Palettize: ${(t4 - t3).toFixed(1)}ms`);
     
+    showStatus("Applying median filter...");
     const t5 = performance.now();
     const median = await median3x3GPU(palettized);
     const t6 = performance.now();
     showStatus(`Median filter: ${(t6 - t5).toFixed(1)}ms`);
     
+    showStatus("Extracting black...");
     const t7 = performance.now();
     const _binary = extractBlack(median);
     const t8 = performance.now();
@@ -374,8 +623,7 @@ async function processImagePipeline(image: RGBAImage) {
     const totalTime = t8 - t1;
     showStatus(`✓ Pipeline complete! Total: ${totalTime.toFixed(1)}ms`);
   } catch (error) {
-    const err = error as Error;
-    showStatus(`Error: ${err.message}`, true);
+    showStatus(`Error: ${(error as Error).message}`, true);
     console.error(error);
   }
 }
@@ -400,70 +648,71 @@ function cropImage(
     );
   }
   
-  return {
-    width,
-    height,
-    data: croppedData,
-  };
+  return { width, height, data: croppedData };
 }
 
-function displayImage(image: RGBAImage, label: string) {
+function displayResult(image: RGBAImage, label: string) {
+  const item = document.createElement("div");
+  item.className = "result-item";
+  
+  const title = document.createElement("h3");
+  title.textContent = label;
+  
   const canvas = document.createElement("canvas");
   canvas.width = image.width;
   canvas.height = image.height;
-  canvas.style.maxWidth = "100%";
-  canvas.style.border = "1px solid #ccc";
-  canvas.style.marginBottom = "1rem";
-  
   const ctx = canvas.getContext("2d");
   if (ctx) {
     const imageData = new ImageData(
       new Uint8ClampedArray(image.data),
       image.width,
-      image.height
+      image.height,
     );
     ctx.putImageData(imageData, 0, 0);
   }
   
-  const container = document.createElement("div");
-  container.style.marginBottom = "2rem";
+  const img = document.createElement("img");
+  img.src = canvas.toDataURL();
   
-  const title = document.createElement("h3");
-  title.textContent = label;
-  title.style.marginBottom = "0.5rem";
-  
-  container.appendChild(title);
-  container.appendChild(canvas);
-  
-  resultsEl?.appendChild(container);
+  item.appendChild(title);
+  item.appendChild(img);
+  resultsContainer.appendChild(item);
 }
 
-// Declare global pdfjsLib from CDN script
-// deno-lint-ignore no-explicit-any
-declare const pdfjsLib: any;
-
-function showStatus(message: string, isError: boolean = false) {
-  statusEl.textContent = message;
-  statusEl.classList.remove("hidden");
-  if (isError) {
-    statusEl.classList.add("error");
-  } else {
-    statusEl.classList.remove("error");
-  }
-  console.log(message);
+function generateThumbnail(image: RGBAImage): string {
+  const maxSize = 128; // Increased for better quality
+  const scale = Math.min(maxSize / image.width, maxSize / image.height);
+  const thumbWidth = Math.floor(image.width * scale);
+  const thumbHeight = Math.floor(image.height * scale);
+  
+  const canvas = document.createElement("canvas");
+  canvas.width = thumbWidth;
+  canvas.height = thumbHeight;
+  
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+  
+  const tempCanvas = document.createElement("canvas");
+  tempCanvas.width = image.width;
+  tempCanvas.height = image.height;
+  const tempCtx = tempCanvas.getContext("2d");
+  if (!tempCtx) return "";
+  
+  const imageData = new ImageData(
+    new Uint8ClampedArray(image.data),
+    image.width,
+    image.height,
+  );
+  tempCtx.putImageData(imageData, 0, 0);
+  
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(tempCanvas, 0, 0, thumbWidth, thumbHeight);
+  
+  return canvas.toDataURL("image/png");
 }
 
-// File storage management
-uploadBtn.addEventListener("click", () => fileInput.click());
-
-clearAllBtn.addEventListener("click", async () => {
-  if (confirm("Delete all saved files?")) {
-    await clearAllFiles();
-    await refreshFileList();
-    showStatus("All files cleared");
-  }
-});
-
+// File list management
 async function refreshFileList() {
   const files = await listFiles();
   
@@ -526,6 +775,7 @@ async function refreshFileList() {
           currentFileId = null;
           currentPdfData = null;
           currentImage = null;
+          setMode("upload");
         }
         await refreshFileList();
         showStatus(`Deleted ${file.name}`);
@@ -543,6 +793,8 @@ async function refreshFileList() {
 }
 
 async function loadStoredFile(id: string) {
+  showStatus("⏳ Loading file...");
+  
   const stored = await getFile(id);
   if (!stored) {
     showStatus("File not found", true);
@@ -550,45 +802,10 @@ async function loadStoredFile(id: string) {
   }
   
   currentFileId = id;
-  // Create a new Uint8Array from stored data to avoid type issues
   const data = new Uint8Array(stored.data);
   const blob = new Blob([data], { type: stored.type });
   const file = new File([blob], stored.name, { type: stored.type });
   
   await refreshFileList();
-  await handleFileLoad(file);
+  await handleFileUpload(file);
 }
-
-function generateThumbnail(image: RGBAImage): string {
-  const maxSize = 48;
-  const scale = Math.min(maxSize / image.width, maxSize / image.height);
-  const thumbWidth = Math.floor(image.width * scale);
-  const thumbHeight = Math.floor(image.height * scale);
-  
-  const canvas = document.createElement("canvas");
-  canvas.width = thumbWidth;
-  canvas.height = thumbHeight;
-  
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return "";
-  
-  const tempCanvas = document.createElement("canvas");
-  tempCanvas.width = image.width;
-  tempCanvas.height = image.height;
-  const tempCtx = tempCanvas.getContext("2d");
-  if (!tempCtx) return "";
-  
-  const imageData = new ImageData(
-    new Uint8ClampedArray(image.data),
-    image.width,
-    image.height,
-  );
-  tempCtx.putImageData(imageData, 0, 0);
-  
-  ctx.drawImage(tempCanvas, 0, 0, thumbWidth, thumbHeight);
-  
-  return canvas.toDataURL("image/jpeg", 0.7);
-}
-
-// Initialize file list on load
-refreshFileList();

@@ -6,13 +6,13 @@ function loadImageFromFile(file) {
       const canvas = document.createElement("canvas");
       canvas.width = img.width;
       canvas.height = img.height;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) {
+      const ctx2 = canvas.getContext("2d");
+      if (!ctx2) {
         reject(new Error("Could not get 2D context"));
         return;
       }
-      ctx.drawImage(img, 0, 0);
-      const imageData = ctx.getImageData(0, 0, img.width, img.height);
+      ctx2.drawImage(img, 0, 0);
+      const imageData = ctx2.getImageData(0, 0, img.width, img.height);
       resolve({
         width: img.width,
         height: img.height,
@@ -795,114 +795,228 @@ var browserCanvasBackend = {
     return canvas;
   }
 };
+var currentMode = "upload";
 var currentFileId = null;
 var currentFile = null;
 var currentPdfData = null;
 var currentImage = null;
 var pdfPageCount = 0;
-var cropRegion = null;
-var isSelectingCrop = false;
+var zoom = 1;
+var panX = 0;
+var panY = 0;
+var isPanning = false;
+var isCropping = false;
 var cropStart = null;
-var dropZone = document.getElementById("dropZone");
-var fileInput = document.getElementById("fileInput");
-var statusEl = document.getElementById("status");
-var resultsEl = document.getElementById("results");
-var controlsEl = document.getElementById("controls");
-var pageSelectGroup = document.getElementById("pageSelectGroup");
-var pageSelect = document.getElementById("pageSelect");
-var renderPageBtn = document.getElementById("renderPageBtn");
-var cropGroup = document.getElementById("cropGroup");
-var selectCropBtn = document.getElementById("selectCropBtn");
-var resetCropBtn = document.getElementById("resetCropBtn");
-var processBtn = document.getElementById("processBtn");
-var cropInfo = document.getElementById("cropInfo");
-var previewCanvas = document.getElementById("previewCanvas");
+var cropRegion = null;
+var lastPanX = 0;
+var lastPanY = 0;
+var sidebar = document.getElementById("sidebar");
+var sidebarToggle = document.getElementById("sidebarToggle");
 var fileListEl = document.getElementById("fileList");
 var uploadBtn = document.getElementById("uploadBtn");
 var clearAllBtn = document.getElementById("clearAllBtn");
-dropZone.addEventListener("click", () => fileInput.click());
+var fileInput = document.getElementById("fileInput");
+var uploadScreen = document.getElementById("uploadScreen");
+var uploadBox = document.getElementById("uploadBox");
+var pageSelectionScreen = document.getElementById("pageSelectionScreen");
+var pdfFileName = document.getElementById("pdfFileName");
+var pageGrid = document.getElementById("pageGrid");
+var backToFilesBtn = document.getElementById("backToFilesBtn");
+var cropScreen = document.getElementById("cropScreen");
+var canvasContainer = document.getElementById("canvasContainer");
+var mainCanvas = document.getElementById("mainCanvas");
+var ctx = mainCanvas.getContext("2d");
+var zoomInBtn = document.getElementById("zoomInBtn");
+var zoomOutBtn = document.getElementById("zoomOutBtn");
+var zoomLevel = document.getElementById("zoomLevel");
+var fitToScreenBtn = document.getElementById("fitToScreenBtn");
+var startCropBtn = document.getElementById("startCropBtn");
+var clearCropBtn = document.getElementById("clearCropBtn");
+var cropInfo = document.getElementById("cropInfo");
+var processBtn = document.getElementById("processBtn");
+var backFromCropBtn = document.getElementById("backFromCropBtn");
+var statusText = document.getElementById("statusText");
+var resultsPanel = document.getElementById("resultsPanel");
+var resultsContainer = document.getElementById("resultsContainer");
+refreshFileList();
+setMode("upload");
+sidebarToggle.addEventListener("click", () => {
+  sidebar.classList.toggle("collapsed");
+});
 uploadBtn.addEventListener("click", () => fileInput.click());
-dropZone.addEventListener("dragover", (e) => {
-  e.preventDefault();
-  dropZone.classList.add("drag-over");
-});
-dropZone.addEventListener("dragleave", () => {
-  dropZone.classList.remove("drag-over");
-});
-dropZone.addEventListener("drop", (e) => {
-  e.preventDefault();
-  dropZone.classList.remove("drag-over");
-  const files = e.dataTransfer?.files;
-  if (files && files.length > 0) {
-    handleFileLoad(files[0]);
-  }
-});
+uploadBox.addEventListener("click", () => fileInput.click());
 fileInput.addEventListener("change", (e) => {
   const files = e.target.files;
   if (files && files.length > 0) {
-    handleFileLoad(files[0]);
+    handleFileUpload(files[0]);
   }
 });
-renderPageBtn.addEventListener("click", async () => {
-  const pageNum = parseInt(pageSelect.value);
-  await renderPdfPageToCanvas(pageNum);
+uploadBox.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  uploadBox.classList.add("drag-over");
 });
-selectCropBtn.addEventListener("click", () => {
-  isSelectingCrop = true;
-  previewCanvas.style.cursor = "crosshair";
+uploadBox.addEventListener("dragleave", () => {
+  uploadBox.classList.remove("drag-over");
+});
+uploadBox.addEventListener("drop", (e) => {
+  e.preventDefault();
+  uploadBox.classList.remove("drag-over");
+  const files = e.dataTransfer?.files;
+  if (files && files.length > 0) {
+    handleFileUpload(files[0]);
+  }
+});
+clearAllBtn.addEventListener("click", async () => {
+  if (confirm("Delete all saved files?")) {
+    await clearAllFiles();
+    await refreshFileList();
+    showStatus("All files cleared");
+  }
+});
+backToFilesBtn.addEventListener("click", () => {
+  setMode("upload");
+});
+backFromCropBtn.addEventListener("click", () => {
+  if (currentFile?.type === "application/pdf") {
+    setMode("pageSelection");
+  } else {
+    setMode("upload");
+  }
+});
+zoomInBtn.addEventListener("click", () => {
+  zoom *= 1.2;
+  updateZoom();
+  redrawCanvas();
+});
+zoomOutBtn.addEventListener("click", () => {
+  zoom /= 1.2;
+  updateZoom();
+  redrawCanvas();
+});
+fitToScreenBtn.addEventListener("click", () => {
+  fitToScreen();
+});
+startCropBtn.addEventListener("click", () => {
+  isCropping = true;
+  canvasContainer.classList.add("cropping");
+  startCropBtn.classList.add("active");
   cropInfo.textContent = "Click and drag to select crop area";
 });
-resetCropBtn.addEventListener("click", () => {
+clearCropBtn.addEventListener("click", () => {
   cropRegion = null;
-  isSelectingCrop = false;
-  previewCanvas.style.cursor = "default";
-  redrawPreview();
-  cropInfo.textContent = "No crop selected - full image will be processed";
+  isCropping = false;
+  canvasContainer.classList.remove("cropping");
+  startCropBtn.classList.remove("active");
+  cropInfo.textContent = "No crop selected";
+  redrawCanvas();
 });
 processBtn.addEventListener("click", () => {
   if (currentImage) {
-    processImagePipeline(currentImage);
+    processImage(currentImage);
   }
 });
-previewCanvas.addEventListener("mousedown", (e) => {
-  if (!isSelectingCrop) return;
-  const rect = previewCanvas.getBoundingClientRect();
-  const scaleX = previewCanvas.width / rect.width;
-  const scaleY = previewCanvas.height / rect.height;
-  cropStart = {
-    x: (e.clientX - rect.left) * scaleX,
-    y: (e.clientY - rect.top) * scaleY
-  };
+canvasContainer.addEventListener("mousedown", (e) => {
+  if (isCropping) {
+    const rect = canvasContainer.getBoundingClientRect();
+    const x = (e.clientX - rect.left - panX) / zoom;
+    const y = (e.clientY - rect.top - panY) / zoom;
+    cropStart = { x, y };
+  } else {
+    isPanning = true;
+    lastPanX = e.clientX;
+    lastPanY = e.clientY;
+    canvasContainer.classList.add("grabbing");
+  }
 });
-previewCanvas.addEventListener("mousemove", (e) => {
-  if (!isSelectingCrop || !cropStart) return;
-  const rect = previewCanvas.getBoundingClientRect();
-  const scaleX = previewCanvas.width / rect.width;
-  const scaleY = previewCanvas.height / rect.height;
-  const currentX = (e.clientX - rect.left) * scaleX;
-  const currentY = (e.clientY - rect.top) * scaleY;
-  const x = Math.min(cropStart.x, currentX);
-  const y = Math.min(cropStart.y, currentY);
-  const width = Math.abs(currentX - cropStart.x);
-  const height = Math.abs(currentY - cropStart.y);
-  cropRegion = { x, y, width, height };
-  redrawPreview();
+canvasContainer.addEventListener("mousemove", (e) => {
+  if (isCropping && cropStart) {
+    const rect = canvasContainer.getBoundingClientRect();
+    const x = (e.clientX - rect.left - panX) / zoom;
+    const y = (e.clientY - rect.top - panY) / zoom;
+    const minX = Math.min(cropStart.x, x);
+    const minY = Math.min(cropStart.y, y);
+    const maxX = Math.max(cropStart.x, x);
+    const maxY = Math.max(cropStart.y, y);
+    cropRegion = {
+      x: Math.max(0, minX),
+      y: Math.max(0, minY),
+      width: Math.min(currentImage.width - minX, maxX - minX),
+      height: Math.min(currentImage.height - minY, maxY - minY)
+    };
+    redrawCanvas();
+  } else if (isPanning) {
+    const dx = e.clientX - lastPanX;
+    const dy = e.clientY - lastPanY;
+    panX += dx;
+    panY += dy;
+    lastPanX = e.clientX;
+    lastPanY = e.clientY;
+    redrawCanvas();
+  }
 });
-previewCanvas.addEventListener("mouseup", () => {
-  if (isSelectingCrop && cropStart) {
-    isSelectingCrop = false;
+canvasContainer.addEventListener("mouseup", () => {
+  if (isCropping && cropStart) {
+    isCropping = false;
     cropStart = null;
-    previewCanvas.style.cursor = "default";
-    if (cropRegion) {
+    canvasContainer.classList.remove("cropping");
+    startCropBtn.classList.remove("active");
+    if (cropRegion && cropRegion.width > 0 && cropRegion.height > 0) {
       cropInfo.textContent = `Crop: ${Math.round(cropRegion.width)}\xD7${Math.round(cropRegion.height)} at (${Math.round(cropRegion.x)}, ${Math.round(cropRegion.y)})`;
     }
   }
+  if (isPanning) {
+    isPanning = false;
+    canvasContainer.classList.remove("grabbing");
+  }
 });
-async function handleFileLoad(file) {
+canvasContainer.addEventListener("mouseleave", () => {
+  isPanning = false;
+  canvasContainer.classList.remove("grabbing");
+});
+canvasContainer.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const delta = e.deltaY > 0 ? 0.9 : 1.1;
+  zoom *= delta;
+  updateZoom();
+  redrawCanvas();
+});
+function setMode(mode) {
+  console.log("setMode called:", mode);
+  currentMode = mode;
+  uploadScreen.classList.remove("active");
+  pageSelectionScreen.classList.remove("active");
+  cropScreen.classList.remove("active");
+  switch (mode) {
+    case "upload":
+      uploadScreen.classList.add("active");
+      console.log("Upload screen activated");
+      break;
+    case "pageSelection":
+      pageSelectionScreen.classList.add("active");
+      pageSelectionScreen.style.display = "flex";
+      console.log("Page selection screen activated, pageGrid children:", pageGrid.children.length);
+      console.log("pageSelectionScreen display:", globalThis.getComputedStyle(pageSelectionScreen).display);
+      console.log("pageSelectionScreen visibility:", globalThis.getComputedStyle(pageSelectionScreen).visibility);
+      break;
+    case "crop":
+      cropScreen.classList.add("active");
+      console.log("Crop screen activated");
+      break;
+  }
+}
+function showStatus(message, isError = false) {
+  statusText.textContent = message;
+  if (isError) {
+    statusText.classList.add("status-error");
+  } else {
+    statusText.classList.remove("status-error");
+  }
+  console.log(message);
+}
+async function handleFileUpload(file) {
   try {
     currentFile = file;
     showStatus(`Loading: ${file.name}...`);
-    resultsEl.innerHTML = "";
     if (!currentFileId) {
       try {
         currentFileId = await saveFile(file);
@@ -913,103 +1027,176 @@ async function handleFileLoad(file) {
       }
     }
     if (file.type === "application/pdf") {
-      await handlePdfFile(file);
+      console.log("handleFileUpload: Detected PDF, calling loadPdf");
+      await loadPdf(file);
+      console.log("handleFileUpload: loadPdf complete, switching to pageSelection mode");
+      setMode("pageSelection");
     } else {
-      await handleImageFile(file);
-    }
-    if (currentImage && currentFileId) {
-      const thumbnail = generateThumbnail(currentImage);
-      const stored = await getFile(currentFileId);
-      if (stored && !stored.thumbnail) {
-        await updateFile(currentFileId, { thumbnail });
-        await refreshFileList();
-      }
+      console.log("handleFileUpload: Detected image, loading directly");
+      const image = await loadImageFromFile(file);
+      await loadImage(image);
+      setMode("crop");
     }
   } catch (error) {
-    const err = error;
-    showStatus(`Error: ${err.message}`, true);
+    showStatus(`Error: ${error.message}`, true);
     console.error(error);
   }
 }
-async function handlePdfFile(file) {
-  const arrayBuffer = await file.arrayBuffer();
-  const copy = new Uint8Array(arrayBuffer.byteLength);
-  copy.set(new Uint8Array(arrayBuffer));
-  currentPdfData = copy;
-  const initialCopy = currentPdfData.slice();
-  const loadingTask = pdfjsLib.getDocument({ data: initialCopy });
-  const pdf = await loadingTask.promise;
-  pdfPageCount = pdf.numPages;
-  showStatus(`PDF loaded: ${pdfPageCount} pages`);
-  pageSelect.innerHTML = "";
-  for (let i = 1; i <= pdfPageCount; i++) {
-    const option = document.createElement("option");
-    option.value = i.toString();
-    option.textContent = `Page ${i}`;
-    pageSelect.appendChild(option);
+async function loadPdf(file) {
+  try {
+    console.log("loadPdf: Starting to load", file.name);
+    const arrayBuffer = await file.arrayBuffer();
+    console.log("loadPdf: Got arrayBuffer, length:", arrayBuffer.byteLength);
+    const copy = new Uint8Array(arrayBuffer.byteLength);
+    copy.set(new Uint8Array(arrayBuffer));
+    currentPdfData = copy;
+    console.log("loadPdf: Created copy", copy.length);
+    const initialCopy = currentPdfData.slice();
+    console.log("loadPdf: Calling getDocument");
+    const loadingTask = pdfjsLib.getDocument({ data: initialCopy });
+    const pdf = await loadingTask.promise;
+    pdfPageCount = pdf.numPages;
+    console.log("loadPdf: PDF loaded, pages:", pdfPageCount);
+    showStatus(`PDF loaded: ${pdfPageCount} pages`);
+    console.log("loadPdf: About to set pdfFileName, element:", pdfFileName);
+    try {
+      pdfFileName.textContent = file.name;
+      console.log("loadPdf: pdfFileName set successfully");
+    } catch (e) {
+      console.error("loadPdf: Error setting pdfFileName:", e);
+    }
+    console.log("loadPdf: pdfFileName set, about to generate thumbnails");
+    console.log("loadPdf: Generating page thumbnails, clearing pageGrid");
+    console.log("loadPdf: pageGrid element:", pageGrid);
+    pageGrid.innerHTML = "";
+    console.log("loadPdf: pageGrid cleared, adding", pdfPageCount, "cards");
+    for (let i = 1; i <= pdfPageCount; i++) {
+      const card = document.createElement("div");
+      card.className = "page-card";
+      const imageDiv = document.createElement("div");
+      imageDiv.className = "page-card-image";
+      imageDiv.textContent = "\u{1F4C4}";
+      const label = document.createElement("div");
+      label.className = "page-card-label";
+      label.textContent = `Page ${i}`;
+      card.appendChild(imageDiv);
+      card.appendChild(label);
+      card.addEventListener("click", () => {
+        card.style.opacity = "0.5";
+        card.style.pointerEvents = "none";
+        selectPdfPage(i);
+      });
+      pageGrid.appendChild(card);
+      generatePageThumbnail(i, imageDiv);
+    }
+  } catch (error) {
+    console.error("loadPdf error:", error);
+    showStatus(`PDF load error: ${error.message}`, true);
+    throw error;
   }
-  controlsEl.classList.remove("hidden");
-  pageSelectGroup.style.display = "block";
-  cropGroup.style.display = "none";
-  await renderPdfPageToCanvas(1);
 }
-async function renderPdfPageToCanvas(pageNum) {
-  if (!currentPdfData) return;
-  showStatus(`Rendering page ${pageNum}...`);
-  const start = performance.now();
-  const pdfDataCopy = currentPdfData.slice();
-  const image = await renderPdfPage(
-    { file: pdfDataCopy, pageNumber: pageNum, scale: 2 },
-    browserCanvasBackend,
-    pdfjsLib
+async function generatePageThumbnail(pageNum, container) {
+  try {
+    if (!currentPdfData) return;
+    const pdfDataCopy = currentPdfData.slice();
+    const image = await renderPdfPage(
+      { file: pdfDataCopy, pageNumber: pageNum, scale: 0.8 },
+      browserCanvasBackend,
+      pdfjsLib
+    );
+    const aspectRatio = image.width / image.height;
+    container.style.aspectRatio = aspectRatio.toString();
+    container.style.width = 250 * aspectRatio + "px";
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx2 = canvas.getContext("2d");
+    if (ctx2) {
+      const imageData = new ImageData(
+        new Uint8ClampedArray(image.data),
+        image.width,
+        image.height
+      );
+      ctx2.putImageData(imageData, 0, 0);
+      const img = document.createElement("img");
+      img.src = canvas.toDataURL();
+      container.innerHTML = "";
+      container.appendChild(img);
+    }
+  } catch (err) {
+    console.error(`Error generating thumbnail for page ${pageNum}:`, err);
+  }
+}
+async function selectPdfPage(pageNum) {
+  try {
+    console.log("selectPdfPage: Starting, page:", pageNum);
+    if (!currentPdfData) {
+      console.error("selectPdfPage: No PDF data!");
+      showStatus("No PDF loaded", true);
+      return;
+    }
+    setMode("crop");
+    showStatus(`\u23F3 Rendering page ${pageNum} at 200 DPI...`);
+    canvasContainer.style.opacity = "0.5";
+    console.log("selectPdfPage: Creating copy");
+    const pdfDataCopy = currentPdfData.slice();
+    console.log("selectPdfPage: Calling renderPdfPage");
+    const image = await renderPdfPage(
+      { file: pdfDataCopy, pageNumber: pageNum, scale: 2.78 },
+      browserCanvasBackend,
+      pdfjsLib
+    );
+    console.log("selectPdfPage: Got image", image.width, "x", image.height);
+    canvasContainer.style.opacity = "1";
+    await loadImage(image);
+    showStatus(`\u2713 Page ${pageNum} loaded: ${image.width}\xD7${image.height}`);
+    if (currentFileId && currentImage) {
+      const thumbnail = generateThumbnail(currentImage);
+      await updateFile(currentFileId, { thumbnail });
+      await refreshFileList();
+    }
+  } catch (error) {
+    showStatus(`Error: ${error.message}`, true);
+    console.error(error);
+  }
+}
+function loadImage(image) {
+  currentImage = image;
+  mainCanvas.width = image.width;
+  mainCanvas.height = image.height;
+  mainCanvas.style.display = "block";
+  canvasContainer.style.opacity = "1";
+  cropRegion = null;
+  cropInfo.textContent = "No crop selected";
+  const imageData = new ImageData(
+    new Uint8ClampedArray(image.data),
+    image.width,
+    image.height
   );
-  const loadTime = performance.now() - start;
-  currentImage = image;
-  showStatus(`Page ${pageNum} rendered: ${image.width}\xD7${image.height} (${loadTime.toFixed(1)}ms)`);
-  previewCanvas.width = image.width;
-  previewCanvas.height = image.height;
-  const ctx = previewCanvas.getContext("2d");
-  if (ctx) {
-    const imageData = new ImageData(
-      new Uint8ClampedArray(image.data),
-      image.width,
-      image.height
-    );
-    ctx.putImageData(imageData, 0, 0);
-  }
-  previewCanvas.classList.remove("hidden");
-  cropGroup.style.display = "block";
-  cropRegion = null;
-  cropInfo.textContent = "Click 'Select Crop Area' to choose a region, or 'Process Image' for full image";
+  ctx.putImageData(imageData, 0, 0);
+  fitToScreen();
+  showStatus(`\u2713 Ready: ${image.width}\xD7${image.height} pixels`);
 }
-async function handleImageFile(file) {
-  const start = performance.now();
-  const image = await loadImageFromFile(file);
-  const loadTime = performance.now() - start;
-  currentImage = image;
-  showStatus(`Loaded: ${image.width}\xD7${image.height} (${loadTime.toFixed(1)}ms)`);
-  previewCanvas.width = image.width;
-  previewCanvas.height = image.height;
-  const ctx = previewCanvas.getContext("2d");
-  if (ctx) {
-    const imageData = new ImageData(
-      new Uint8ClampedArray(image.data),
-      image.width,
-      image.height
-    );
-    ctx.putImageData(imageData, 0, 0);
-  }
-  previewCanvas.classList.remove("hidden");
-  controlsEl.classList.remove("hidden");
-  pageSelectGroup.style.display = "none";
-  cropGroup.style.display = "block";
-  cropRegion = null;
-  cropInfo.textContent = "Click 'Select Crop Area' to choose a region, or 'Process Image' for full image";
-}
-function redrawPreview() {
+function fitToScreen() {
   if (!currentImage) return;
-  const ctx = previewCanvas.getContext("2d");
-  if (!ctx) return;
+  const containerWidth = canvasContainer.clientWidth;
+  const containerHeight = canvasContainer.clientHeight;
+  const imageWidth = currentImage.width;
+  const imageHeight = currentImage.height;
+  const scaleX = containerWidth / imageWidth;
+  const scaleY = containerHeight / imageHeight;
+  zoom = Math.min(scaleX, scaleY) * 0.9;
+  panX = (containerWidth - imageWidth * zoom) / 2;
+  panY = (containerHeight - imageHeight * zoom) / 2;
+  updateZoom();
+  redrawCanvas();
+}
+function updateZoom() {
+  zoomLevel.textContent = `${Math.round(zoom * 100)}%`;
+}
+function redrawCanvas() {
+  if (!currentImage) return;
+  ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
   const imageData = new ImageData(
     new Uint8ClampedArray(currentImage.data),
     currentImage.width,
@@ -1018,36 +1205,57 @@ function redrawPreview() {
   ctx.putImageData(imageData, 0, 0);
   if (cropRegion) {
     ctx.strokeStyle = "#4f46e5";
-    ctx.lineWidth = 2;
-    ctx.strokeRect(cropRegion.x, cropRegion.y, cropRegion.width, cropRegion.height);
+    ctx.lineWidth = 3 / zoom;
+    ctx.strokeRect(
+      cropRegion.x,
+      cropRegion.y,
+      cropRegion.width,
+      cropRegion.height
+    );
+    const handleSize = 10 / zoom;
+    ctx.fillStyle = "#4f46e5";
+    const corners = [
+      [cropRegion.x, cropRegion.y],
+      [cropRegion.x + cropRegion.width, cropRegion.y],
+      [cropRegion.x, cropRegion.y + cropRegion.height],
+      [cropRegion.x + cropRegion.width, cropRegion.y + cropRegion.height]
+    ];
+    for (const [x, y] of corners) {
+      ctx.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
+    }
   }
+  mainCanvas.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  mainCanvas.style.transformOrigin = "0 0";
 }
-async function processImagePipeline(image) {
+async function processImage(image) {
   try {
-    resultsEl.innerHTML = "";
-    let processImage = image;
+    resultsContainer.innerHTML = "";
+    resultsPanel.classList.add("active");
+    let processImage2 = image;
     if (cropRegion && cropRegion.width > 0 && cropRegion.height > 0) {
       showStatus("Cropping image...");
-      processImage = cropImage(image, cropRegion);
-      displayImage(processImage, "Cropped");
+      processImage2 = cropImage(image, cropRegion);
+      displayResult(processImage2, "Cropped");
     } else {
-      displayImage(image, "Original");
+      displayResult(image, "Original");
     }
-    showStatus("Initializing WebGPU...");
-    statusEl.classList.remove("hidden");
+    showStatus("Running white threshold...");
     const t1 = performance.now();
-    const thresholded = await whiteThresholdGPU(processImage, 0.85);
+    const thresholded = await whiteThresholdGPU(processImage2, 0.85);
     const t2 = performance.now();
     showStatus(`White threshold: ${(t2 - t1).toFixed(1)}ms`);
-    displayImage(thresholded, "1. White Threshold");
+    displayResult(thresholded, "1. White Threshold");
+    showStatus("Palettizing...");
     const t3 = performance.now();
     const palettized = await palettizeGPU(thresholded, PALETTE_RGBA);
     const t4 = performance.now();
     showStatus(`Palettize: ${(t4 - t3).toFixed(1)}ms`);
+    showStatus("Applying median filter...");
     const t5 = performance.now();
     const median = await median3x3GPU(palettized);
     const t6 = performance.now();
     showStatus(`Median filter: ${(t6 - t5).toFixed(1)}ms`);
+    showStatus("Extracting black...");
     const t7 = performance.now();
     const _binary = extractBlack(median);
     const t8 = performance.now();
@@ -1055,8 +1263,7 @@ async function processImagePipeline(image) {
     const totalTime = t8 - t1;
     showStatus(`\u2713 Pipeline complete! Total: ${totalTime.toFixed(1)}ms`);
   } catch (error) {
-    const err = error;
-    showStatus(`Error: ${err.message}`, true);
+    showStatus(`Error: ${error.message}`, true);
     console.error(error);
   }
 }
@@ -1074,55 +1281,57 @@ function cropImage(image, region) {
       dstOffset
     );
   }
-  return {
-    width,
-    height,
-    data: croppedData
-  };
+  return { width, height, data: croppedData };
 }
-function displayImage(image, label) {
+function displayResult(image, label) {
+  const item = document.createElement("div");
+  item.className = "result-item";
+  const title = document.createElement("h3");
+  title.textContent = label;
   const canvas = document.createElement("canvas");
   canvas.width = image.width;
   canvas.height = image.height;
-  canvas.style.maxWidth = "100%";
-  canvas.style.border = "1px solid #ccc";
-  canvas.style.marginBottom = "1rem";
-  const ctx = canvas.getContext("2d");
-  if (ctx) {
+  const ctx2 = canvas.getContext("2d");
+  if (ctx2) {
     const imageData = new ImageData(
       new Uint8ClampedArray(image.data),
       image.width,
       image.height
     );
-    ctx.putImageData(imageData, 0, 0);
+    ctx2.putImageData(imageData, 0, 0);
   }
-  const container = document.createElement("div");
-  container.style.marginBottom = "2rem";
-  const title = document.createElement("h3");
-  title.textContent = label;
-  title.style.marginBottom = "0.5rem";
-  container.appendChild(title);
-  container.appendChild(canvas);
-  resultsEl?.appendChild(container);
+  const img = document.createElement("img");
+  img.src = canvas.toDataURL();
+  item.appendChild(title);
+  item.appendChild(img);
+  resultsContainer.appendChild(item);
 }
-function showStatus(message, isError = false) {
-  statusEl.textContent = message;
-  statusEl.classList.remove("hidden");
-  if (isError) {
-    statusEl.classList.add("error");
-  } else {
-    statusEl.classList.remove("error");
-  }
-  console.log(message);
+function generateThumbnail(image) {
+  const maxSize = 128;
+  const scale = Math.min(maxSize / image.width, maxSize / image.height);
+  const thumbWidth = Math.floor(image.width * scale);
+  const thumbHeight = Math.floor(image.height * scale);
+  const canvas = document.createElement("canvas");
+  canvas.width = thumbWidth;
+  canvas.height = thumbHeight;
+  const ctx2 = canvas.getContext("2d");
+  if (!ctx2) return "";
+  const tempCanvas = document.createElement("canvas");
+  tempCanvas.width = image.width;
+  tempCanvas.height = image.height;
+  const tempCtx = tempCanvas.getContext("2d");
+  if (!tempCtx) return "";
+  const imageData = new ImageData(
+    new Uint8ClampedArray(image.data),
+    image.width,
+    image.height
+  );
+  tempCtx.putImageData(imageData, 0, 0);
+  ctx2.imageSmoothingEnabled = true;
+  ctx2.imageSmoothingQuality = "high";
+  ctx2.drawImage(tempCanvas, 0, 0, thumbWidth, thumbHeight);
+  return canvas.toDataURL("image/png");
 }
-uploadBtn.addEventListener("click", () => fileInput.click());
-clearAllBtn.addEventListener("click", async () => {
-  if (confirm("Delete all saved files?")) {
-    await clearAllFiles();
-    await refreshFileList();
-    showStatus("All files cleared");
-  }
-});
 async function refreshFileList() {
   const files = await listFiles();
   console.log(`Refreshing file list: ${files.length} files`);
@@ -1175,6 +1384,7 @@ async function refreshFileList() {
           currentFileId = null;
           currentPdfData = null;
           currentImage = null;
+          setMode("upload");
         }
         await refreshFileList();
         showStatus(`Deleted ${file.name}`);
@@ -1188,6 +1398,7 @@ async function refreshFileList() {
   }
 }
 async function loadStoredFile(id) {
+  showStatus("\u23F3 Loading file...");
   const stored = await getFile(id);
   if (!stored) {
     showStatus("File not found", true);
@@ -1198,30 +1409,5 @@ async function loadStoredFile(id) {
   const blob = new Blob([data], { type: stored.type });
   const file = new File([blob], stored.name, { type: stored.type });
   await refreshFileList();
-  await handleFileLoad(file);
+  await handleFileUpload(file);
 }
-function generateThumbnail(image) {
-  const maxSize = 48;
-  const scale = Math.min(maxSize / image.width, maxSize / image.height);
-  const thumbWidth = Math.floor(image.width * scale);
-  const thumbHeight = Math.floor(image.height * scale);
-  const canvas = document.createElement("canvas");
-  canvas.width = thumbWidth;
-  canvas.height = thumbHeight;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return "";
-  const tempCanvas = document.createElement("canvas");
-  tempCanvas.width = image.width;
-  tempCanvas.height = image.height;
-  const tempCtx = tempCanvas.getContext("2d");
-  if (!tempCtx) return "";
-  const imageData = new ImageData(
-    new Uint8ClampedArray(image.data),
-    image.width,
-    image.height
-  );
-  tempCtx.putImageData(imageData, 0, 0);
-  ctx.drawImage(tempCanvas, 0, 0, thumbWidth, thumbHeight);
-  return canvas.toDataURL("image/jpeg", 0.7);
-}
-refreshFileList();
