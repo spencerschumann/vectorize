@@ -805,19 +805,16 @@ var zoom = 1;
 var panX = 0;
 var panY = 0;
 var isPanning = false;
-var isCropping = false;
-var cropStart = null;
+var isDraggingCropHandle = false;
+var activeCropHandle = null;
 var cropRegion = null;
 var lastPanX = 0;
 var lastPanY = 0;
-var sidebar = document.getElementById("sidebar");
-var sidebarToggle = document.getElementById("sidebarToggle");
-var fileListEl = document.getElementById("fileList");
+var uploadFileList = document.getElementById("uploadFileList");
 var uploadBtn = document.getElementById("uploadBtn");
 var clearAllBtn = document.getElementById("clearAllBtn");
 var fileInput = document.getElementById("fileInput");
 var uploadScreen = document.getElementById("uploadScreen");
-var uploadBox = document.getElementById("uploadBox");
 var pageSelectionScreen = document.getElementById("pageSelectionScreen");
 var pdfFileName = document.getElementById("pdfFileName");
 var pageGrid = document.getElementById("pageGrid");
@@ -826,11 +823,12 @@ var cropScreen = document.getElementById("cropScreen");
 var canvasContainer = document.getElementById("canvasContainer");
 var mainCanvas = document.getElementById("mainCanvas");
 var ctx = mainCanvas.getContext("2d");
+var cropOverlay = document.getElementById("cropOverlay");
+var cropCtx = cropOverlay.getContext("2d");
 var zoomInBtn = document.getElementById("zoomInBtn");
 var zoomOutBtn = document.getElementById("zoomOutBtn");
 var zoomLevel = document.getElementById("zoomLevel");
 var fitToScreenBtn = document.getElementById("fitToScreenBtn");
-var startCropBtn = document.getElementById("startCropBtn");
 var clearCropBtn = document.getElementById("clearCropBtn");
 var cropInfo = document.getElementById("cropInfo");
 var processBtn = document.getElementById("processBtn");
@@ -840,27 +838,37 @@ var resultsPanel = document.getElementById("resultsPanel");
 var resultsContainer = document.getElementById("resultsContainer");
 refreshFileList();
 setMode("upload");
-sidebarToggle.addEventListener("click", () => {
-  sidebar.classList.toggle("collapsed");
+uploadBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  fileInput.click();
 });
-uploadBtn.addEventListener("click", () => fileInput.click());
-uploadBox.addEventListener("click", () => fileInput.click());
+uploadScreen.addEventListener("click", (e) => {
+  const target = e.target;
+  if (target.closest(".file-card") || target.closest(".upload-actions")) {
+    return;
+  }
+  if (target === uploadScreen || target.closest(".upload-file-list")) {
+    fileInput.click();
+  }
+});
 fileInput.addEventListener("change", (e) => {
   const files = e.target.files;
   if (files && files.length > 0) {
     handleFileUpload(files[0]);
   }
 });
-uploadBox.addEventListener("dragover", (e) => {
+uploadScreen.addEventListener("dragover", (e) => {
   e.preventDefault();
-  uploadBox.classList.add("drag-over");
+  uploadScreen.classList.add("drag-over");
 });
-uploadBox.addEventListener("dragleave", () => {
-  uploadBox.classList.remove("drag-over");
+uploadScreen.addEventListener("dragleave", (e) => {
+  if (e.target === uploadScreen) {
+    uploadScreen.classList.remove("drag-over");
+  }
 });
-uploadBox.addEventListener("drop", (e) => {
+uploadScreen.addEventListener("drop", (e) => {
   e.preventDefault();
-  uploadBox.classList.remove("drag-over");
+  uploadScreen.classList.remove("drag-over");
   const files = e.dataTransfer?.files;
   if (files && files.length > 0) {
     handleFileUpload(files[0]);
@@ -874,7 +882,12 @@ clearAllBtn.addEventListener("click", async () => {
   }
 });
 backToFilesBtn.addEventListener("click", () => {
+  currentFileId = null;
+  currentPdfData = null;
+  currentImage = null;
+  cropRegion = null;
   setMode("upload");
+  refreshFileList();
 });
 backFromCropBtn.addEventListener("click", () => {
   if (currentFile?.type === "application/pdf") {
@@ -884,9 +897,9 @@ backFromCropBtn.addEventListener("click", () => {
   }
 });
 zoomInBtn.addEventListener("click", () => {
-  zoom *= 1.2;
+  zoom = Math.min(10, zoom * 1.2);
   updateZoom();
-  redrawCanvas();
+  updateTransform();
 });
 zoomOutBtn.addEventListener("click", () => {
   zoom /= 1.2;
@@ -896,19 +909,11 @@ zoomOutBtn.addEventListener("click", () => {
 fitToScreenBtn.addEventListener("click", () => {
   fitToScreen();
 });
-startCropBtn.addEventListener("click", () => {
-  isCropping = true;
-  canvasContainer.classList.add("cropping");
-  startCropBtn.classList.add("active");
-  cropInfo.textContent = "Click and drag to select crop area";
-});
 clearCropBtn.addEventListener("click", () => {
-  cropRegion = null;
-  isCropping = false;
-  canvasContainer.classList.remove("cropping");
-  startCropBtn.classList.remove("active");
-  cropInfo.textContent = "No crop selected";
-  redrawCanvas();
+  if (currentImage) {
+    setDefaultCrop(currentImage.width, currentImage.height);
+    drawCropOverlay();
+  }
 });
 processBtn.addEventListener("click", () => {
   if (currentImage) {
@@ -916,12 +921,16 @@ processBtn.addEventListener("click", () => {
   }
 });
 canvasContainer.addEventListener("mousedown", (e) => {
-  if (isCropping) {
-    const rect = canvasContainer.getBoundingClientRect();
-    const x = (e.clientX - rect.left - panX) / zoom;
-    const y = (e.clientY - rect.top - panY) / zoom;
-    cropStart = { x, y };
-  } else {
+  const rect = canvasContainer.getBoundingClientRect();
+  const canvasX = (e.clientX - rect.left - panX) / zoom;
+  const canvasY = (e.clientY - rect.top - panY) / zoom;
+  const handle = getCropHandleAtPoint(canvasX, canvasY);
+  if (handle && cropRegion) {
+    isDraggingCropHandle = true;
+    activeCropHandle = handle;
+    lastPanX = e.clientX;
+    lastPanY = e.clientY;
+  } else if (!e.shiftKey) {
     isPanning = true;
     lastPanX = e.clientX;
     lastPanY = e.clientY;
@@ -929,21 +938,13 @@ canvasContainer.addEventListener("mousedown", (e) => {
   }
 });
 canvasContainer.addEventListener("mousemove", (e) => {
-  if (isCropping && cropStart) {
-    const rect = canvasContainer.getBoundingClientRect();
-    const x = (e.clientX - rect.left - panX) / zoom;
-    const y = (e.clientY - rect.top - panY) / zoom;
-    const minX = Math.min(cropStart.x, x);
-    const minY = Math.min(cropStart.y, y);
-    const maxX = Math.max(cropStart.x, x);
-    const maxY = Math.max(cropStart.y, y);
-    cropRegion = {
-      x: Math.max(0, minX),
-      y: Math.max(0, minY),
-      width: Math.min(currentImage.width - minX, maxX - minX),
-      height: Math.min(currentImage.height - minY, maxY - minY)
-    };
-    redrawCanvas();
+  if (isDraggingCropHandle && activeCropHandle && cropRegion) {
+    const dx = (e.clientX - lastPanX) / zoom;
+    const dy = (e.clientY - lastPanY) / zoom;
+    lastPanX = e.clientX;
+    lastPanY = e.clientY;
+    adjustCropRegion(activeCropHandle, dx, dy);
+    drawCropOverlay();
   } else if (isPanning) {
     const dx = e.clientX - lastPanX;
     const dy = e.clientY - lastPanY;
@@ -951,17 +952,22 @@ canvasContainer.addEventListener("mousemove", (e) => {
     panY += dy;
     lastPanX = e.clientX;
     lastPanY = e.clientY;
-    redrawCanvas();
+    updateTransform();
+  } else {
+    const rect = canvasContainer.getBoundingClientRect();
+    const canvasX = (e.clientX - rect.left - panX) / zoom;
+    const canvasY = (e.clientY - rect.top - panY) / zoom;
+    const handle = getCropHandleAtPoint(canvasX, canvasY);
+    updateCursorForHandle(handle);
   }
 });
 canvasContainer.addEventListener("mouseup", () => {
-  if (isCropping && cropStart) {
-    isCropping = false;
-    cropStart = null;
-    canvasContainer.classList.remove("cropping");
-    startCropBtn.classList.remove("active");
-    if (cropRegion && cropRegion.width > 0 && cropRegion.height > 0) {
-      cropInfo.textContent = `Crop: ${Math.round(cropRegion.width)}\xD7${Math.round(cropRegion.height)} at (${Math.round(cropRegion.x)}, ${Math.round(cropRegion.y)})`;
+  if (isDraggingCropHandle) {
+    isDraggingCropHandle = false;
+    activeCropHandle = null;
+    if (currentImage && cropRegion) {
+      saveCropSettings(currentImage.width, currentImage.height, cropRegion);
+      updateCropInfo();
     }
   }
   if (isPanning) {
@@ -975,10 +981,26 @@ canvasContainer.addEventListener("mouseleave", () => {
 });
 canvasContainer.addEventListener("wheel", (e) => {
   e.preventDefault();
-  const delta = e.deltaY > 0 ? 0.9 : 1.1;
-  zoom *= delta;
-  updateZoom();
-  redrawCanvas();
+  const isPinchZoom = e.ctrlKey;
+  if (isPinchZoom) {
+    const rect = canvasContainer.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    const canvasX = (mouseX - panX) / zoom;
+    const canvasY = (mouseY - panY) / zoom;
+    const zoomSpeed = 5e-3;
+    const zoomChange = -e.deltaY * zoomSpeed * zoom;
+    const newZoom = Math.max(0.1, Math.min(10, zoom + zoomChange));
+    panX = mouseX - canvasX * newZoom;
+    panY = mouseY - canvasY * newZoom;
+    zoom = newZoom;
+    updateZoom();
+    updateTransform();
+  } else {
+    panX -= e.deltaX;
+    panY -= e.deltaY;
+    updateTransform();
+  }
 });
 function setMode(mode) {
   console.log("setMode called:", mode);
@@ -986,10 +1008,13 @@ function setMode(mode) {
   uploadScreen.classList.remove("active");
   pageSelectionScreen.classList.remove("active");
   cropScreen.classList.remove("active");
+  pageSelectionScreen.style.display = "";
   switch (mode) {
     case "upload":
       uploadScreen.classList.add("active");
       console.log("Upload screen activated");
+      console.log("uploadScreen display:", globalThis.getComputedStyle(uploadScreen).display);
+      console.log("uploadScreen hasClass active:", uploadScreen.classList.contains("active"));
       break;
     case "pageSelection":
       pageSelectionScreen.classList.add("active");
@@ -1070,15 +1095,32 @@ async function loadPdf(file) {
     console.log("loadPdf: pageGrid element:", pageGrid);
     pageGrid.innerHTML = "";
     console.log("loadPdf: pageGrid cleared, adding", pdfPageCount, "cards");
+    const pageDimensions = [];
+    let pageLabels = null;
+    try {
+      pageLabels = await pdf.getPageLabels();
+    } catch (_e) {
+    }
     for (let i = 1; i <= pdfPageCount; i++) {
+      const page = await pdf.getPage(i);
+      const viewport = page.getViewport({ scale: 1 });
+      const pageLabel = pageLabels && pageLabels[i - 1] || `Page ${i}`;
+      pageDimensions.push({
+        width: viewport.width,
+        height: viewport.height,
+        pageLabel
+      });
       const card = document.createElement("div");
       card.className = "page-card";
       const imageDiv = document.createElement("div");
       imageDiv.className = "page-card-image";
       imageDiv.textContent = "\u{1F4C4}";
+      const aspectRatio = viewport.width / viewport.height;
+      imageDiv.style.aspectRatio = aspectRatio.toString();
+      imageDiv.style.width = 250 * aspectRatio + "px";
       const label = document.createElement("div");
       label.className = "page-card-label";
-      label.textContent = `Page ${i}`;
+      label.textContent = pageLabel;
       card.appendChild(imageDiv);
       card.appendChild(label);
       card.addEventListener("click", () => {
@@ -1087,8 +1129,47 @@ async function loadPdf(file) {
         selectPdfPage(i);
       });
       pageGrid.appendChild(card);
-      generatePageThumbnail(i, imageDiv);
     }
+    (async () => {
+      const pagesBySize = Array.from({ length: pdfPageCount }, (_, i) => i).sort((a, b) => {
+        const areaA = pageDimensions[a].width * pageDimensions[a].height;
+        const areaB = pageDimensions[b].width * pageDimensions[b].height;
+        return areaB - areaA;
+      });
+      const renderQueue = [];
+      let sequentialIndex = 0;
+      let largestIndex = 0;
+      while (sequentialIndex < pdfPageCount || largestIndex < pagesBySize.length) {
+        if (sequentialIndex < pdfPageCount) {
+          renderQueue.push(sequentialIndex++);
+        }
+        if (sequentialIndex < pdfPageCount) {
+          renderQueue.push(sequentialIndex++);
+        }
+        while (largestIndex < pagesBySize.length) {
+          const largestPageIdx = pagesBySize[largestIndex++];
+          if (largestPageIdx >= sequentialIndex) {
+            renderQueue.push(largestPageIdx);
+            break;
+          }
+        }
+      }
+      const batchSize = 3;
+      let completed = 0;
+      for (let i = 0; i < renderQueue.length; i += batchSize) {
+        const batch = [];
+        for (let j = 0; j < batchSize && i + j < renderQueue.length; j++) {
+          const pageNum = renderQueue[i + j] + 1;
+          const cards = Array.from(pageGrid.children);
+          const imageDiv = cards[pageNum - 1].querySelector(".page-card-image");
+          batch.push(generatePageThumbnail(pageNum, imageDiv));
+        }
+        await Promise.all(batch);
+        completed += batch.length;
+        showStatus(`Loading thumbnails: ${completed}/${pdfPageCount}`);
+      }
+      showStatus(`PDF loaded: ${pdfPageCount} pages`);
+    })();
   } catch (error) {
     console.error("loadPdf error:", error);
     showStatus(`PDF load error: ${error.message}`, true);
@@ -1136,8 +1217,11 @@ async function selectPdfPage(pageNum) {
       return;
     }
     setMode("crop");
+    ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
+    mainCanvas.width = 0;
+    mainCanvas.height = 0;
     showStatus(`\u23F3 Rendering page ${pageNum} at 200 DPI...`);
-    canvasContainer.style.opacity = "0.5";
+    canvasContainer.style.opacity = "0.3";
     console.log("selectPdfPage: Creating copy");
     const pdfDataCopy = currentPdfData.slice();
     console.log("selectPdfPage: Calling renderPdfPage");
@@ -1164,10 +1248,17 @@ function loadImage(image) {
   currentImage = image;
   mainCanvas.width = image.width;
   mainCanvas.height = image.height;
+  cropOverlay.width = image.width;
+  cropOverlay.height = image.height;
   mainCanvas.style.display = "block";
+  cropOverlay.style.display = "block";
   canvasContainer.style.opacity = "1";
-  cropRegion = null;
-  cropInfo.textContent = "No crop selected";
+  const savedCrop = getCropSettings(image.width, image.height);
+  if (savedCrop) {
+    cropRegion = savedCrop;
+  } else {
+    setDefaultCrop(image.width, image.height);
+  }
   const imageData = new ImageData(
     new Uint8ClampedArray(image.data),
     image.width,
@@ -1175,6 +1266,7 @@ function loadImage(image) {
   );
   ctx.putImageData(imageData, 0, 0);
   fitToScreen();
+  drawCropOverlay();
   showStatus(`\u2713 Ready: ${image.width}\xD7${image.height} pixels`);
 }
 function fitToScreen() {
@@ -1189,10 +1281,133 @@ function fitToScreen() {
   panX = (containerWidth - imageWidth * zoom) / 2;
   panY = (containerHeight - imageHeight * zoom) / 2;
   updateZoom();
-  redrawCanvas();
+  updateTransform();
 }
 function updateZoom() {
   zoomLevel.textContent = `${Math.round(zoom * 100)}%`;
+}
+function setDefaultCrop(imageWidth, imageHeight) {
+  const margin = 0.1;
+  cropRegion = {
+    x: imageWidth * margin,
+    y: imageHeight * margin,
+    width: imageWidth * (1 - 2 * margin),
+    height: imageHeight * (1 - 2 * margin)
+  };
+  updateCropInfo();
+}
+function getCropSettings(imageWidth, imageHeight) {
+  const key = `crop_${Math.round(imageWidth)}_${Math.round(imageHeight)}`;
+  const stored = localStorage.getItem(key);
+  if (stored) {
+    try {
+      return JSON.parse(stored);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+function saveCropSettings(imageWidth, imageHeight, crop) {
+  const key = `crop_${Math.round(imageWidth)}_${Math.round(imageHeight)}`;
+  localStorage.setItem(key, JSON.stringify(crop));
+}
+function updateCropInfo() {
+  if (cropRegion) {
+    cropInfo.textContent = `Crop: ${Math.round(cropRegion.width)}\xD7${Math.round(cropRegion.height)} at (${Math.round(cropRegion.x)}, ${Math.round(cropRegion.y)})`;
+  }
+}
+function getCropHandleAtPoint(x, y) {
+  if (!cropRegion) return null;
+  const handleSize = 15 / zoom;
+  const { x: cx, y: cy, width: cw, height: ch } = cropRegion;
+  if (Math.abs(x - cx) < handleSize && Math.abs(y - cy) < handleSize) return "tl";
+  if (Math.abs(x - (cx + cw)) < handleSize && Math.abs(y - cy) < handleSize) return "tr";
+  if (Math.abs(x - cx) < handleSize && Math.abs(y - (cy + ch)) < handleSize) return "bl";
+  if (Math.abs(x - (cx + cw)) < handleSize && Math.abs(y - (cy + ch)) < handleSize) return "br";
+  if (Math.abs(x - (cx + cw / 2)) < handleSize && Math.abs(y - cy) < handleSize) return "t";
+  if (Math.abs(x - (cx + cw / 2)) < handleSize && Math.abs(y - (cy + ch)) < handleSize) return "b";
+  if (Math.abs(y - (cy + ch / 2)) < handleSize && Math.abs(x - cx) < handleSize) return "l";
+  if (Math.abs(y - (cy + ch / 2)) < handleSize && Math.abs(x - (cx + cw)) < handleSize) return "r";
+  return null;
+}
+function updateCursorForHandle(handle) {
+  if (!handle) {
+    canvasContainer.style.cursor = "default";
+  } else if (handle === "tl" || handle === "br") {
+    canvasContainer.style.cursor = "nwse-resize";
+  } else if (handle === "tr" || handle === "bl") {
+    canvasContainer.style.cursor = "nesw-resize";
+  } else if (handle === "t" || handle === "b") {
+    canvasContainer.style.cursor = "ns-resize";
+  } else if (handle === "l" || handle === "r") {
+    canvasContainer.style.cursor = "ew-resize";
+  }
+}
+function adjustCropRegion(handle, dx, dy) {
+  if (!cropRegion || !currentImage) return;
+  const { x, y, width, height } = cropRegion;
+  let newX = x, newY = y, newWidth = width, newHeight = height;
+  switch (handle) {
+    case "tl":
+      newX = x + dx;
+      newY = y + dy;
+      newWidth = width - dx;
+      newHeight = height - dy;
+      break;
+    case "tr":
+      newY = y + dy;
+      newWidth = width + dx;
+      newHeight = height - dy;
+      break;
+    case "bl":
+      newX = x + dx;
+      newWidth = width - dx;
+      newHeight = height + dy;
+      break;
+    case "br":
+      newWidth = width + dx;
+      newHeight = height + dy;
+      break;
+    case "t":
+      newY = y + dy;
+      newHeight = height - dy;
+      break;
+    case "b":
+      newHeight = height + dy;
+      break;
+    case "l":
+      newX = x + dx;
+      newWidth = width - dx;
+      break;
+    case "r":
+      newWidth = width + dx;
+      break;
+  }
+  newX = Math.max(0, Math.min(newX, currentImage.width - 10));
+  newY = Math.max(0, Math.min(newY, currentImage.height - 10));
+  newWidth = Math.max(10, Math.min(newWidth, currentImage.width - newX));
+  newHeight = Math.max(10, Math.min(newHeight, currentImage.height - newY));
+  cropRegion.x = newX;
+  cropRegion.y = newY;
+  cropRegion.width = newWidth;
+  cropRegion.height = newHeight;
+  updateCropInfo();
+}
+function updateTransform() {
+  const transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  mainCanvas.style.transform = transform;
+  mainCanvas.style.transformOrigin = "0 0";
+  mainCanvas.style.willChange = "transform";
+  cropOverlay.style.transform = transform;
+  cropOverlay.style.transformOrigin = "0 0";
+  cropOverlay.style.willChange = "transform";
+  if (zoom >= 1) {
+    mainCanvas.style.imageRendering = "pixelated";
+  } else {
+    mainCanvas.style.imageRendering = "auto";
+  }
+  drawCropOverlay();
 }
 function redrawCanvas() {
   if (!currentImage) return;
@@ -1203,29 +1418,61 @@ function redrawCanvas() {
     currentImage.height
   );
   ctx.putImageData(imageData, 0, 0);
-  if (cropRegion) {
-    ctx.strokeStyle = "#4f46e5";
-    ctx.lineWidth = 3 / zoom;
-    ctx.strokeRect(
-      cropRegion.x,
-      cropRegion.y,
-      cropRegion.width,
-      cropRegion.height
-    );
-    const handleSize = 10 / zoom;
-    ctx.fillStyle = "#4f46e5";
-    const corners = [
-      [cropRegion.x, cropRegion.y],
-      [cropRegion.x + cropRegion.width, cropRegion.y],
-      [cropRegion.x, cropRegion.y + cropRegion.height],
-      [cropRegion.x + cropRegion.width, cropRegion.y + cropRegion.height]
-    ];
-    for (const [x, y] of corners) {
-      ctx.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
-    }
+  drawCropOverlay();
+}
+function drawCropOverlay() {
+  if (!currentImage || !cropRegion) {
+    cropCtx.clearRect(0, 0, cropOverlay.width, cropOverlay.height);
+    return;
   }
-  mainCanvas.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
-  mainCanvas.style.transformOrigin = "0 0";
+  cropCtx.clearRect(0, 0, cropOverlay.width, cropOverlay.height);
+  cropCtx.fillStyle = "rgba(0, 0, 0, 0.5)";
+  cropCtx.fillRect(0, 0, currentImage.width, currentImage.height);
+  cropCtx.globalCompositeOperation = "destination-out";
+  cropCtx.fillRect(
+    cropRegion.x,
+    cropRegion.y,
+    cropRegion.width,
+    cropRegion.height
+  );
+  cropCtx.globalCompositeOperation = "source-over";
+  cropCtx.strokeStyle = "#4f46e5";
+  cropCtx.lineWidth = 3 / zoom;
+  cropCtx.strokeRect(
+    cropRegion.x,
+    cropRegion.y,
+    cropRegion.width,
+    cropRegion.height
+  );
+  const handleSize = 10 / zoom;
+  cropCtx.fillStyle = "#4f46e5";
+  const cx = cropRegion.x;
+  const cy = cropRegion.y;
+  const cw = cropRegion.width;
+  const ch = cropRegion.height;
+  const handles = [
+    // Corners
+    [cx, cy],
+    // top-left
+    [cx + cw, cy],
+    // top-right
+    [cx, cy + ch],
+    // bottom-left
+    [cx + cw, cy + ch],
+    // bottom-right
+    // Edges
+    [cx + cw / 2, cy],
+    // top
+    [cx + cw, cy + ch / 2],
+    // right
+    [cx + cw / 2, cy + ch],
+    // bottom
+    [cx, cy + ch / 2]
+    // left
+  ];
+  for (const [x, y] of handles) {
+    cropCtx.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
+  }
 }
 async function processImage(image) {
   try {
@@ -1336,17 +1583,19 @@ async function refreshFileList() {
   const files = await listFiles();
   console.log(`Refreshing file list: ${files.length} files`);
   if (files.length === 0) {
-    fileListEl.innerHTML = `
-      <div style="padding: 2rem; text-align: center; color: #999;">
-        No files yet<br>Upload a PDF or image
+    uploadFileList.innerHTML = `
+      <div class="upload-empty">
+        <div>\u{1F4C1}</div>
+        <div>No files yet</div>
       </div>
     `;
     return;
   }
-  fileListEl.innerHTML = "";
+  uploadFileList.innerHTML = `<div class="files-grid"></div>`;
+  const filesGrid = uploadFileList.querySelector(".files-grid");
   for (const file of files) {
     const item = document.createElement("div");
-    item.className = "file-item";
+    item.className = "file-card";
     if (file.id === currentFileId) {
       item.classList.add("active");
     }
@@ -1394,7 +1643,7 @@ async function refreshFileList() {
     item.appendChild(info);
     item.appendChild(deleteBtn);
     item.onclick = () => loadStoredFile(file.id);
-    fileListEl.appendChild(item);
+    filesGrid.appendChild(item);
   }
 }
 async function loadStoredFile(id) {

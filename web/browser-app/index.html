@@ -185,11 +185,6 @@
             right: 0;
             top: 0;
             bottom: 0;
-            transition: left 0.3s ease;
-        }
-
-        .sidebar:not(.collapsed) ~ .main-content {
-            left: 320px;
         }
 
         /* Upload Screen */
@@ -200,38 +195,119 @@
             left: 0;
             right: 0;
             bottom: 0;
-            align-items: center;
-            justify-content: center;
+            flex-direction: column;
             background: #1a1a1a;
+            overflow: hidden;
         }
 
         .upload-screen.active {
             display: flex;
         }
 
-        .upload-box {
-            text-align: center;
-            padding: 3rem;
-            border: 3px dashed #3a3a3a;
-            border-radius: 12px;
-            max-width: 500px;
-            cursor: pointer;
-            transition: all 0.3s;
-        }
-
-        .upload-box:hover, .upload-box.drag-over {
-            border-color: #4f46e5;
+        .upload-screen.drag-over {
             background: #252525;
+            outline: 3px dashed #4f46e5;
+            outline-offset: -20px;
         }
 
-        .upload-box h2 {
+        .upload-header {
+            padding: 2rem;
+            border-bottom: 1px solid #3a3a3a;
+            text-align: center;
+        }
+
+        .upload-header h1 {
             font-size: 2rem;
-            margin-bottom: 1rem;
+            margin-bottom: 0.5rem;
         }
 
-        .upload-box p {
+        .upload-header p {
             color: #999;
-            font-size: 1.1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .upload-actions {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+        }
+
+        .upload-actions button {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 6px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .upload-actions button:first-child {
+            background: #4f46e5;
+            color: white;
+        }
+
+        .upload-actions button:first-child:hover {
+            background: #4338ca;
+        }
+
+        .upload-actions button.danger {
+            background: #3a3a3a;
+            color: #ef4444;
+        }
+
+        .upload-actions button.danger:hover {
+            background: #ef4444;
+            color: white;
+        }
+
+        .upload-file-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 2rem;
+        }
+
+        .upload-empty {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: #666;
+            font-size: 1.2rem;
+        }
+
+        .upload-empty svg {
+            width: 120px;
+            height: 120px;
+            margin-bottom: 1rem;
+            opacity: 0.3;
+        }
+
+        .files-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .file-card {
+            background: #2a2a2a;
+            border-radius: 8px;
+            padding: 1rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 2px solid transparent;
+            display: flex;
+            gap: 1rem;
+        }
+
+        .file-card:hover {
+            border-color: #4f46e5;
+            transform: translateY(-2px);
+        }
+
+        .file-card.active {
+            background: #3730a3;
+            border-color: #6366f1;
         }
 
         /* Page Selection Screen */
@@ -359,6 +435,11 @@
         #mainCanvas {
             position: absolute;
             image-rendering: pixelated;
+        }
+
+        #cropOverlay {
+            position: absolute;
+            pointer-events: none;
         }
 
         /* Floating Toolbar */
@@ -530,31 +611,24 @@
 </head>
 
 <body>
-    <div class="sidebar" id="sidebar">
-        <div class="sidebar-header">
-            <h2>📁 Saved Files</h2>
-            <div class="sidebar-actions">
-                <button id="uploadBtn">Upload</button>
-                <button id="clearAllBtn" class="danger">Clear All</button>
-            </div>
-        </div>
-        <div id="fileList" class="file-list">
-            <div style="padding: 2rem; text-align: center; color: #999;">
-                No files yet<br>Upload a PDF or image
-            </div>
-        </div>
-    </div>
-
-    <button class="sidebar-toggle" id="sidebarToggle">☰</button>
-
     <div class="main-content">
         <!-- Upload Screen -->
         <div class="upload-screen" id="uploadScreen">
-            <div class="upload-box" id="uploadBox">
-                <h2>📄 Drop PDF or Image</h2>
-                <p>or click to browse</p>
-                <input type="file" id="fileInput" accept="application/pdf,image/png,image/jpeg" hidden>
+            <div class="upload-header">
+                <h1>📄 Document Vectorizer</h1>
+                <p>Drop PDF or image anywhere, or click below to browse</p>
+                <div class="upload-actions">
+                    <button id="uploadBtn">Choose File</button>
+                    <button id="clearAllBtn" class="danger">Clear All Files</button>
+                </div>
             </div>
+            <div class="upload-file-list" id="uploadFileList">
+                <div class="upload-empty">
+                    <div>📁</div>
+                    <div>No files yet</div>
+                </div>
+            </div>
+            <input type="file" id="fileInput" accept="application/pdf,image/png,image/jpeg" hidden>
         </div>
 
         <!-- Page Selection Screen (for PDFs) -->
@@ -570,6 +644,7 @@
         <div class="crop-screen" id="cropScreen">
             <div class="canvas-container" id="canvasContainer">
                 <canvas id="mainCanvas"></canvas>
+                <canvas id="cropOverlay"></canvas>
             </div>
 
             <div class="toolbar">
@@ -585,8 +660,7 @@
 
                 <div class="toolbar-section">
                     <div class="toolbar-section-title">Crop</div>
-                    <button id="startCropBtn">Start Crop</button>
-                    <button id="clearCropBtn">Clear Crop</button>
+                    <button id="clearCropBtn">Reset to Default</button>
                     <div class="crop-info" id="cropInfo">No crop selected</div>
                 </div>
 

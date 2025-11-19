@@ -53,22 +53,19 @@ let zoom = 1.0;
 let panX = 0;
 let panY = 0;
 let isPanning = false;
-let isCropping = false;
-let cropStart: { x: number; y: number } | null = null;
+let isDraggingCropHandle = false;
+let activeCropHandle: string | null = null; // 'tl', 'tr', 'bl', 'br', 't', 'r', 'b', 'l'
 let cropRegion: { x: number; y: number; width: number; height: number } | null = null;
 let lastPanX = 0;
 let lastPanY = 0;
 
 // DOM Elements
-const sidebar = document.getElementById("sidebar") as HTMLDivElement;
-const sidebarToggle = document.getElementById("sidebarToggle") as HTMLButtonElement;
-const fileListEl = document.getElementById("fileList") as HTMLDivElement;
+const uploadFileList = document.getElementById("uploadFileList") as HTMLDivElement;
 const uploadBtn = document.getElementById("uploadBtn") as HTMLButtonElement;
 const clearAllBtn = document.getElementById("clearAllBtn") as HTMLButtonElement;
 const fileInput = document.getElementById("fileInput") as HTMLInputElement;
 
 const uploadScreen = document.getElementById("uploadScreen") as HTMLDivElement;
-const uploadBox = document.getElementById("uploadBox") as HTMLDivElement;
 
 const pageSelectionScreen = document.getElementById("pageSelectionScreen") as HTMLDivElement;
 const pdfFileName = document.getElementById("pdfFileName") as HTMLHeadingElement;
@@ -79,12 +76,13 @@ const cropScreen = document.getElementById("cropScreen") as HTMLDivElement;
 const canvasContainer = document.getElementById("canvasContainer") as HTMLDivElement;
 const mainCanvas = document.getElementById("mainCanvas") as HTMLCanvasElement;
 const ctx = mainCanvas.getContext("2d")!;
+const cropOverlay = document.getElementById("cropOverlay") as HTMLCanvasElement;
+const cropCtx = cropOverlay.getContext("2d")!;
 
 const zoomInBtn = document.getElementById("zoomInBtn") as HTMLButtonElement;
 const zoomOutBtn = document.getElementById("zoomOutBtn") as HTMLButtonElement;
 const zoomLevel = document.getElementById("zoomLevel") as HTMLDivElement;
 const fitToScreenBtn = document.getElementById("fitToScreenBtn") as HTMLButtonElement;
-const startCropBtn = document.getElementById("startCropBtn") as HTMLButtonElement;
 const clearCropBtn = document.getElementById("clearCropBtn") as HTMLButtonElement;
 const cropInfo = document.getElementById("cropInfo") as HTMLDivElement;
 const processBtn = document.getElementById("processBtn") as HTMLButtonElement;
@@ -97,14 +95,23 @@ const resultsContainer = document.getElementById("resultsContainer") as HTMLDivE
 refreshFileList();
 setMode("upload");
 
-// Sidebar toggle
-sidebarToggle.addEventListener("click", () => {
-  sidebar.classList.toggle("collapsed");
+// File management
+uploadBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  fileInput.click();
 });
 
-// File management
-uploadBtn.addEventListener("click", () => fileInput.click());
-uploadBox.addEventListener("click", () => fileInput.click());
+uploadScreen.addEventListener("click", (e) => {
+  const target = e.target as HTMLElement;
+  // Don't trigger file input if clicking on a file card, button, or inside the files grid
+  if (target.closest(".file-card") || target.closest(".upload-actions")) {
+    return;
+  }
+  // Only trigger on empty area or the upload-empty placeholder
+  if (target === uploadScreen || target.closest(".upload-file-list")) {
+    fileInput.click();
+  }
+});
 
 fileInput.addEventListener("change", (e) => {
   const files = (e.target as HTMLInputElement).files;
@@ -113,18 +120,21 @@ fileInput.addEventListener("change", (e) => {
   }
 });
 
-uploadBox.addEventListener("dragover", (e) => {
+// Drag and drop on entire upload screen
+uploadScreen.addEventListener("dragover", (e) => {
   e.preventDefault();
-  uploadBox.classList.add("drag-over");
+  uploadScreen.classList.add("drag-over");
 });
 
-uploadBox.addEventListener("dragleave", () => {
-  uploadBox.classList.remove("drag-over");
+uploadScreen.addEventListener("dragleave", (e) => {
+  if (e.target === uploadScreen) {
+    uploadScreen.classList.remove("drag-over");
+  }
 });
 
-uploadBox.addEventListener("drop", (e) => {
+uploadScreen.addEventListener("drop", (e) => {
   e.preventDefault();
-  uploadBox.classList.remove("drag-over");
+  uploadScreen.classList.remove("drag-over");
   const files = e.dataTransfer?.files;
   if (files && files.length > 0) {
     handleFileUpload(files[0]);
@@ -140,7 +150,12 @@ clearAllBtn.addEventListener("click", async () => {
 });
 
 backToFilesBtn.addEventListener("click", () => {
+  currentFileId = null;
+  currentPdfData = null;
+  currentImage = null;
+  cropRegion = null;
   setMode("upload");
+  refreshFileList();
 });
 
 backFromCropBtn.addEventListener("click", () => {
@@ -153,9 +168,9 @@ backFromCropBtn.addEventListener("click", () => {
 
 // Zoom controls
 zoomInBtn.addEventListener("click", () => {
-  zoom *= 1.2;
+  zoom = Math.min(10, zoom * 1.2);
   updateZoom();
-  redrawCanvas();
+  updateTransform();
 });
 
 zoomOutBtn.addEventListener("click", () => {
@@ -168,21 +183,13 @@ fitToScreenBtn.addEventListener("click", () => {
   fitToScreen();
 });
 
-// Crop controls
-startCropBtn.addEventListener("click", () => {
-  isCropping = true;
-  canvasContainer.classList.add("cropping");
-  startCropBtn.classList.add("active");
-  cropInfo.textContent = "Click and drag to select crop area";
-});
-
+// Crop controls - crop is always active
 clearCropBtn.addEventListener("click", () => {
-  cropRegion = null;
-  isCropping = false;
-  canvasContainer.classList.remove("cropping");
-  startCropBtn.classList.remove("active");
-  cropInfo.textContent = "No crop selected";
-  redrawCanvas();
+  // Reset to default 10% margin
+  if (currentImage) {
+    setDefaultCrop(currentImage.width, currentImage.height);
+    drawCropOverlay();
+  }
 });
 
 processBtn.addEventListener("click", () => {
@@ -193,12 +200,19 @@ processBtn.addEventListener("click", () => {
 
 // Canvas interaction
 canvasContainer.addEventListener("mousedown", (e) => {
-  if (isCropping) {
-    const rect = canvasContainer.getBoundingClientRect();
-    const x = (e.clientX - rect.left - panX) / zoom;
-    const y = (e.clientY - rect.top - panY) / zoom;
-    cropStart = { x, y };
-  } else {
+  const rect = canvasContainer.getBoundingClientRect();
+  const canvasX = (e.clientX - rect.left - panX) / zoom;
+  const canvasY = (e.clientY - rect.top - panY) / zoom;
+  
+  // Check if clicking on a crop handle
+  const handle = getCropHandleAtPoint(canvasX, canvasY);
+  if (handle && cropRegion) {
+    isDraggingCropHandle = true;
+    activeCropHandle = handle;
+    lastPanX = e.clientX;
+    lastPanY = e.clientY;
+  } else if (!e.shiftKey) {
+    // Pan with mouse drag (when not shift-clicking)
     isPanning = true;
     lastPanX = e.clientX;
     lastPanY = e.clientY;
@@ -207,24 +221,15 @@ canvasContainer.addEventListener("mousedown", (e) => {
 });
 
 canvasContainer.addEventListener("mousemove", (e) => {
-  if (isCropping && cropStart) {
-    const rect = canvasContainer.getBoundingClientRect();
-    const x = (e.clientX - rect.left - panX) / zoom;
-    const y = (e.clientY - rect.top - panY) / zoom;
+  if (isDraggingCropHandle && activeCropHandle && cropRegion) {
+    const dx = (e.clientX - lastPanX) / zoom;
+    const dy = (e.clientY - lastPanY) / zoom;
+    lastPanX = e.clientX;
+    lastPanY = e.clientY;
     
-    const minX = Math.min(cropStart.x, x);
-    const minY = Math.min(cropStart.y, y);
-    const maxX = Math.max(cropStart.x, x);
-    const maxY = Math.max(cropStart.y, y);
-    
-    cropRegion = {
-      x: Math.max(0, minX),
-      y: Math.max(0, minY),
-      width: Math.min(currentImage!.width - minX, maxX - minX),
-      height: Math.min(currentImage!.height - minY, maxY - minY),
-    };
-    
-    redrawCanvas();
+    // Adjust crop region based on handle
+    adjustCropRegion(activeCropHandle, dx, dy);
+    drawCropOverlay();
   } else if (isPanning) {
     const dx = e.clientX - lastPanX;
     const dy = e.clientY - lastPanY;
@@ -232,19 +237,25 @@ canvasContainer.addEventListener("mousemove", (e) => {
     panY += dy;
     lastPanX = e.clientX;
     lastPanY = e.clientY;
-    redrawCanvas();
+    updateTransform();
+  } else {
+    // Update cursor based on hover
+    const rect = canvasContainer.getBoundingClientRect();
+    const canvasX = (e.clientX - rect.left - panX) / zoom;
+    const canvasY = (e.clientY - rect.top - panY) / zoom;
+    const handle = getCropHandleAtPoint(canvasX, canvasY);
+    updateCursorForHandle(handle);
   }
 });
 
 canvasContainer.addEventListener("mouseup", () => {
-  if (isCropping && cropStart) {
-    isCropping = false;
-    cropStart = null;
-    canvasContainer.classList.remove("cropping");
-    startCropBtn.classList.remove("active");
-    
-    if (cropRegion && cropRegion.width > 0 && cropRegion.height > 0) {
-      cropInfo.textContent = `Crop: ${Math.round(cropRegion.width)}×${Math.round(cropRegion.height)} at (${Math.round(cropRegion.x)}, ${Math.round(cropRegion.y)})`;
+  if (isDraggingCropHandle) {
+    isDraggingCropHandle = false;
+    activeCropHandle = null;
+    // Save crop settings
+    if (currentImage && cropRegion) {
+      saveCropSettings(currentImage.width, currentImage.height, cropRegion);
+      updateCropInfo();
     }
   }
   
@@ -261,10 +272,39 @@ canvasContainer.addEventListener("mouseleave", () => {
 
 canvasContainer.addEventListener("wheel", (e) => {
   e.preventDefault();
-  const delta = e.deltaY > 0 ? 0.9 : 1.1;
-  zoom *= delta;
-  updateZoom();
-  redrawCanvas();
+  
+  // Check if this is a pinch zoom (ctrlKey) or two-finger pan
+  const isPinchZoom = e.ctrlKey;
+  
+  if (isPinchZoom) {
+    // Pinch to zoom
+    const rect = canvasContainer.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    
+    // Calculate the point in canvas coordinates before zoom
+    const canvasX = (mouseX - panX) / zoom;
+    const canvasY = (mouseY - panY) / zoom;
+    
+    // Apply zoom with constant speed in log space (feels consistent at all zoom levels)
+    // Instead of multiplying by a factor, we adjust by a fixed percentage of the current zoom
+    const zoomSpeed = 0.005; // Adjust this to change overall zoom speed
+    const zoomChange = -e.deltaY * zoomSpeed * zoom;
+    const newZoom = Math.max(0.1, Math.min(10, zoom + zoomChange));
+    
+    // Adjust pan to keep the point under the mouse
+    panX = mouseX - canvasX * newZoom;
+    panY = mouseY - canvasY * newZoom;
+    zoom = newZoom;
+    
+    updateZoom();
+    updateTransform();
+  } else {
+    // Two-finger pan (or mouse wheel)
+    panX -= e.deltaX;
+    panY -= e.deltaY;
+    updateTransform();
+  }
 });
 
 // Mode management
@@ -276,10 +316,15 @@ function setMode(mode: AppMode) {
   pageSelectionScreen.classList.remove("active");
   cropScreen.classList.remove("active");
   
+  // Clear any inline styles that might override CSS
+  pageSelectionScreen.style.display = "";
+  
   switch (mode) {
     case "upload":
       uploadScreen.classList.add("active");
       console.log("Upload screen activated");
+      console.log("uploadScreen display:", globalThis.getComputedStyle(uploadScreen).display);
+      console.log("uploadScreen hasClass active:", uploadScreen.classList.contains("active"));
       break;
     case "pageSelection":
       pageSelectionScreen.classList.add("active");
@@ -371,7 +416,31 @@ async function loadPdf(file: File) {
     console.log("loadPdf: pageGrid element:", pageGrid);
     pageGrid.innerHTML = "";
     console.log("loadPdf: pageGrid cleared, adding", pdfPageCount, "cards");
+    
+    // First pass: get all page dimensions and create cards with proper aspect ratios
+    const pageDimensions: Array<{width: number; height: number; pageLabel: string}> = [];
+    
+    // Get page labels from PDF (if available)
+    let pageLabels: string[] | null = null;
+    try {
+      pageLabels = await pdf.getPageLabels();
+    } catch (_e) {
+      // Page labels not available, will use page numbers
+    }
+    
     for (let i = 1; i <= pdfPageCount; i++) {
+      const page = await pdf.getPage(i);
+      const viewport = page.getViewport({ scale: 1.0 });
+      
+      // Get page label from PDF (e.g., "i", "ii", "1", "A-1", etc.)
+      const pageLabel = (pageLabels && pageLabels[i - 1]) || `Page ${i}`;
+      
+      pageDimensions.push({ 
+        width: viewport.width, 
+        height: viewport.height,
+        pageLabel 
+      });
+      
       const card = document.createElement("div");
       card.className = "page-card";
       
@@ -379,9 +448,14 @@ async function loadPdf(file: File) {
       imageDiv.className = "page-card-image";
       imageDiv.textContent = "📄";
       
+      // Set aspect ratio immediately so layout is stable
+      const aspectRatio = viewport.width / viewport.height;
+      imageDiv.style.aspectRatio = aspectRatio.toString();
+      imageDiv.style.width = (250 * aspectRatio) + "px";
+      
       const label = document.createElement("div");
       label.className = "page-card-label";
-      label.textContent = `Page ${i}`;
+      label.textContent = pageLabel;
       
       card.appendChild(imageDiv);
       card.appendChild(label);
@@ -393,10 +467,59 @@ async function loadPdf(file: File) {
       });
       
       pageGrid.appendChild(card);
-      
-      // Generate thumbnail asynchronously
-      generatePageThumbnail(i, imageDiv);
     }
+    
+    // Second pass: render thumbnails with interleaved priority (early pages + largest pages)
+    (async () => {
+      // Sort pages by size (largest first)
+      const pagesBySize = Array.from({ length: pdfPageCount }, (_, i) => i)
+        .sort((a, b) => {
+          const areaA = pageDimensions[a].width * pageDimensions[a].height;
+          const areaB = pageDimensions[b].width * pageDimensions[b].height;
+          return areaB - areaA;
+        });
+      
+      // Interleave: [page 1, page 2, largest], [page 3, page 4, 2nd largest], etc.
+      const renderQueue: number[] = [];
+      let sequentialIndex = 0;
+      let largestIndex = 0;
+      
+      while (sequentialIndex < pdfPageCount || largestIndex < pagesBySize.length) {
+        // Add next 2 sequential pages
+        if (sequentialIndex < pdfPageCount) {
+          renderQueue.push(sequentialIndex++);
+        }
+        if (sequentialIndex < pdfPageCount) {
+          renderQueue.push(sequentialIndex++);
+        }
+        
+        // Add next largest page (but skip if already in queue)
+        while (largestIndex < pagesBySize.length) {
+          const largestPageIdx = pagesBySize[largestIndex++];
+          if (largestPageIdx >= sequentialIndex) {
+            renderQueue.push(largestPageIdx);
+            break;
+          }
+        }
+      }
+      
+      // Render in batches of 3
+      const batchSize = 3;
+      let completed = 0;
+      for (let i = 0; i < renderQueue.length; i += batchSize) {
+        const batch = [];
+        for (let j = 0; j < batchSize && i + j < renderQueue.length; j++) {
+          const pageNum = renderQueue[i + j] + 1;
+          const cards = Array.from(pageGrid.children);
+          const imageDiv = cards[pageNum - 1].querySelector(".page-card-image") as HTMLElement;
+          batch.push(generatePageThumbnail(pageNum, imageDiv));
+        }
+        await Promise.all(batch);
+        completed += batch.length;
+        showStatus(`Loading thumbnails: ${completed}/${pdfPageCount}`);
+      }
+      showStatus(`PDF loaded: ${pdfPageCount} pages`);
+    })();
   } catch (error) {
     console.error("loadPdf error:", error);
     showStatus(`PDF load error: ${(error as Error).message}`, true);
@@ -453,8 +576,14 @@ async function selectPdfPage(pageNum: number) {
     
     // Switch to crop screen immediately with loading state
     setMode("crop");
+    
+    // Clear previous canvas content
+    ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
+    mainCanvas.width = 0;
+    mainCanvas.height = 0;
+    
     showStatus(`⏳ Rendering page ${pageNum} at 200 DPI...`);
-    canvasContainer.style.opacity = "0.5";
+    canvasContainer.style.opacity = "0.3";
     
     console.log("selectPdfPage: Creating copy");
     const pdfDataCopy = currentPdfData.slice();
@@ -486,17 +615,24 @@ async function selectPdfPage(pageNum: number) {
 function loadImage(image: RGBAImage) {
   currentImage = image;
   
-  // Set up canvas
+  // Set up canvases
   mainCanvas.width = image.width;
   mainCanvas.height = image.height;
+  cropOverlay.width = image.width;
+  cropOverlay.height = image.height;
   
   // Make sure canvas is visible
   mainCanvas.style.display = "block";
+  cropOverlay.style.display = "block";
   canvasContainer.style.opacity = "1";
   
-  // Reset view
-  cropRegion = null;
-  cropInfo.textContent = "No crop selected";
+  // Load saved crop settings or set default 10% margin
+  const savedCrop = getCropSettings(image.width, image.height);
+  if (savedCrop) {
+    cropRegion = savedCrop;
+  } else {
+    setDefaultCrop(image.width, image.height);
+  }
   
   // Draw the image first
   const imageData = new ImageData(
@@ -506,8 +642,9 @@ function loadImage(image: RGBAImage) {
   );
   ctx.putImageData(imageData, 0, 0);
   
-  // Then fit to screen
+  // Then fit to screen and draw crop
   fitToScreen();
+  drawCropOverlay();
   
   showStatus(`✓ Ready: ${image.width}×${image.height} pixels`);
 }
@@ -528,20 +665,169 @@ function fitToScreen() {
   panY = (containerHeight - imageHeight * zoom) / 2;
   
   updateZoom();
-  redrawCanvas();
+  updateTransform();
 }
 
 function updateZoom() {
   zoomLevel.textContent = `${Math.round(zoom * 100)}%`;
 }
 
+// Crop management functions
+function setDefaultCrop(imageWidth: number, imageHeight: number) {
+  const margin = 0.1; // 10% margin
+  cropRegion = {
+    x: imageWidth * margin,
+    y: imageHeight * margin,
+    width: imageWidth * (1 - 2 * margin),
+    height: imageHeight * (1 - 2 * margin),
+  };
+  updateCropInfo();
+}
+
+function getCropSettings(imageWidth: number, imageHeight: number) {
+  const key = `crop_${Math.round(imageWidth)}_${Math.round(imageHeight)}`;
+  const stored = localStorage.getItem(key);
+  if (stored) {
+    try {
+      return JSON.parse(stored) as { x: number; y: number; width: number; height: number };
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function saveCropSettings(imageWidth: number, imageHeight: number, crop: { x: number; y: number; width: number; height: number }) {
+  const key = `crop_${Math.round(imageWidth)}_${Math.round(imageHeight)}`;
+  localStorage.setItem(key, JSON.stringify(crop));
+}
+
+function updateCropInfo() {
+  if (cropRegion) {
+    cropInfo.textContent = `Crop: ${Math.round(cropRegion.width)}×${Math.round(cropRegion.height)} at (${Math.round(cropRegion.x)}, ${Math.round(cropRegion.y)})`;
+  }
+}
+
+function getCropHandleAtPoint(x: number, y: number): string | null {
+  if (!cropRegion) return null;
+  
+  const handleSize = 15 / zoom; // Handle hit area in canvas coordinates
+  const { x: cx, y: cy, width: cw, height: ch } = cropRegion;
+  
+  // Check corners first
+  if (Math.abs(x - cx) < handleSize && Math.abs(y - cy) < handleSize) return "tl";
+  if (Math.abs(x - (cx + cw)) < handleSize && Math.abs(y - cy) < handleSize) return "tr";
+  if (Math.abs(x - cx) < handleSize && Math.abs(y - (cy + ch)) < handleSize) return "bl";
+  if (Math.abs(x - (cx + cw)) < handleSize && Math.abs(y - (cy + ch)) < handleSize) return "br";
+  
+  // Check edges
+  if (Math.abs(x - (cx + cw / 2)) < handleSize && Math.abs(y - cy) < handleSize) return "t";
+  if (Math.abs(x - (cx + cw / 2)) < handleSize && Math.abs(y - (cy + ch)) < handleSize) return "b";
+  if (Math.abs(y - (cy + ch / 2)) < handleSize && Math.abs(x - cx) < handleSize) return "l";
+  if (Math.abs(y - (cy + ch / 2)) < handleSize && Math.abs(x - (cx + cw)) < handleSize) return "r";
+  
+  return null;
+}
+
+function updateCursorForHandle(handle: string | null) {
+  if (!handle) {
+    canvasContainer.style.cursor = "default";
+  } else if (handle === "tl" || handle === "br") {
+    canvasContainer.style.cursor = "nwse-resize";
+  } else if (handle === "tr" || handle === "bl") {
+    canvasContainer.style.cursor = "nesw-resize";
+  } else if (handle === "t" || handle === "b") {
+    canvasContainer.style.cursor = "ns-resize";
+  } else if (handle === "l" || handle === "r") {
+    canvasContainer.style.cursor = "ew-resize";
+  }
+}
+
+function adjustCropRegion(handle: string, dx: number, dy: number) {
+  if (!cropRegion || !currentImage) return;
+  
+  const { x, y, width, height } = cropRegion;
+  let newX = x, newY = y, newWidth = width, newHeight = height;
+  
+  switch (handle) {
+    case "tl":
+      newX = x + dx;
+      newY = y + dy;
+      newWidth = width - dx;
+      newHeight = height - dy;
+      break;
+    case "tr":
+      newY = y + dy;
+      newWidth = width + dx;
+      newHeight = height - dy;
+      break;
+    case "bl":
+      newX = x + dx;
+      newWidth = width - dx;
+      newHeight = height + dy;
+      break;
+    case "br":
+      newWidth = width + dx;
+      newHeight = height + dy;
+      break;
+    case "t":
+      newY = y + dy;
+      newHeight = height - dy;
+      break;
+    case "b":
+      newHeight = height + dy;
+      break;
+    case "l":
+      newX = x + dx;
+      newWidth = width - dx;
+      break;
+    case "r":
+      newWidth = width + dx;
+      break;
+  }
+  
+  // Constrain to image bounds
+  newX = Math.max(0, Math.min(newX, currentImage.width - 10));
+  newY = Math.max(0, Math.min(newY, currentImage.height - 10));
+  newWidth = Math.max(10, Math.min(newWidth, currentImage.width - newX));
+  newHeight = Math.max(10, Math.min(newHeight, currentImage.height - newY));
+  
+  cropRegion.x = newX;
+  cropRegion.y = newY;
+  cropRegion.width = newWidth;
+  cropRegion.height = newHeight;
+  
+  updateCropInfo();
+}
+
+// Fast update - only changes transform (for panning/zooming)
+function updateTransform() {
+  const transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  mainCanvas.style.transform = transform;
+  mainCanvas.style.transformOrigin = "0 0";
+  mainCanvas.style.willChange = "transform";
+  
+  cropOverlay.style.transform = transform;
+  cropOverlay.style.transformOrigin = "0 0";
+  cropOverlay.style.willChange = "transform";
+  
+  // Use crisp pixels when zoomed in (>= 1x), filtered when zoomed out (< 1x)
+  if (zoom >= 1) {
+    mainCanvas.style.imageRendering = "pixelated";
+  } else {
+    mainCanvas.style.imageRendering = "auto";
+  }
+  
+  // Redraw crop overlay whenever transform changes
+  drawCropOverlay();
+}
+
+// Full redraw - updates canvas content
 function redrawCanvas() {
   if (!currentImage) return;
   
-  // Clear
+  // Clear and redraw base image
   ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
-  
-  // Draw image
   const imageData = new ImageData(
     new Uint8ClampedArray(currentImage.data),
     currentImage.width,
@@ -549,34 +835,67 @@ function redrawCanvas() {
   );
   ctx.putImageData(imageData, 0, 0);
   
-  // Draw crop region
-  if (cropRegion) {
-    ctx.strokeStyle = "#4f46e5";
-    ctx.lineWidth = 3 / zoom; // Scale line width inversely to zoom
-    ctx.strokeRect(
-      cropRegion.x,
-      cropRegion.y,
-      cropRegion.width,
-      cropRegion.height,
-    );
-    
-    // Draw handles
-    const handleSize = 10 / zoom;
-    ctx.fillStyle = "#4f46e5";
-    const corners = [
-      [cropRegion.x, cropRegion.y],
-      [cropRegion.x + cropRegion.width, cropRegion.y],
-      [cropRegion.x, cropRegion.y + cropRegion.height],
-      [cropRegion.x + cropRegion.width, cropRegion.y + cropRegion.height],
-    ];
-    for (const [x, y] of corners) {
-      ctx.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
-    }
+  drawCropOverlay();
+}
+
+// Draw crop overlay with darkened mask and handles
+function drawCropOverlay() {
+  if (!currentImage || !cropRegion) {
+    cropCtx.clearRect(0, 0, cropOverlay.width, cropOverlay.height);
+    return;
   }
   
-  // Apply transform for viewport
-  mainCanvas.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
-  mainCanvas.style.transformOrigin = "0 0";
+  cropCtx.clearRect(0, 0, cropOverlay.width, cropOverlay.height);
+  
+  // Draw darkened mask over entire image
+  cropCtx.fillStyle = "rgba(0, 0, 0, 0.5)";
+  cropCtx.fillRect(0, 0, currentImage.width, currentImage.height);
+  
+  // Clear the crop region (composite mode)
+  cropCtx.globalCompositeOperation = "destination-out";
+  cropCtx.fillRect(
+    cropRegion.x,
+    cropRegion.y,
+    cropRegion.width,
+    cropRegion.height,
+  );
+  cropCtx.globalCompositeOperation = "source-over";
+  
+  // Draw crop rectangle border
+  cropCtx.strokeStyle = "#4f46e5";
+  cropCtx.lineWidth = 3 / zoom;
+  cropCtx.strokeRect(
+    cropRegion.x,
+    cropRegion.y,
+    cropRegion.width,
+    cropRegion.height,
+  );
+  
+  // Draw handles - 4 corners + 4 edges
+  const handleSize = 10 / zoom;
+  cropCtx.fillStyle = "#4f46e5";
+  
+  const cx = cropRegion.x;
+  const cy = cropRegion.y;
+  const cw = cropRegion.width;
+  const ch = cropRegion.height;
+  
+  const handles = [
+    // Corners
+    [cx, cy],                     // top-left
+    [cx + cw, cy],                // top-right
+    [cx, cy + ch],                // bottom-left
+    [cx + cw, cy + ch],           // bottom-right
+    // Edges
+    [cx + cw / 2, cy],            // top
+    [cx + cw, cy + ch / 2],       // right
+    [cx + cw / 2, cy + ch],       // bottom
+    [cx, cy + ch / 2],            // left
+  ];
+  
+  for (const [x, y] of handles) {
+    cropCtx.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
+  }
 }
 
 async function processImage(image: RGBAImage) {
@@ -719,19 +1038,21 @@ async function refreshFileList() {
   console.log(`Refreshing file list: ${files.length} files`);
   
   if (files.length === 0) {
-    fileListEl.innerHTML = `
-      <div style="padding: 2rem; text-align: center; color: #999;">
-        No files yet<br>Upload a PDF or image
+    uploadFileList.innerHTML = `
+      <div class="upload-empty">
+        <div>📁</div>
+        <div>No files yet</div>
       </div>
     `;
     return;
   }
   
-  fileListEl.innerHTML = "";
+  uploadFileList.innerHTML = `<div class="files-grid"></div>`;
+  const filesGrid = uploadFileList.querySelector(".files-grid") as HTMLDivElement;
   
   for (const file of files) {
     const item = document.createElement("div");
-    item.className = "file-item";
+    item.className = "file-card";
     if (file.id === currentFileId) {
       item.classList.add("active");
     }
@@ -788,7 +1109,7 @@ async function refreshFileList() {
     
     item.onclick = () => loadStoredFile(file.id);
     
-    fileListEl.appendChild(item);
+    filesGrid.appendChild(item);
   }
 }
 
