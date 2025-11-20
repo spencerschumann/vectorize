@@ -46,7 +46,9 @@ let currentFileId: string | null = null;
 let currentFile: File | null = null;
 let currentPdfData: Uint8Array | null = null;
 let currentImage: RGBAImage | null = null;
+let currentSelectedPage: number | null = null;
 let pdfPageCount = 0;
+let cancelThumbnailLoading = false;
 
 // Canvas/Viewport State
 let zoom = 1.0;
@@ -70,6 +72,7 @@ const uploadScreen = document.getElementById("uploadScreen") as HTMLDivElement;
 const pageSelectionScreen = document.getElementById("pageSelectionScreen") as HTMLDivElement;
 const pdfFileName = document.getElementById("pdfFileName") as HTMLHeadingElement;
 const pageGrid = document.getElementById("pageGrid") as HTMLDivElement;
+const pageStatusText = document.getElementById("pageStatusText") as HTMLDivElement;
 const backToFilesBtn = document.getElementById("backToFilesBtn") as HTMLButtonElement;
 
 const cropScreen = document.getElementById("cropScreen") as HTMLDivElement;
@@ -342,11 +345,16 @@ function setMode(mode: AppMode) {
 }
 
 function showStatus(message: string, isError = false) {
-  statusText.textContent = message;
+  // Update status in whichever screen is currently visible
+  const activeStatusText = pageSelectionScreen.classList.contains("active") 
+    ? pageStatusText 
+    : statusText;
+  
+  activeStatusText.textContent = message;
   if (isError) {
-    statusText.classList.add("status-error");
+    activeStatusText.classList.add("status-error");
   } else {
-    statusText.classList.remove("status-error");
+    activeStatusText.classList.remove("status-error");
   }
   console.log(message);
 }
@@ -414,6 +422,10 @@ async function loadPdf(file: File) {
     // Generate page thumbnails
     console.log("loadPdf: Generating page thumbnails, clearing pageGrid");
     console.log("loadPdf: pageGrid element:", pageGrid);
+    const existingCards = pageGrid.children.length;
+    if (existingCards > 0) {
+      console.log(`[THUMBNAIL] PURGING ${existingCards} existing thumbnail cards from cache`);
+    }
     pageGrid.innerHTML = "";
     console.log("loadPdf: pageGrid cleared, adding", pdfPageCount, "cards");
     
@@ -459,10 +471,14 @@ async function loadPdf(file: File) {
       
       card.appendChild(imageDiv);
       card.appendChild(label);
+      card.dataset.pageNum = i.toString();
+      
+      // Highlight if this is the currently selected page
+      if (i === currentSelectedPage) {
+        card.classList.add("selected");
+      }
+      
       card.addEventListener("click", () => {
-        // Add loading state immediately
-        card.style.opacity = "0.5";
-        card.style.pointerEvents = "none";
         selectPdfPage(i);
       });
       
@@ -470,6 +486,13 @@ async function loadPdf(file: File) {
     }
     
     // Second pass: render thumbnails with interleaved priority (early pages + largest pages)
+    // Cap at reasonable number for large PDFs (~2-3 screenfuls worth)
+    const MAX_THUMBNAILS = 50;
+    const thumbnailsToRender = Math.min(pdfPageCount, MAX_THUMBNAILS);
+    
+    // Reset cancellation flag
+    cancelThumbnailLoading = false;
+    
     (async () => {
       // Sort pages by size (largest first)
       const pagesBySize = Array.from({ length: pdfPageCount }, (_, i) => i)
@@ -481,44 +504,100 @@ async function loadPdf(file: File) {
       
       // Interleave: [page 1, page 2, largest], [page 3, page 4, 2nd largest], etc.
       const renderQueue: number[] = [];
+      const addedPages = new Set<number>();
       let sequentialIndex = 0;
       let largestIndex = 0;
       
-      while (sequentialIndex < pdfPageCount || largestIndex < pagesBySize.length) {
+      console.log(`[THUMBNAIL] Building render queue for ${thumbnailsToRender} thumbnails out of ${pdfPageCount} pages`);
+      
+      while (renderQueue.length < thumbnailsToRender && (sequentialIndex < pdfPageCount || largestIndex < pagesBySize.length)) {
         // Add next 2 sequential pages
-        if (sequentialIndex < pdfPageCount) {
-          renderQueue.push(sequentialIndex++);
+        if (sequentialIndex < pdfPageCount && renderQueue.length < thumbnailsToRender) {
+          if (!addedPages.has(sequentialIndex)) {
+            renderQueue.push(sequentialIndex);
+            addedPages.add(sequentialIndex);
+          }
+          sequentialIndex++;
         }
-        if (sequentialIndex < pdfPageCount) {
-          renderQueue.push(sequentialIndex++);
+        if (sequentialIndex < pdfPageCount && renderQueue.length < thumbnailsToRender) {
+          if (!addedPages.has(sequentialIndex)) {
+            renderQueue.push(sequentialIndex);
+            addedPages.add(sequentialIndex);
+          }
+          sequentialIndex++;
         }
         
         // Add next largest page (but skip if already in queue)
-        while (largestIndex < pagesBySize.length) {
+        while (largestIndex < pagesBySize.length && renderQueue.length < thumbnailsToRender) {
           const largestPageIdx = pagesBySize[largestIndex++];
-          if (largestPageIdx >= sequentialIndex) {
+          if (!addedPages.has(largestPageIdx)) {
             renderQueue.push(largestPageIdx);
+            addedPages.add(largestPageIdx);
             break;
           }
         }
       }
       
+      console.log(`[THUMBNAIL] Render queue built with ${renderQueue.length} pages:`, renderQueue.map(idx => {
+        const pageNum = idx + 1;
+        const label = pageDimensions[idx]?.pageLabel || `Page ${pageNum}`;
+        return `${pageNum}(${label})`;
+      }).join(', '));
+      
       // Render in batches of 3
       const batchSize = 3;
       let completed = 0;
+      
+      // Store cards array once to avoid re-querying
+      const allCards = Array.from(pageGrid.children);
+      
       for (let i = 0; i < renderQueue.length; i += batchSize) {
-        const batch = [];
-        for (let j = 0; j < batchSize && i + j < renderQueue.length; j++) {
-          const pageNum = renderQueue[i + j] + 1;
-          const cards = Array.from(pageGrid.children);
-          const imageDiv = cards[pageNum - 1].querySelector(".page-card-image") as HTMLElement;
-          batch.push(generatePageThumbnail(pageNum, imageDiv));
+        // Check cancellation flag
+        if (cancelThumbnailLoading) {
+          console.log(`[THUMBNAIL] Loading cancelled after ${completed} thumbnails`);
+          showStatus(`Thumbnail loading cancelled`);
+          return;
         }
-        await Promise.all(batch);
-        completed += batch.length;
-        showStatus(`Loading thumbnails: ${completed}/${pdfPageCount}`);
+        
+        const batch = [];
+        const batchInfo = [];
+        for (let j = 0; j < batchSize && i + j < renderQueue.length; j++) {
+          const pageIndex = renderQueue[i + j];
+          const pageNum = pageIndex + 1;
+          const pageLabel = pageDimensions[pageIndex]?.pageLabel || `Page ${pageNum}`;
+          
+          // Safely get card and image div
+          if (pageIndex < allCards.length) {
+            const card = allCards[pageIndex];
+            const imageDiv = card.querySelector(".page-card-image") as HTMLElement;
+            if (imageDiv) {
+              batchInfo.push(`${pageNum}(${pageLabel})`);
+              batch.push(generatePageThumbnail(pageNum, pageLabel, imageDiv));
+            } else {
+              console.warn(`[THUMBNAIL] No imageDiv found for page ${pageNum}(${pageLabel}) at index ${pageIndex}`);
+            }
+          } else {
+            console.warn(`[THUMBNAIL] Page index ${pageIndex} out of bounds (cards.length=${allCards.length}) for page ${pageNum}`);
+          }
+        }
+        
+        if (batch.length > 0) {
+          console.log(`[THUMBNAIL] Batch ${Math.floor(i / batchSize) + 1}: Rendering ${batchInfo.join(', ')}`);
+          await Promise.all(batch);
+          completed += batch.length;
+          console.log(`[THUMBNAIL] Batch complete. Total: ${completed}/${renderQueue.length}`);
+          const statusMsg = thumbnailsToRender < pdfPageCount 
+            ? `Loading thumbnails: ${completed}/${thumbnailsToRender} (${pdfPageCount} pages total)`
+            : `Loading thumbnails: ${completed}/${pdfPageCount}`;
+          showStatus(statusMsg);
+        } else {
+          console.warn(`[THUMBNAIL] Batch ${Math.floor(i / batchSize) + 1}: No valid thumbnails to render`);
+        }
       }
-      showStatus(`PDF loaded: ${pdfPageCount} pages`);
+      const finalMsg = thumbnailsToRender < pdfPageCount
+        ? `PDF loaded: ${pdfPageCount} pages (showing ${thumbnailsToRender} thumbnails)`
+        : `PDF loaded: ${pdfPageCount} pages`;
+      showStatus(finalMsg);
     })();
   } catch (error) {
     console.error("loadPdf error:", error);
@@ -527,16 +606,21 @@ async function loadPdf(file: File) {
   }
 }
 
-async function generatePageThumbnail(pageNum: number, container: HTMLElement) {
+async function generatePageThumbnail(pageNum: number, pageLabel: string, container: HTMLElement) {
   try {
-    if (!currentPdfData) return;
+    if (!currentPdfData) {
+      console.warn(`[THUMBNAIL] No PDF data for page ${pageNum}(${pageLabel})`);
+      return;
+    }
     
+    console.log(`[THUMBNAIL] START rendering page ${pageNum}(${pageLabel})`);
     const pdfDataCopy = currentPdfData.slice();
     const image = await renderPdfPage(
-      { file: pdfDataCopy, pageNumber: pageNum, scale: 0.8 },
+      { file: pdfDataCopy, pageNumber: pageNum, scale: 0.4 },
       browserCanvasBackend,
       pdfjsLib,
     );
+    console.log(`[THUMBNAIL] RENDERED page ${pageNum}(${pageLabel}): ${image.width}x${image.height}`);
     
     // Set the container's aspect ratio based on actual page dimensions
     const aspectRatio = image.width / image.height;
@@ -559,9 +643,10 @@ async function generatePageThumbnail(pageNum: number, container: HTMLElement) {
       img.src = canvas.toDataURL();
       container.innerHTML = "";
       container.appendChild(img);
+      console.log(`[THUMBNAIL] COMPLETE page ${pageNum}(${pageLabel}) - image inserted into DOM`);
     }
   } catch (err) {
-    console.error(`Error generating thumbnail for page ${pageNum}:`, err);
+    console.error(`[THUMBNAIL] ERROR generating thumbnail for page ${pageNum}(${pageLabel}):`, err);
   }
 }
 
@@ -574,28 +659,58 @@ async function selectPdfPage(pageNum: number) {
       return;
     }
     
+    // Cancel any ongoing thumbnail loading
+    cancelThumbnailLoading = true;
+    
+    // Update selected page tracking
+    currentSelectedPage = pageNum;
+    
+    // Update page card selection highlighting
+    const cards = pageGrid.querySelectorAll(".page-card");
+    cards.forEach(card => card.classList.remove("selected"));
+    const selectedCard = pageGrid.querySelector(`[data-page-num="${pageNum}"]`);
+    if (selectedCard) {
+      selectedCard.classList.add("selected");
+    }
+    
     // Switch to crop screen immediately with loading state
     setMode("crop");
     
-    // Clear previous canvas content
+    // Clear previous canvas content AND hide crop overlay
     ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
+    cropCtx.clearRect(0, 0, cropOverlay.width, cropOverlay.height);
     mainCanvas.width = 0;
     mainCanvas.height = 0;
+    cropOverlay.width = 0;
+    cropOverlay.height = 0;
+    cropOverlay.style.display = "none";
     
     showStatus(`⏳ Rendering page ${pageNum} at 200 DPI...`);
     canvasContainer.style.opacity = "0.3";
     
+    // Simulate progress indicator (since PDF.js doesn't provide real progress)
+    let progressDots = 0;
+    const progressInterval = setInterval(() => {
+      progressDots = (progressDots + 1) % 4;
+      showStatus(`⏳ Rendering page ${pageNum} at 200 DPI${'.'.repeat(progressDots)}`);
+    }, 300);
+    
     console.log("selectPdfPage: Creating copy");
     const pdfDataCopy = currentPdfData.slice();
     console.log("selectPdfPage: Calling renderPdfPage");
-    // Scale 2.78 ≈ 200 DPI (72 * 2.78 ≈ 200)
+    // Scale 2.778 ≈ 200 DPI (72 * 2.778 ≈ 200)
     const image = await renderPdfPage(
-      { file: pdfDataCopy, pageNumber: pageNum, scale: 2.78 },
+      { 
+        file: pdfDataCopy, 
+        pageNumber: pageNum, 
+        scale: 2.778
+      },
       browserCanvasBackend,
       pdfjsLib,
     );
     console.log("selectPdfPage: Got image", image.width, "x", image.height);
     
+    clearInterval(progressInterval);
     canvasContainer.style.opacity = "1";
     await loadImage(image);
     showStatus(`✓ Page ${pageNum} loaded: ${image.width}×${image.height}`);
@@ -621,9 +736,8 @@ function loadImage(image: RGBAImage) {
   cropOverlay.width = image.width;
   cropOverlay.height = image.height;
   
-  // Make sure canvas is visible
+  // Make sure main canvas is visible (crop overlay shown after drawing)
   mainCanvas.style.display = "block";
-  cropOverlay.style.display = "block";
   canvasContainer.style.opacity = "1";
   
   // Load saved crop settings or set default 10% margin
@@ -644,6 +758,7 @@ function loadImage(image: RGBAImage) {
   
   // Then fit to screen and draw crop
   fitToScreen();
+  cropOverlay.style.display = "block";
   drawCropOverlay();
   
   showStatus(`✓ Ready: ${image.width}×${image.height} pixels`);
@@ -815,7 +930,7 @@ function updateTransform() {
   if (zoom >= 1) {
     mainCanvas.style.imageRendering = "pixelated";
   } else {
-    mainCanvas.style.imageRendering = "auto";
+    mainCanvas.style.imageRendering = "smooth";
   }
   
   // Redraw crop overlay whenever transform changes
@@ -853,6 +968,7 @@ function drawCropOverlay() {
   
   // Clear the crop region (composite mode)
   cropCtx.globalCompositeOperation = "destination-out";
+  cropCtx.fillStyle = "rgba(0, 0, 0, 1)";
   cropCtx.fillRect(
     cropRegion.x,
     cropRegion.y,

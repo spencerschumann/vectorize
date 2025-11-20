@@ -379,6 +379,11 @@
             transform: translateY(-2px);
         }
 
+        .page-card.selected {
+            border-color: #4f46e5;
+            background: #3a3a4a;
+        }
+
         .page-card-image {
             height: 250px;
             background: #1a1a1a;
@@ -638,6 +643,9 @@
                 <button id="backToFilesBtn">← Back to Files</button>
             </div>
             <div class="page-grid" id="pageGrid"></div>
+            <div class="status-bar">
+                <div class="status-text" id="pageStatusText">Ready</div>
+            </div>
         </div>
 
         <!-- Crop/Edit Screen -->

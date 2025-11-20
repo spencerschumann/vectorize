@@ -800,7 +800,9 @@ var currentFileId = null;
 var currentFile = null;
 var currentPdfData = null;
 var currentImage = null;
+var currentSelectedPage = null;
 var pdfPageCount = 0;
+var cancelThumbnailLoading = false;
 var zoom = 1;
 var panX = 0;
 var panY = 0;
@@ -818,6 +820,7 @@ var uploadScreen = document.getElementById("uploadScreen");
 var pageSelectionScreen = document.getElementById("pageSelectionScreen");
 var pdfFileName = document.getElementById("pdfFileName");
 var pageGrid = document.getElementById("pageGrid");
+var pageStatusText = document.getElementById("pageStatusText");
 var backToFilesBtn = document.getElementById("backToFilesBtn");
 var cropScreen = document.getElementById("cropScreen");
 var canvasContainer = document.getElementById("canvasContainer");
@@ -1030,11 +1033,12 @@ function setMode(mode) {
   }
 }
 function showStatus(message, isError = false) {
-  statusText.textContent = message;
+  const activeStatusText = pageSelectionScreen.classList.contains("active") ? pageStatusText : statusText;
+  activeStatusText.textContent = message;
   if (isError) {
-    statusText.classList.add("status-error");
+    activeStatusText.classList.add("status-error");
   } else {
-    statusText.classList.remove("status-error");
+    activeStatusText.classList.remove("status-error");
   }
   console.log(message);
 }
@@ -1093,6 +1097,10 @@ async function loadPdf(file) {
     console.log("loadPdf: pdfFileName set, about to generate thumbnails");
     console.log("loadPdf: Generating page thumbnails, clearing pageGrid");
     console.log("loadPdf: pageGrid element:", pageGrid);
+    const existingCards = pageGrid.children.length;
+    if (existingCards > 0) {
+      console.log(`[THUMBNAIL] PURGING ${existingCards} existing thumbnail cards from cache`);
+    }
     pageGrid.innerHTML = "";
     console.log("loadPdf: pageGrid cleared, adding", pdfPageCount, "cards");
     const pageDimensions = [];
@@ -1123,13 +1131,18 @@ async function loadPdf(file) {
       label.textContent = pageLabel;
       card.appendChild(imageDiv);
       card.appendChild(label);
+      card.dataset.pageNum = i.toString();
+      if (i === currentSelectedPage) {
+        card.classList.add("selected");
+      }
       card.addEventListener("click", () => {
-        card.style.opacity = "0.5";
-        card.style.pointerEvents = "none";
         selectPdfPage(i);
       });
       pageGrid.appendChild(card);
     }
+    const MAX_THUMBNAILS = 50;
+    const thumbnailsToRender = Math.min(pdfPageCount, MAX_THUMBNAILS);
+    cancelThumbnailLoading = false;
     (async () => {
       const pagesBySize = Array.from({ length: pdfPageCount }, (_, i) => i).sort((a, b) => {
         const areaA = pageDimensions[a].width * pageDimensions[a].height;
@@ -1137,38 +1150,80 @@ async function loadPdf(file) {
         return areaB - areaA;
       });
       const renderQueue = [];
+      const addedPages = /* @__PURE__ */ new Set();
       let sequentialIndex = 0;
       let largestIndex = 0;
-      while (sequentialIndex < pdfPageCount || largestIndex < pagesBySize.length) {
-        if (sequentialIndex < pdfPageCount) {
-          renderQueue.push(sequentialIndex++);
+      console.log(`[THUMBNAIL] Building render queue for ${thumbnailsToRender} thumbnails out of ${pdfPageCount} pages`);
+      while (renderQueue.length < thumbnailsToRender && (sequentialIndex < pdfPageCount || largestIndex < pagesBySize.length)) {
+        if (sequentialIndex < pdfPageCount && renderQueue.length < thumbnailsToRender) {
+          if (!addedPages.has(sequentialIndex)) {
+            renderQueue.push(sequentialIndex);
+            addedPages.add(sequentialIndex);
+          }
+          sequentialIndex++;
         }
-        if (sequentialIndex < pdfPageCount) {
-          renderQueue.push(sequentialIndex++);
+        if (sequentialIndex < pdfPageCount && renderQueue.length < thumbnailsToRender) {
+          if (!addedPages.has(sequentialIndex)) {
+            renderQueue.push(sequentialIndex);
+            addedPages.add(sequentialIndex);
+          }
+          sequentialIndex++;
         }
-        while (largestIndex < pagesBySize.length) {
+        while (largestIndex < pagesBySize.length && renderQueue.length < thumbnailsToRender) {
           const largestPageIdx = pagesBySize[largestIndex++];
-          if (largestPageIdx >= sequentialIndex) {
+          if (!addedPages.has(largestPageIdx)) {
             renderQueue.push(largestPageIdx);
+            addedPages.add(largestPageIdx);
             break;
           }
         }
       }
+      console.log(`[THUMBNAIL] Render queue built with ${renderQueue.length} pages:`, renderQueue.map((idx) => {
+        const pageNum = idx + 1;
+        const label = pageDimensions[idx]?.pageLabel || `Page ${pageNum}`;
+        return `${pageNum}(${label})`;
+      }).join(", "));
       const batchSize = 3;
       let completed = 0;
+      const allCards = Array.from(pageGrid.children);
       for (let i = 0; i < renderQueue.length; i += batchSize) {
-        const batch = [];
-        for (let j = 0; j < batchSize && i + j < renderQueue.length; j++) {
-          const pageNum = renderQueue[i + j] + 1;
-          const cards = Array.from(pageGrid.children);
-          const imageDiv = cards[pageNum - 1].querySelector(".page-card-image");
-          batch.push(generatePageThumbnail(pageNum, imageDiv));
+        if (cancelThumbnailLoading) {
+          console.log(`[THUMBNAIL] Loading cancelled after ${completed} thumbnails`);
+          showStatus(`Thumbnail loading cancelled`);
+          return;
         }
-        await Promise.all(batch);
-        completed += batch.length;
-        showStatus(`Loading thumbnails: ${completed}/${pdfPageCount}`);
+        const batch = [];
+        const batchInfo = [];
+        for (let j = 0; j < batchSize && i + j < renderQueue.length; j++) {
+          const pageIndex = renderQueue[i + j];
+          const pageNum = pageIndex + 1;
+          const pageLabel = pageDimensions[pageIndex]?.pageLabel || `Page ${pageNum}`;
+          if (pageIndex < allCards.length) {
+            const card = allCards[pageIndex];
+            const imageDiv = card.querySelector(".page-card-image");
+            if (imageDiv) {
+              batchInfo.push(`${pageNum}(${pageLabel})`);
+              batch.push(generatePageThumbnail(pageNum, pageLabel, imageDiv));
+            } else {
+              console.warn(`[THUMBNAIL] No imageDiv found for page ${pageNum}(${pageLabel}) at index ${pageIndex}`);
+            }
+          } else {
+            console.warn(`[THUMBNAIL] Page index ${pageIndex} out of bounds (cards.length=${allCards.length}) for page ${pageNum}`);
+          }
+        }
+        if (batch.length > 0) {
+          console.log(`[THUMBNAIL] Batch ${Math.floor(i / batchSize) + 1}: Rendering ${batchInfo.join(", ")}`);
+          await Promise.all(batch);
+          completed += batch.length;
+          console.log(`[THUMBNAIL] Batch complete. Total: ${completed}/${renderQueue.length}`);
+          const statusMsg = thumbnailsToRender < pdfPageCount ? `Loading thumbnails: ${completed}/${thumbnailsToRender} (${pdfPageCount} pages total)` : `Loading thumbnails: ${completed}/${pdfPageCount}`;
+          showStatus(statusMsg);
+        } else {
+          console.warn(`[THUMBNAIL] Batch ${Math.floor(i / batchSize) + 1}: No valid thumbnails to render`);
+        }
       }
-      showStatus(`PDF loaded: ${pdfPageCount} pages`);
+      const finalMsg = thumbnailsToRender < pdfPageCount ? `PDF loaded: ${pdfPageCount} pages (showing ${thumbnailsToRender} thumbnails)` : `PDF loaded: ${pdfPageCount} pages`;
+      showStatus(finalMsg);
     })();
   } catch (error) {
     console.error("loadPdf error:", error);
@@ -1176,15 +1231,20 @@ async function loadPdf(file) {
     throw error;
   }
 }
-async function generatePageThumbnail(pageNum, container) {
+async function generatePageThumbnail(pageNum, pageLabel, container) {
   try {
-    if (!currentPdfData) return;
+    if (!currentPdfData) {
+      console.warn(`[THUMBNAIL] No PDF data for page ${pageNum}(${pageLabel})`);
+      return;
+    }
+    console.log(`[THUMBNAIL] START rendering page ${pageNum}(${pageLabel})`);
     const pdfDataCopy = currentPdfData.slice();
     const image = await renderPdfPage(
-      { file: pdfDataCopy, pageNumber: pageNum, scale: 0.8 },
+      { file: pdfDataCopy, pageNumber: pageNum, scale: 0.4 },
       browserCanvasBackend,
       pdfjsLib
     );
+    console.log(`[THUMBNAIL] RENDERED page ${pageNum}(${pageLabel}): ${image.width}x${image.height}`);
     const aspectRatio = image.width / image.height;
     container.style.aspectRatio = aspectRatio.toString();
     container.style.width = 250 * aspectRatio + "px";
@@ -1203,9 +1263,10 @@ async function generatePageThumbnail(pageNum, container) {
       img.src = canvas.toDataURL();
       container.innerHTML = "";
       container.appendChild(img);
+      console.log(`[THUMBNAIL] COMPLETE page ${pageNum}(${pageLabel}) - image inserted into DOM`);
     }
   } catch (err) {
-    console.error(`Error generating thumbnail for page ${pageNum}:`, err);
+    console.error(`[THUMBNAIL] ERROR generating thumbnail for page ${pageNum}(${pageLabel}):`, err);
   }
 }
 async function selectPdfPage(pageNum) {
@@ -1216,21 +1277,43 @@ async function selectPdfPage(pageNum) {
       showStatus("No PDF loaded", true);
       return;
     }
+    cancelThumbnailLoading = true;
+    currentSelectedPage = pageNum;
+    const cards = pageGrid.querySelectorAll(".page-card");
+    cards.forEach((card) => card.classList.remove("selected"));
+    const selectedCard = pageGrid.querySelector(`[data-page-num="${pageNum}"]`);
+    if (selectedCard) {
+      selectedCard.classList.add("selected");
+    }
     setMode("crop");
     ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
+    cropCtx.clearRect(0, 0, cropOverlay.width, cropOverlay.height);
     mainCanvas.width = 0;
     mainCanvas.height = 0;
+    cropOverlay.width = 0;
+    cropOverlay.height = 0;
+    cropOverlay.style.display = "none";
     showStatus(`\u23F3 Rendering page ${pageNum} at 200 DPI...`);
     canvasContainer.style.opacity = "0.3";
+    let progressDots = 0;
+    const progressInterval = setInterval(() => {
+      progressDots = (progressDots + 1) % 4;
+      showStatus(`\u23F3 Rendering page ${pageNum} at 200 DPI${".".repeat(progressDots)}`);
+    }, 300);
     console.log("selectPdfPage: Creating copy");
     const pdfDataCopy = currentPdfData.slice();
     console.log("selectPdfPage: Calling renderPdfPage");
     const image = await renderPdfPage(
-      { file: pdfDataCopy, pageNumber: pageNum, scale: 2.78 },
+      {
+        file: pdfDataCopy,
+        pageNumber: pageNum,
+        scale: 2.778
+      },
       browserCanvasBackend,
       pdfjsLib
     );
     console.log("selectPdfPage: Got image", image.width, "x", image.height);
+    clearInterval(progressInterval);
     canvasContainer.style.opacity = "1";
     await loadImage(image);
     showStatus(`\u2713 Page ${pageNum} loaded: ${image.width}\xD7${image.height}`);
@@ -1251,7 +1334,6 @@ function loadImage(image) {
   cropOverlay.width = image.width;
   cropOverlay.height = image.height;
   mainCanvas.style.display = "block";
-  cropOverlay.style.display = "block";
   canvasContainer.style.opacity = "1";
   const savedCrop = getCropSettings(image.width, image.height);
   if (savedCrop) {
@@ -1266,6 +1348,7 @@ function loadImage(image) {
   );
   ctx.putImageData(imageData, 0, 0);
   fitToScreen();
+  cropOverlay.style.display = "block";
   drawCropOverlay();
   showStatus(`\u2713 Ready: ${image.width}\xD7${image.height} pixels`);
 }
@@ -1405,7 +1488,7 @@ function updateTransform() {
   if (zoom >= 1) {
     mainCanvas.style.imageRendering = "pixelated";
   } else {
-    mainCanvas.style.imageRendering = "auto";
+    mainCanvas.style.imageRendering = "smooth";
   }
   drawCropOverlay();
 }
@@ -1429,6 +1512,7 @@ function drawCropOverlay() {
   cropCtx.fillStyle = "rgba(0, 0, 0, 0.5)";
   cropCtx.fillRect(0, 0, currentImage.width, currentImage.height);
   cropCtx.globalCompositeOperation = "destination-out";
+  cropCtx.fillStyle = "rgba(0, 0, 0, 1)";
   cropCtx.fillRect(
     cropRegion.x,
     cropRegion.y,
