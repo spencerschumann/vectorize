@@ -803,6 +803,8 @@ var currentImage = null;
 var currentSelectedPage = null;
 var pdfPageCount = 0;
 var cancelThumbnailLoading = false;
+var currentStage = "raw";
+var processedImages = /* @__PURE__ */ new Map();
 var zoom = 1;
 var panX = 0;
 var panY = 0;
@@ -812,6 +814,12 @@ var activeCropHandle = null;
 var cropRegion = null;
 var lastPanX = 0;
 var lastPanY = 0;
+var processZoom = 1;
+var processPanX = 0;
+var processPanY = 0;
+var isProcessPanning = false;
+var lastProcessPanX = 0;
+var lastProcessPanY = 0;
 var uploadFileList = document.getElementById("uploadFileList");
 var uploadBtn = document.getElementById("uploadBtn");
 var clearAllBtn = document.getElementById("clearAllBtn");
@@ -839,6 +847,44 @@ var backFromCropBtn = document.getElementById("backFromCropBtn");
 var statusText = document.getElementById("statusText");
 var resultsPanel = document.getElementById("resultsPanel");
 var resultsContainer = document.getElementById("resultsContainer");
+var processingScreen = document.getElementById("processingScreen");
+var processCanvasContainer = document.getElementById("processCanvasContainer");
+var processCanvas = document.getElementById("processCanvas");
+var processCtx = processCanvas.getContext("2d");
+var processZoomInBtn = document.getElementById("processZoomInBtn");
+var processZoomOutBtn = document.getElementById("processZoomOutBtn");
+var processZoomLevel = document.getElementById("processZoomLevel");
+var processFitToScreenBtn = document.getElementById("processFitToScreenBtn");
+var processStatusText = document.getElementById("processStatusText");
+var backToCropBtn = document.getElementById("backToCropBtn");
+var stageRawBtn = document.getElementById("stageRawBtn");
+var stageCroppedBtn = document.getElementById("stageCroppedBtn");
+var stageThresholdBtn = document.getElementById("stageThresholdBtn");
+var stagePalettizedBtn = document.getElementById("stagePalettizedBtn");
+var stageMedianBtn = document.getElementById("stageMedianBtn");
+var stageBinaryBtn = document.getElementById("stageBinaryBtn");
+backToCropBtn.addEventListener("click", () => {
+  setMode("crop");
+});
+stageRawBtn.addEventListener("click", () => displayProcessingStage("raw"));
+stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
+stageThresholdBtn.addEventListener("click", () => displayProcessingStage("threshold"));
+stagePalettizedBtn.addEventListener("click", () => displayProcessingStage("palettized"));
+stageMedianBtn.addEventListener("click", () => displayProcessingStage("median"));
+stageBinaryBtn.addEventListener("click", () => displayProcessingStage("binary"));
+processZoomInBtn.addEventListener("click", () => {
+  processZoom = Math.min(10, processZoom * 1.2);
+  updateProcessZoom();
+  updateProcessTransform();
+});
+processZoomOutBtn.addEventListener("click", () => {
+  processZoom = Math.max(0.1, processZoom / 1.2);
+  updateProcessZoom();
+  updateProcessTransform();
+});
+processFitToScreenBtn.addEventListener("click", () => {
+  processFitToScreen();
+});
 refreshFileList();
 setMode("upload");
 uploadBtn.addEventListener("click", (e) => {
@@ -918,9 +964,9 @@ clearCropBtn.addEventListener("click", () => {
     drawCropOverlay();
   }
 });
-processBtn.addEventListener("click", () => {
+processBtn.addEventListener("click", async () => {
   if (currentImage) {
-    processImage(currentImage);
+    await startProcessing();
   }
 });
 canvasContainer.addEventListener("mousedown", (e) => {
@@ -1005,12 +1051,65 @@ canvasContainer.addEventListener("wheel", (e) => {
     updateTransform();
   }
 });
+processCanvasContainer.addEventListener("mousedown", (e) => {
+  isProcessPanning = true;
+  lastProcessPanX = e.clientX;
+  lastProcessPanY = e.clientY;
+  processCanvasContainer.classList.add("grabbing");
+});
+processCanvasContainer.addEventListener("mousemove", (e) => {
+  if (isProcessPanning) {
+    const dx = e.clientX - lastProcessPanX;
+    const dy = e.clientY - lastProcessPanY;
+    processPanX += dx;
+    processPanY += dy;
+    lastProcessPanX = e.clientX;
+    lastProcessPanY = e.clientY;
+    updateProcessTransform();
+  }
+});
+processCanvasContainer.addEventListener("mouseup", () => {
+  if (isProcessPanning) {
+    isProcessPanning = false;
+    processCanvasContainer.classList.remove("grabbing");
+  }
+});
+processCanvasContainer.addEventListener("mouseleave", () => {
+  isProcessPanning = false;
+  processCanvasContainer.classList.remove("grabbing");
+});
+processCanvasContainer.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const isPinchZoom = e.ctrlKey;
+  if (isPinchZoom) {
+    const rect = processCanvasContainer.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    const image = processedImages.get(currentStage);
+    if (!image) return;
+    const canvasX = (mouseX - processPanX) / processZoom;
+    const canvasY = (mouseY - processPanY) / processZoom;
+    const zoomSpeed = 5e-3;
+    const zoomChange = -e.deltaY * zoomSpeed * processZoom;
+    const newZoom = Math.max(0.1, Math.min(10, processZoom + zoomChange));
+    processPanX = mouseX - canvasX * newZoom;
+    processPanY = mouseY - canvasY * newZoom;
+    processZoom = newZoom;
+    updateProcessZoom();
+    updateProcessTransform();
+  } else {
+    processPanX -= e.deltaX;
+    processPanY -= e.deltaY;
+    updateProcessTransform();
+  }
+});
 function setMode(mode) {
   console.log("setMode called:", mode);
   currentMode = mode;
   uploadScreen.classList.remove("active");
   pageSelectionScreen.classList.remove("active");
   cropScreen.classList.remove("active");
+  processingScreen.classList.remove("active");
   pageSelectionScreen.style.display = "";
   switch (mode) {
     case "upload":
@@ -1030,10 +1129,19 @@ function setMode(mode) {
       cropScreen.classList.add("active");
       console.log("Crop screen activated");
       break;
+    case "processing":
+      processingScreen.classList.add("active");
+      console.log("Processing screen activated");
+      break;
   }
 }
 function showStatus(message, isError = false) {
-  const activeStatusText = pageSelectionScreen.classList.contains("active") ? pageStatusText : statusText;
+  let activeStatusText = statusText;
+  if (pageSelectionScreen.classList.contains("active")) {
+    activeStatusText = pageStatusText;
+  } else if (processingScreen.classList.contains("active")) {
+    activeStatusText = processStatusText;
+  }
   activeStatusText.textContent = message;
   if (isError) {
     activeStatusText.classList.add("status-error");
@@ -1558,44 +1666,138 @@ function drawCropOverlay() {
     cropCtx.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
   }
 }
-async function processImage(image) {
+async function startProcessing() {
+  if (!currentImage) return;
   try {
-    resultsContainer.innerHTML = "";
-    resultsPanel.classList.add("active");
-    let processImage2 = image;
+    setMode("processing");
+    processedImages.clear();
+    processedImages.set("raw", currentImage);
+    displayProcessingStage("raw");
+    let processImage = currentImage;
     if (cropRegion && cropRegion.width > 0 && cropRegion.height > 0) {
       showStatus("Cropping image...");
-      processImage2 = cropImage(image, cropRegion);
-      displayResult(processImage2, "Cropped");
+      processImage = cropImage(currentImage, cropRegion);
+      processedImages.set("cropped", processImage);
+      displayProcessingStage("cropped");
     } else {
-      displayResult(image, "Original");
+      processedImages.set("cropped", currentImage);
     }
     showStatus("Running white threshold...");
     const t1 = performance.now();
-    const thresholded = await whiteThresholdGPU(processImage2, 0.85);
+    const thresholded = await whiteThresholdGPU(processImage, 0.85);
     const t2 = performance.now();
     showStatus(`White threshold: ${(t2 - t1).toFixed(1)}ms`);
-    displayResult(thresholded, "1. White Threshold");
+    processedImages.set("threshold", thresholded);
+    displayProcessingStage("threshold");
     showStatus("Palettizing...");
     const t3 = performance.now();
     const palettized = await palettizeGPU(thresholded, PALETTE_RGBA);
     const t4 = performance.now();
     showStatus(`Palettize: ${(t4 - t3).toFixed(1)}ms`);
+    processedImages.set("palettized", palettized);
+    displayProcessingStage("palettized");
     showStatus("Applying median filter...");
     const t5 = performance.now();
     const median = await median3x3GPU(palettized);
     const t6 = performance.now();
     showStatus(`Median filter: ${(t6 - t5).toFixed(1)}ms`);
+    processedImages.set("median", median);
+    displayProcessingStage("median");
     showStatus("Extracting black...");
     const t7 = performance.now();
-    const _binary = extractBlack(median);
+    const binary = extractBlack(median);
     const t8 = performance.now();
     showStatus(`Extract black: ${(t8 - t7).toFixed(1)}ms`);
+    processedImages.set("binary", binary);
+    displayProcessingStage("binary");
     const totalTime = t8 - t1;
     showStatus(`\u2713 Pipeline complete! Total: ${totalTime.toFixed(1)}ms`);
   } catch (error) {
     showStatus(`Error: ${error.message}`, true);
     console.error(error);
+  }
+}
+function displayProcessingStage(stage) {
+  const image = processedImages.get(stage);
+  if (!image) {
+    showStatus(`Stage ${stage} not available`, true);
+    return;
+  }
+  currentStage = stage;
+  document.querySelectorAll(".stage-btn").forEach((btn) => btn.classList.remove("active"));
+  const stageButtons = {
+    raw: stageRawBtn,
+    cropped: stageCroppedBtn,
+    threshold: stageThresholdBtn,
+    palettized: stagePalettizedBtn,
+    median: stageMedianBtn,
+    binary: stageBinaryBtn
+  };
+  stageButtons[stage]?.classList.add("active");
+  processCanvas.width = image.width;
+  processCanvas.height = image.height;
+  let rgbaData;
+  if ("palette" in image && image.palette) {
+    rgbaData = new Uint8ClampedArray(image.width * image.height * 4);
+    for (let i = 0; i < image.data.length; i++) {
+      const colorIndex = image.data[i];
+      const paletteOffset = colorIndex * 4;
+      const pixelOffset = i * 4;
+      rgbaData[pixelOffset] = image.palette[paletteOffset];
+      rgbaData[pixelOffset + 1] = image.palette[paletteOffset + 1];
+      rgbaData[pixelOffset + 2] = image.palette[paletteOffset + 2];
+      rgbaData[pixelOffset + 3] = image.palette[paletteOffset + 3];
+    }
+  } else if (image.data instanceof Uint8Array && image.data.length === image.width * image.height) {
+    rgbaData = new Uint8ClampedArray(image.width * image.height * 4);
+    for (let i = 0; i < image.data.length; i++) {
+      const value = image.data[i] ? 0 : 255;
+      const offset = i * 4;
+      rgbaData[offset] = value;
+      rgbaData[offset + 1] = value;
+      rgbaData[offset + 2] = value;
+      rgbaData[offset + 3] = 255;
+    }
+  } else {
+    rgbaData = new Uint8ClampedArray(image.data);
+  }
+  const displayData = new Uint8ClampedArray(rgbaData);
+  const imageData = new ImageData(
+    displayData,
+    image.width,
+    image.height
+  );
+  processCtx.putImageData(imageData, 0, 0);
+  processFitToScreen();
+  showStatus(`Viewing: ${stage} (${image.width}\xD7${image.height})`);
+}
+function processFitToScreen() {
+  const image = processedImages.get(currentStage);
+  if (!image) return;
+  const containerWidth = processCanvasContainer.clientWidth;
+  const containerHeight = processCanvasContainer.clientHeight;
+  const imageWidth = image.width;
+  const imageHeight = image.height;
+  const scaleX = containerWidth / imageWidth;
+  const scaleY = containerHeight / imageHeight;
+  processZoom = Math.min(scaleX, scaleY) * 0.9;
+  processPanX = (containerWidth - imageWidth * processZoom) / 2;
+  processPanY = (containerHeight - imageHeight * processZoom) / 2;
+  updateProcessZoom();
+  updateProcessTransform();
+}
+function updateProcessZoom() {
+  processZoomLevel.textContent = `${Math.round(processZoom * 100)}%`;
+}
+function updateProcessTransform() {
+  const transform = `translate(${processPanX}px, ${processPanY}px) scale(${processZoom})`;
+  processCanvas.style.transform = transform;
+  processCanvas.style.transformOrigin = "0 0";
+  processCanvas.style.willChange = "transform";
+  if (processZoom >= 1) {
+    processCanvas.style.imageRendering = "pixelated";
+  } else {
+    processCanvas.style.imageRendering = "auto";
   }
 }
 function cropImage(image, region) {
@@ -1613,29 +1815,6 @@ function cropImage(image, region) {
     );
   }
   return { width, height, data: croppedData };
-}
-function displayResult(image, label) {
-  const item = document.createElement("div");
-  item.className = "result-item";
-  const title = document.createElement("h3");
-  title.textContent = label;
-  const canvas = document.createElement("canvas");
-  canvas.width = image.width;
-  canvas.height = image.height;
-  const ctx2 = canvas.getContext("2d");
-  if (ctx2) {
-    const imageData = new ImageData(
-      new Uint8ClampedArray(image.data),
-      image.width,
-      image.height
-    );
-    ctx2.putImageData(imageData, 0, 0);
-  }
-  const img = document.createElement("img");
-  img.src = canvas.toDataURL();
-  item.appendChild(title);
-  item.appendChild(img);
-  resultsContainer.appendChild(item);
 }
 function generateThumbnail(image) {
   const maxSize = 128;

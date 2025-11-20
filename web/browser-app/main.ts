@@ -7,6 +7,8 @@ import { palettizeGPU } from "../src/gpu/palettize_gpu.ts";
 import { median3x3GPU } from "../src/gpu/median_gpu.ts";
 import { extractBlack } from "../src/raster/threshold.ts";
 import type { RGBAImage } from "../src/formats/rgba_image.ts";
+import type { PalettizedImage } from "../src/formats/palettized.ts";
+import type { BinaryImage } from "../src/formats/binary.ts";
 import { DEFAULT_PALETTE_16 } from "../src/formats/palettized.ts";
 import { saveFile, getFile, listFiles, deleteFile, clearAllFiles, updateFile } from "./storage.ts";
 
@@ -40,7 +42,7 @@ const browserCanvasBackend: CanvasBackend = {
 declare const pdfjsLib: any;
 
 // UI State
-type AppMode = "upload" | "pageSelection" | "crop";
+type AppMode = "upload" | "pageSelection" | "crop" | "processing";
 let currentMode: AppMode = "upload";
 let currentFileId: string | null = null;
 let currentFile: File | null = null;
@@ -49,6 +51,11 @@ let currentImage: RGBAImage | null = null;
 let currentSelectedPage: number | null = null;
 let pdfPageCount = 0;
 let cancelThumbnailLoading = false;
+
+// Processing state
+type ProcessingStage = "raw" | "cropped" | "threshold" | "palettized" | "median" | "binary";
+let currentStage: ProcessingStage = "raw";
+const processedImages: Map<ProcessingStage, RGBAImage | PalettizedImage | BinaryImage> = new Map();
 
 // Canvas/Viewport State
 let zoom = 1.0;
@@ -60,6 +67,14 @@ let activeCropHandle: string | null = null; // 'tl', 'tr', 'bl', 'br', 't', 'r',
 let cropRegion: { x: number; y: number; width: number; height: number } | null = null;
 let lastPanX = 0;
 let lastPanY = 0;
+
+// Processing canvas state
+let processZoom = 1.0;
+let processPanX = 0;
+let processPanY = 0;
+let isProcessPanning = false;
+let lastProcessPanX = 0;
+let lastProcessPanY = 0;
 
 // DOM Elements
 const uploadFileList = document.getElementById("uploadFileList") as HTMLDivElement;
@@ -93,6 +108,52 @@ const backFromCropBtn = document.getElementById("backFromCropBtn") as HTMLButton
 const statusText = document.getElementById("statusText") as HTMLDivElement;
 const resultsPanel = document.getElementById("resultsPanel") as HTMLDivElement;
 const resultsContainer = document.getElementById("resultsContainer") as HTMLDivElement;
+
+const processingScreen = document.getElementById("processingScreen") as HTMLDivElement;
+const processCanvasContainer = document.getElementById("processCanvasContainer") as HTMLDivElement;
+const processCanvas = document.getElementById("processCanvas") as HTMLCanvasElement;
+const processCtx = processCanvas.getContext("2d")!;
+const processZoomInBtn = document.getElementById("processZoomInBtn") as HTMLButtonElement;
+const processZoomOutBtn = document.getElementById("processZoomOutBtn") as HTMLButtonElement;
+const processZoomLevel = document.getElementById("processZoomLevel") as HTMLDivElement;
+const processFitToScreenBtn = document.getElementById("processFitToScreenBtn") as HTMLButtonElement;
+const processStatusText = document.getElementById("processStatusText") as HTMLDivElement;
+const backToCropBtn = document.getElementById("backToCropBtn") as HTMLButtonElement;
+
+const stageRawBtn = document.getElementById("stageRawBtn") as HTMLButtonElement;
+const stageCroppedBtn = document.getElementById("stageCroppedBtn") as HTMLButtonElement;
+const stageThresholdBtn = document.getElementById("stageThresholdBtn") as HTMLButtonElement;
+const stagePalettizedBtn = document.getElementById("stagePalettizedBtn") as HTMLButtonElement;
+const stageMedianBtn = document.getElementById("stageMedianBtn") as HTMLButtonElement;
+const stageBinaryBtn = document.getElementById("stageBinaryBtn") as HTMLButtonElement;
+
+// Processing screen event handlers
+backToCropBtn.addEventListener("click", () => {
+  setMode("crop");
+});
+
+stageRawBtn.addEventListener("click", () => displayProcessingStage("raw"));
+stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
+stageThresholdBtn.addEventListener("click", () => displayProcessingStage("threshold"));
+stagePalettizedBtn.addEventListener("click", () => displayProcessingStage("palettized"));
+stageMedianBtn.addEventListener("click", () => displayProcessingStage("median"));
+stageBinaryBtn.addEventListener("click", () => displayProcessingStage("binary"));
+
+processZoomInBtn.addEventListener("click", () => {
+  processZoom = Math.min(10, processZoom * 1.2);
+  updateProcessZoom();
+  updateProcessTransform();
+});
+
+processZoomOutBtn.addEventListener("click", () => {
+  processZoom = Math.max(0.1, processZoom / 1.2);
+  updateProcessZoom();
+  updateProcessTransform();
+});
+
+processFitToScreenBtn.addEventListener("click", () => {
+  processFitToScreen();
+});
 
 // Initialize
 refreshFileList();
@@ -195,9 +256,9 @@ clearCropBtn.addEventListener("click", () => {
   }
 });
 
-processBtn.addEventListener("click", () => {
+processBtn.addEventListener("click", async () => {
   if (currentImage) {
-    processImage(currentImage);
+    await startProcessing();
   }
 });
 
@@ -310,6 +371,73 @@ canvasContainer.addEventListener("wheel", (e) => {
   }
 });
 
+// Processing canvas interaction
+processCanvasContainer.addEventListener("mousedown", (e) => {
+  isProcessPanning = true;
+  lastProcessPanX = e.clientX;
+  lastProcessPanY = e.clientY;
+  processCanvasContainer.classList.add("grabbing");
+});
+
+processCanvasContainer.addEventListener("mousemove", (e) => {
+  if (isProcessPanning) {
+    const dx = e.clientX - lastProcessPanX;
+    const dy = e.clientY - lastProcessPanY;
+    processPanX += dx;
+    processPanY += dy;
+    lastProcessPanX = e.clientX;
+    lastProcessPanY = e.clientY;
+    updateProcessTransform();
+  }
+});
+
+processCanvasContainer.addEventListener("mouseup", () => {
+  if (isProcessPanning) {
+    isProcessPanning = false;
+    processCanvasContainer.classList.remove("grabbing");
+  }
+});
+
+processCanvasContainer.addEventListener("mouseleave", () => {
+  isProcessPanning = false;
+  processCanvasContainer.classList.remove("grabbing");
+});
+
+processCanvasContainer.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  
+  const isPinchZoom = e.ctrlKey;
+  
+  if (isPinchZoom) {
+    // Pinch to zoom
+    const rect = processCanvasContainer.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    
+    const image = processedImages.get(currentStage);
+    if (!image) return;
+    
+    const canvasX = (mouseX - processPanX) / processZoom;
+    const canvasY = (mouseY - processPanY) / processZoom;
+    
+    const zoomSpeed = 0.005;
+    const zoomChange = -e.deltaY * zoomSpeed * processZoom;
+    const newZoom = Math.max(0.1, Math.min(10, processZoom + zoomChange));
+    
+    processPanX = mouseX - canvasX * newZoom;
+    processPanY = mouseY - canvasY * newZoom;
+    processZoom = newZoom;
+    
+    updateProcessZoom();
+    updateProcessTransform();
+  } else {
+    // Two-finger pan (or mouse wheel)
+    processPanX -= e.deltaX;
+    processPanY -= e.deltaY;
+    updateProcessTransform();
+  }
+});
+
 // Mode management
 function setMode(mode: AppMode) {
   console.log("setMode called:", mode);
@@ -318,6 +446,7 @@ function setMode(mode: AppMode) {
   uploadScreen.classList.remove("active");
   pageSelectionScreen.classList.remove("active");
   cropScreen.classList.remove("active");
+  processingScreen.classList.remove("active");
   
   // Clear any inline styles that might override CSS
   pageSelectionScreen.style.display = "";
@@ -341,14 +470,21 @@ function setMode(mode: AppMode) {
       cropScreen.classList.add("active");
       console.log("Crop screen activated");
       break;
+    case "processing":
+      processingScreen.classList.add("active");
+      console.log("Processing screen activated");
+      break;
   }
 }
 
 function showStatus(message: string, isError = false) {
   // Update status in whichever screen is currently visible
-  const activeStatusText = pageSelectionScreen.classList.contains("active") 
-    ? pageStatusText 
-    : statusText;
+  let activeStatusText = statusText;
+  if (pageSelectionScreen.classList.contains("active")) {
+    activeStatusText = pageStatusText;
+  } else if (processingScreen.classList.contains("active")) {
+    activeStatusText = processStatusText;
+  }
   
   activeStatusText.textContent = message;
   if (isError) {
@@ -1014,52 +1150,174 @@ function drawCropOverlay() {
   }
 }
 
-async function processImage(image: RGBAImage) {
+// Processing mode functions
+async function startProcessing() {
+  if (!currentImage) return;
+  
   try {
-    resultsContainer.innerHTML = "";
-    resultsPanel.classList.add("active");
+    setMode("processing");
+    processedImages.clear();
+    
+    // Store raw image and display it
+    processedImages.set("raw", currentImage);
+    displayProcessingStage("raw");
     
     // Apply crop if selected
-    let processImage = image;
+    let processImage = currentImage;
     if (cropRegion && cropRegion.width > 0 && cropRegion.height > 0) {
       showStatus("Cropping image...");
-      processImage = cropImage(image, cropRegion);
-      displayResult(processImage, "Cropped");
+      processImage = cropImage(currentImage, cropRegion);
+      processedImages.set("cropped", processImage);
+      displayProcessingStage("cropped");
     } else {
-      displayResult(image, "Original");
+      processedImages.set("cropped", currentImage);
     }
     
-    // Run GPU pipeline
+    // Run GPU pipeline with auto-advance after each stage
     showStatus("Running white threshold...");
     const t1 = performance.now();
     const thresholded = await whiteThresholdGPU(processImage, 0.85);
     const t2 = performance.now();
     showStatus(`White threshold: ${(t2 - t1).toFixed(1)}ms`);
-    displayResult(thresholded, "1. White Threshold");
+    processedImages.set("threshold", thresholded);
+    displayProcessingStage("threshold");
     
     showStatus("Palettizing...");
     const t3 = performance.now();
     const palettized = await palettizeGPU(thresholded, PALETTE_RGBA);
     const t4 = performance.now();
     showStatus(`Palettize: ${(t4 - t3).toFixed(1)}ms`);
+    processedImages.set("palettized", palettized);
+    displayProcessingStage("palettized");
     
     showStatus("Applying median filter...");
     const t5 = performance.now();
     const median = await median3x3GPU(palettized);
     const t6 = performance.now();
     showStatus(`Median filter: ${(t6 - t5).toFixed(1)}ms`);
+    processedImages.set("median", median);
+    displayProcessingStage("median");
     
     showStatus("Extracting black...");
     const t7 = performance.now();
-    const _binary = extractBlack(median);
+    const binary = extractBlack(median);
     const t8 = performance.now();
     showStatus(`Extract black: ${(t8 - t7).toFixed(1)}ms`);
+    processedImages.set("binary", binary);
+    displayProcessingStage("binary");
     
     const totalTime = t8 - t1;
     showStatus(`✓ Pipeline complete! Total: ${totalTime.toFixed(1)}ms`);
   } catch (error) {
     showStatus(`Error: ${(error as Error).message}`, true);
     console.error(error);
+  }
+}
+
+function displayProcessingStage(stage: ProcessingStage) {
+  const image = processedImages.get(stage);
+  if (!image) {
+    showStatus(`Stage ${stage} not available`, true);
+    return;
+  }
+  
+  currentStage = stage;
+  
+  // Update stage button states
+  document.querySelectorAll(".stage-btn").forEach(btn => btn.classList.remove("active"));
+  const stageButtons: Record<ProcessingStage, HTMLButtonElement> = {
+    raw: stageRawBtn,
+    cropped: stageCroppedBtn,
+    threshold: stageThresholdBtn,
+    palettized: stagePalettizedBtn,
+    median: stageMedianBtn,
+    binary: stageBinaryBtn,
+  };
+  stageButtons[stage]?.classList.add("active");
+  
+  // Set up canvas
+  processCanvas.width = image.width;
+  processCanvas.height = image.height;
+  
+  // Convert to RGBA for display
+  let rgbaData: Uint8ClampedArray;
+  if ("palette" in image && image.palette) {
+    // PalettizedImage - convert indexed colors to RGBA
+    rgbaData = new Uint8ClampedArray(image.width * image.height * 4);
+    for (let i = 0; i < image.data.length; i++) {
+      const colorIndex = image.data[i];
+      const paletteOffset = colorIndex * 4;
+      const pixelOffset = i * 4;
+      rgbaData[pixelOffset] = image.palette[paletteOffset];
+      rgbaData[pixelOffset + 1] = image.palette[paletteOffset + 1];
+      rgbaData[pixelOffset + 2] = image.palette[paletteOffset + 2];
+      rgbaData[pixelOffset + 3] = image.palette[paletteOffset + 3];
+    }
+  } else if (image.data instanceof Uint8Array && image.data.length === image.width * image.height) {
+    // BinaryImage - convert 1-bit to RGBA (0=white, 1=black)
+    rgbaData = new Uint8ClampedArray(image.width * image.height * 4);
+    for (let i = 0; i < image.data.length; i++) {
+      const value = image.data[i] ? 0 : 255;
+      const offset = i * 4;
+      rgbaData[offset] = value;
+      rgbaData[offset + 1] = value;
+      rgbaData[offset + 2] = value;
+      rgbaData[offset + 3] = 255;
+    }
+  } else {
+    // RGBAImage - use directly
+    rgbaData = new Uint8ClampedArray(image.data);
+  }
+  
+  // Draw image - ensure it's a proper Uint8ClampedArray with ArrayBuffer
+  const displayData = new Uint8ClampedArray(rgbaData);
+  const imageData = new ImageData(
+    displayData,
+    image.width,
+    image.height,
+  );
+  processCtx.putImageData(imageData, 0, 0);
+  
+  // Fit to screen
+  processFitToScreen();
+  
+  showStatus(`Viewing: ${stage} (${image.width}×${image.height})`);
+}
+
+function processFitToScreen() {
+  const image = processedImages.get(currentStage);
+  if (!image) return;
+  
+  const containerWidth = processCanvasContainer.clientWidth;
+  const containerHeight = processCanvasContainer.clientHeight;
+  const imageWidth = image.width;
+  const imageHeight = image.height;
+  
+  const scaleX = containerWidth / imageWidth;
+  const scaleY = containerHeight / imageHeight;
+  processZoom = Math.min(scaleX, scaleY) * 0.9;
+  
+  processPanX = (containerWidth - imageWidth * processZoom) / 2;
+  processPanY = (containerHeight - imageHeight * processZoom) / 2;
+  
+  updateProcessZoom();
+  updateProcessTransform();
+}
+
+function updateProcessZoom() {
+  processZoomLevel.textContent = `${Math.round(processZoom * 100)}%`;
+}
+
+function updateProcessTransform() {
+  const transform = `translate(${processPanX}px, ${processPanY}px) scale(${processZoom})`;
+  processCanvas.style.transform = transform;
+  processCanvas.style.transformOrigin = "0 0";
+  processCanvas.style.willChange = "transform";
+  
+  if (processZoom >= 1) {
+    processCanvas.style.imageRendering = "pixelated";
+  } else {
+    processCanvas.style.imageRendering = "auto";
   }
 }
 
@@ -1086,7 +1344,7 @@ function cropImage(
   return { width, height, data: croppedData };
 }
 
-function displayResult(image: RGBAImage, label: string) {
+function _displayResult(image: RGBAImage, label: string) {
   const item = document.createElement("div");
   item.className = "result-item";
   

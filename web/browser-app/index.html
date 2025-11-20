@@ -579,6 +579,47 @@
             transform: translateX(0);
         }
 
+        /* Processing Screen */
+        .processing-screen {
+            display: none;
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: #0a0a0a;
+        }
+
+        .processing-screen.active {
+            display: block;
+        }
+
+        .stage-btn {
+            padding: 0.5rem 1rem;
+            border: 2px solid #3a3a3a;
+            background: #2a2a2a;
+            color: #fff;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 0.9rem;
+        }
+
+        .stage-btn:hover {
+            background: #3a3a3a;
+            border-color: #4f46e5;
+        }
+
+        .stage-btn.active {
+            background: #4f46e5;
+            border-color: #4f46e5;
+        }
+
+        #processCanvas {
+            position: absolute;
+            image-rendering: pixelated;
+        }
+
         .result-item {
             margin-bottom: 1.5rem;
         }
@@ -685,6 +726,43 @@
             <div class="results-panel" id="resultsPanel">
                 <h2>Processing Results</h2>
                 <div id="resultsContainer"></div>
+            </div>
+        </div>
+
+        <!-- Processing Screen -->
+        <div class="processing-screen" id="processingScreen">
+            <div class="canvas-container" id="processCanvasContainer">
+                <canvas id="processCanvas"></canvas>
+            </div>
+
+            <div class="toolbar">
+                <div class="toolbar-section">
+                    <div class="toolbar-section-title">View</div>
+                    <div class="zoom-controls">
+                        <button id="processZoomOutBtn">-</button>
+                        <div class="zoom-level" id="processZoomLevel">100%</div>
+                        <button id="processZoomInBtn">+</button>
+                    </div>
+                    <button id="processFitToScreenBtn">Fit to Screen</button>
+                </div>
+
+                <div class="toolbar-section">
+                    <div class="toolbar-section-title">Stages</div>
+                    <button id="stageRawBtn" class="stage-btn active">Raw</button>
+                    <button id="stageCroppedBtn" class="stage-btn">Cropped</button>
+                    <button id="stageThresholdBtn" class="stage-btn">Threshold</button>
+                    <button id="stagePalettizedBtn" class="stage-btn">Palettized</button>
+                    <button id="stageMedianBtn" class="stage-btn">Median</button>
+                    <button id="stageBinaryBtn" class="stage-btn">Binary</button>
+                </div>
+
+                <div class="toolbar-section">
+                    <button id="backToCropBtn">← Back to Crop</button>
+                </div>
+            </div>
+
+            <div class="status-bar">
+                <div class="status-text" id="processStatusText">Ready</div>
             </div>
         </div>
     </div>
