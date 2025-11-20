@@ -25,8 +25,6 @@ function paletteToRGBA(palette: Uint32Array): Uint8ClampedArray {
   return rgba;
 }
 
-const PALETTE_RGBA = paletteToRGBA(DEFAULT_PALETTE_16);
-
 // Browser canvas backend for PDF rendering
 const browserCanvasBackend: CanvasBackend = {
   createCanvas(width: number, height: number) {
@@ -56,6 +54,36 @@ let cancelThumbnailLoading = false;
 type ProcessingStage = "cropped" | "threshold" | "palettized" | "median" | "binary";
 let currentStage: ProcessingStage = "cropped";
 const processedImages: Map<ProcessingStage, RGBAImage | PalettizedImage | BinaryImage> = new Map();
+
+// Palette configuration
+interface PaletteColor {
+  inputColor: string;   // Hex color for matching
+  outputColor: string;  // Hex color for display
+  mapToBg: boolean;     // Map this color to background
+}
+
+// Convert u32 color to hex
+function u32ToHex(color: number): string {
+  const r = (color >> 24) & 0xff;
+  const g = (color >> 16) & 0xff;
+  const b = (color >> 8) & 0xff;
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+}
+
+// Convert hex to RGBA values
+function hexToRGBA(hex: string): [number, number, number, number] {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return [r, g, b, 255];
+}
+
+// Initialize palette from DEFAULT_PALETTE_16
+const userPalette: PaletteColor[] = Array.from(DEFAULT_PALETTE_16).map(color => ({
+  inputColor: u32ToHex(color),
+  outputColor: u32ToHex(color),
+  mapToBg: false,
+}));
 
 // Canvas/Viewport State
 let zoom = 1.0;
@@ -109,6 +137,11 @@ const backFromCropBtn = document.getElementById("backFromCropBtn") as HTMLButton
 const statusText = document.getElementById("statusText") as HTMLDivElement;
 const resultsPanel = document.getElementById("resultsPanel") as HTMLDivElement;
 const resultsContainer = document.getElementById("resultsContainer") as HTMLDivElement;
+
+// Palette editor elements
+const paletteList = document.getElementById("paletteList") as HTMLDivElement;
+const addPaletteColorBtn = document.getElementById("addPaletteColorBtn") as HTMLButtonElement;
+const resetPaletteBtn = document.getElementById("resetPaletteBtn") as HTMLButtonElement;
 
 const processingScreen = document.getElementById("processingScreen") as HTMLDivElement;
 const processCanvasContainer = document.getElementById("processCanvasContainer") as HTMLDivElement;
@@ -1180,7 +1213,8 @@ async function startProcessing() {
     
     showStatus("Palettizing...");
     const t3 = performance.now();
-    const palettized = await palettizeGPU(thresholded, PALETTE_RGBA);
+    const customPalette = buildPaletteRGBA();
+    const palettized = await palettizeGPU(thresholded, customPalette);
     const t4 = performance.now();
     showStatus(`Palettize: ${(t4 - t3).toFixed(1)}ms`);
     processedImages.set("palettized", palettized);
@@ -1238,15 +1272,27 @@ function displayProcessingStage(stage: ProcessingStage) {
   let rgbaData: Uint8ClampedArray;
   if ("palette" in image && image.palette) {
     // PalettizedImage - convert indexed colors to RGBA
-    rgbaData = new Uint8ClampedArray(image.width * image.height * 4);
-    for (let i = 0; i < image.data.length; i++) {
-      const colorIndex = image.data[i];
+    // Palettized format stores 2 pixels per byte: high nibble (left) and low nibble (right)
+    const numPixels = image.width * image.height;
+    rgbaData = new Uint8ClampedArray(numPixels * 4);
+    
+    for (let pixelIndex = 0; pixelIndex < numPixels; pixelIndex++) {
+      const byteIndex = Math.floor(pixelIndex / 2);
+      const isHighNibble = pixelIndex % 2 === 0;
+      
+      // Extract 4-bit color index from nibble
+      const colorIndex = isHighNibble 
+        ? (image.data[byteIndex] >> 4) & 0x0f
+        : image.data[byteIndex] & 0x0f;
+      
+      // Look up RGBA color in palette (stored as Uint8ClampedArray, 4 bytes per color)
       const paletteOffset = colorIndex * 4;
-      const pixelOffset = i * 4;
-      rgbaData[pixelOffset] = image.palette[paletteOffset];
-      rgbaData[pixelOffset + 1] = image.palette[paletteOffset + 1];
-      rgbaData[pixelOffset + 2] = image.palette[paletteOffset + 2];
-      rgbaData[pixelOffset + 3] = image.palette[paletteOffset + 3];
+      const pixelOffset = pixelIndex * 4;
+      
+      rgbaData[pixelOffset] = image.palette[paletteOffset];       // R
+      rgbaData[pixelOffset + 1] = image.palette[paletteOffset + 1]; // G
+      rgbaData[pixelOffset + 2] = image.palette[paletteOffset + 2]; // B
+      rgbaData[pixelOffset + 3] = image.palette[paletteOffset + 3]; // A
     }
   } else if (image.data instanceof Uint8Array && image.data.length === image.width * image.height) {
     // BinaryImage - convert 1-bit to RGBA (0=white, 1=black)
@@ -1504,3 +1550,417 @@ async function loadStoredFile(id: string) {
   await refreshFileList();
   await handleFileUpload(file);
 }
+
+// Palette Editor Functions
+function renderPaletteUI() {
+  paletteList.innerHTML = "";
+  
+  userPalette.forEach((color, index) => {
+    const entry = document.createElement("div");
+    entry.className = "palette-entry";
+    if (index === 0) entry.classList.add("background");
+    
+    // Header with index and remove button
+    const header = document.createElement("div");
+    header.className = "palette-entry-header";
+    
+    const indexLabel = document.createElement("div");
+    indexLabel.className = index === 0 ? "palette-index bg-index" : "palette-index";
+    indexLabel.textContent = `${index}${index === 0 ? " (BG)" : ""}`;
+    
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "remove-color";
+    removeBtn.textContent = "Remove";
+    removeBtn.disabled = index === 0; // Can't remove background
+    removeBtn.onclick = () => {
+      if (index !== 0) {
+        userPalette.splice(index, 1);
+        renderPaletteUI();
+      }
+    };
+    
+    header.appendChild(indexLabel);
+    header.appendChild(removeBtn);
+    entry.appendChild(header);
+    
+    // Input color picker
+    const inputGroup = document.createElement("div");
+    inputGroup.className = "color-picker-group";
+    
+    const inputLabel = document.createElement("label");
+    inputLabel.textContent = "Input (matching):";
+    inputGroup.appendChild(inputLabel);
+    
+    const inputWrapper = document.createElement("div");
+    inputWrapper.className = "color-picker-wrapper";
+    
+    const inputColorPicker = document.createElement("input");
+    inputColorPicker.type = "color";
+    inputColorPicker.value = color.inputColor;
+    inputColorPicker.oninput = (e) => {
+      const hex = (e.target as HTMLInputElement).value;
+      userPalette[index].inputColor = hex;
+      inputHex.value = hex;
+    };
+    
+    const inputHex = document.createElement("input");
+    inputHex.type = "text";
+    inputHex.value = color.inputColor;
+    inputHex.maxLength = 7;
+    inputHex.oninput = (e) => {
+      const hex = (e.target as HTMLInputElement).value;
+      if (/^#[0-9A-Fa-f]{6}$/.test(hex)) {
+        userPalette[index].inputColor = hex;
+        inputColorPicker.value = hex;
+      }
+    };
+    
+    inputWrapper.appendChild(inputColorPicker);
+    inputWrapper.appendChild(inputHex);
+    inputGroup.appendChild(inputWrapper);
+    entry.appendChild(inputGroup);
+    
+    // Output color picker
+    const outputGroup = document.createElement("div");
+    outputGroup.className = "color-picker-group";
+    
+    const outputLabel = document.createElement("label");
+    outputLabel.textContent = "Output (display):";
+    outputGroup.appendChild(outputLabel);
+    
+    const outputWrapper = document.createElement("div");
+    outputWrapper.className = "color-picker-wrapper";
+    
+    const outputColorPicker = document.createElement("input");
+    outputColorPicker.type = "color";
+    outputColorPicker.value = color.outputColor;
+    outputColorPicker.oninput = (e) => {
+      const hex = (e.target as HTMLInputElement).value;
+      userPalette[index].outputColor = hex;
+      outputHex.value = hex;
+    };
+    
+    const outputHex = document.createElement("input");
+    outputHex.type = "text";
+    outputHex.value = color.outputColor;
+    outputHex.maxLength = 7;
+    outputHex.oninput = (e) => {
+      const hex = (e.target as HTMLInputElement).value;
+      if (/^#[0-9A-Fa-f]{6}$/.test(hex)) {
+        userPalette[index].outputColor = hex;
+        outputColorPicker.value = hex;
+      }
+    };
+    
+    outputWrapper.appendChild(outputColorPicker);
+    outputWrapper.appendChild(outputHex);
+    outputGroup.appendChild(outputWrapper);
+    entry.appendChild(outputGroup);
+    
+    // Map to background checkbox
+    const checkboxLabel = document.createElement("label");
+    checkboxLabel.className = "checkbox-label";
+    
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = color.mapToBg;
+    checkbox.disabled = index === 0; // Background can't map to itself
+    checkbox.onchange = (e) => {
+      userPalette[index].mapToBg = (e.target as HTMLInputElement).checked;
+    };
+    
+    checkboxLabel.appendChild(checkbox);
+    checkboxLabel.appendChild(document.createTextNode("Map to BG"));
+    entry.appendChild(checkboxLabel);
+    
+    paletteList.appendChild(entry);
+  });
+}
+
+function addPaletteColor() {
+  if (userPalette.length >= 16) {
+    showStatus("Maximum 16 colors allowed", true);
+    return;
+  }
+  
+  userPalette.push({
+    inputColor: "#808080",
+    outputColor: "#808080",
+    mapToBg: false,
+  });
+  
+  renderPaletteUI();
+}
+
+function resetPaletteToDefault() {
+  userPalette.length = 0;
+  Array.from(DEFAULT_PALETTE_16).forEach(color => {
+    userPalette.push({
+      inputColor: u32ToHex(color),
+      outputColor: u32ToHex(color),
+      mapToBg: false,
+    });
+  });
+  renderPaletteUI();
+  showStatus("Palette reset to default");
+}
+
+function showColorHistogram() {
+  if (!currentImage) {
+    showStatus("No image loaded", true);
+    return;
+  }
+  
+  showStatus("⏳ Analyzing colors...");
+  
+  // Quantization function - reduce to 5 levels per channel (5^3 = 125 buckets)
+  // Levels: 0, 64, 128, 192, 255
+  const quantize = (value: number) => Math.round(value / 64) * 64;
+  
+  // Count quantized color frequencies
+  const colorCounts = new Map<string, { count: number; avgR: number; avgG: number; avgB: number; samples: number }>();
+  const data = currentImage.data;
+  
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    
+    // Quantize to bucket
+    const qR = quantize(r);
+    const qG = quantize(g);
+    const qB = quantize(b);
+    const key = `${qR},${qG},${qB}`;
+    
+    const existing = colorCounts.get(key);
+    if (existing) {
+      existing.count++;
+      existing.avgR += r;
+      existing.avgG += g;
+      existing.avgB += b;
+      existing.samples++;
+    } else {
+      colorCounts.set(key, {
+        count: 1,
+        avgR: r,
+        avgG: g,
+        avgB: b,
+        samples: 1,
+      });
+    }
+  }
+  
+  // Convert to array and compute average colors for each bucket
+  const buckets = Array.from(colorCounts.entries()).map(([_key, data]) => {
+    const avgR = Math.round(data.avgR / data.samples);
+    const avgG = Math.round(data.avgG / data.samples);
+    const avgB = Math.round(data.avgB / data.samples);
+    const hex = `#${avgR.toString(16).padStart(2, '0')}${avgG.toString(16).padStart(2, '0')}${avgB.toString(16).padStart(2, '0')}`;
+    return { hex, count: data.count, r: avgR, g: avgG, b: avgB };
+  });
+  
+  // Find background (most prevalent) and cap its size
+  buckets.sort((a, b) => b.count - a.count);
+  const backgroundHex = buckets.length > 0 ? buckets[0].hex : "#ffffff";
+  const secondCount = buckets.length > 1 ? buckets[1].count : buckets[0].count;
+  
+  // Cap background to second most prevalent
+  if (buckets.length > 0) {
+    buckets[0].count = Math.min(buckets[0].count, secondCount);
+  }
+  
+  // Calculate opposite color for border
+  const bgR = parseInt(backgroundHex.slice(1, 3), 16);
+  const bgG = parseInt(backgroundHex.slice(3, 5), 16);
+  const bgB = parseInt(backgroundHex.slice(5, 7), 16);
+  const borderColor = `rgb(${255 - bgR}, ${255 - bgG}, ${255 - bgB})`;
+  
+  // HSV conversion for sorting
+  const rgbToHSV = (r: number, g: number, b: number) => {
+    const rNorm = r / 255;
+    const gNorm = g / 255;
+    const bNorm = b / 255;
+    
+    const max = Math.max(rNorm, gNorm, bNorm);
+    const min = Math.min(rNorm, gNorm, bNorm);
+    const delta = max - min;
+    
+    let h = 0;
+    if (delta !== 0) {
+      if (max === rNorm) {
+        h = ((gNorm - bNorm) / delta + (gNorm < bNorm ? 6 : 0)) / 6;
+      } else if (max === gNorm) {
+        h = ((bNorm - rNorm) / delta + 2) / 6;
+      } else {
+        h = ((rNorm - gNorm) / delta + 4) / 6;
+      }
+    }
+    
+    const s = max === 0 ? 0 : delta / max;
+    const v = max;
+    
+    return { h, s, v };
+  };
+  
+  // Separate grayscale from chromatic and sort consistently
+  const grayscale: typeof buckets = [];
+  const chromatic: typeof buckets = [];
+  
+  buckets.forEach(bucket => {
+    const { s } = rgbToHSV(bucket.r, bucket.g, bucket.b);
+    if (s < 0.1) {
+      grayscale.push(bucket);
+    } else {
+      chromatic.push(bucket);
+    }
+  });
+  
+  // Sort grayscale by brightness (dark to light)
+  grayscale.sort((a, b) => {
+    const { v: vA } = rgbToHSV(a.r, a.g, a.b);
+    const { v: vB } = rgbToHSV(b.r, b.g, b.b);
+    return vA - vB;
+  });
+  
+  // Sort chromatic by hue, then saturation, then brightness
+  chromatic.sort((a, b) => {
+    const hsvA = rgbToHSV(a.r, a.g, a.b);
+    const hsvB = rgbToHSV(b.r, b.g, b.b);
+    
+    // Sort by hue first
+    if (Math.abs(hsvA.h - hsvB.h) > 0.015) {
+      return hsvA.h - hsvB.h;
+    }
+    // Then by saturation (more saturated first)
+    if (Math.abs(hsvA.s - hsvB.s) > 0.05) {
+      return hsvB.s - hsvA.s;
+    }
+    // Then by value (brighter first)
+    return hsvB.v - hsvA.v;
+  });
+  
+  // Combine: chromatic first, then grayscale
+  const allColorsSorted = [...chromatic, ...grayscale];
+  
+  // Show histogram modal
+  const modal = document.getElementById("histogramModal") as HTMLDivElement;
+  const body = document.getElementById("histogramBody") as HTMLDivElement;
+  
+  const total = currentImage.width * currentImage.height;
+  
+  // Set background color
+  body.style.backgroundColor = backgroundHex;
+  
+  // Create tiles container
+  const tiles = document.createElement("div");
+  tiles.className = "histogram-tiles";
+  
+  // Calculate tile sizes - direct proportion with minimum
+  const maxCount = Math.max(...allColorsSorted.map(b => b.count));
+  const minSize = 3;   // Minimum 3px
+  const maxSize = 120; // Maximum size for largest tile
+  
+  allColorsSorted.forEach(({ hex, count }) => {
+    const percent = (count / total) * 100;
+    
+    // Direct linear proportion from count
+    const sizeFactor = count / maxCount;
+    const size = Math.max(minSize, sizeFactor * maxSize);
+    
+    const tile = document.createElement("div");
+    tile.className = "color-tile";
+    tile.style.backgroundColor = hex;
+    tile.style.width = `${size}px`;
+    tile.style.height = `${size}px`;
+    tile.style.border = `1px solid ${borderColor}`;
+    tile.title = `${hex.toUpperCase()} - ${percent.toFixed(3)}%`;
+    
+    const label = document.createElement("div");
+    label.className = "color-tile-label";
+    if (size > 20) {
+      label.textContent = percent >= 1 ? `${percent.toFixed(1)}%` : `${percent.toFixed(2)}%`;
+    }
+    tile.appendChild(label);
+    
+    tile.onclick = () => {
+      addColorToPalette(hex);
+      modal.classList.remove("active");
+      showStatus(`Added ${hex} (${percent.toFixed(2)}%) to palette`);
+    };
+    
+    tiles.appendChild(tile);
+  });
+  
+  body.innerHTML = "";
+  body.appendChild(tiles);
+  modal.classList.add("active");
+  
+  showStatus(`${allColorsSorted.length} colors (${chromatic.length} chromatic, ${grayscale.length} grayscale, bg: ${backgroundHex})`);
+}
+
+function addColorToPalette(hex: string) {
+  if (userPalette.length >= 16) {
+    showStatus("Maximum 16 colors - remove one first", true);
+    return;
+  }
+  
+  userPalette.push({
+    inputColor: hex,
+    outputColor: hex,
+    mapToBg: false,
+  });
+  
+  renderPaletteUI();
+  showStatus(`Added ${hex} to palette`);
+}
+
+// Histogram modal handlers
+const histogramModal = document.getElementById("histogramModal") as HTMLDivElement;
+const closeHistogramBtn = document.getElementById("closeHistogramBtn") as HTMLButtonElement;
+
+closeHistogramBtn.addEventListener("click", () => {
+  histogramModal.classList.remove("active");
+});
+
+// Close on outside click
+histogramModal.addEventListener("click", (e) => {
+  if (e.target === histogramModal) {
+    histogramModal.classList.remove("active");
+  }
+});
+
+// Convert userPalette to RGBA format for GPU processing
+function buildPaletteRGBA(): Uint8ClampedArray {
+  const palette = new Uint8ClampedArray(16 * 4);
+  
+  for (let i = 0; i < userPalette.length && i < 16; i++) {
+    const color = userPalette[i];
+    const useColor = color.mapToBg ? userPalette[0].outputColor : color.inputColor;
+    const [r, g, b, a] = hexToRGBA(useColor);
+    
+    palette[i * 4] = r;
+    palette[i * 4 + 1] = g;
+    palette[i * 4 + 2] = b;
+    palette[i * 4 + 3] = a;
+  }
+  
+  // Fill remaining slots with background color
+  for (let i = userPalette.length; i < 16; i++) {
+    const [r, g, b, a] = hexToRGBA(userPalette[0].outputColor);
+    palette[i * 4] = r;
+    palette[i * 4 + 1] = g;
+    palette[i * 4 + 2] = b;
+    palette[i * 4 + 3] = a;
+  }
+  
+  return palette;
+}
+
+// Palette editor event handlers
+addPaletteColorBtn.addEventListener("click", addPaletteColor);
+resetPaletteBtn.addEventListener("click", resetPaletteToDefault);
+const showHistogramBtn = document.getElementById("showHistogramBtn") as HTMLButtonElement;
+showHistogramBtn.addEventListener("click", showColorHistogram);
+
+// Initialize palette UI on load
+renderPaletteUI();

@@ -775,18 +775,6 @@ async function clearAllFiles() {
 }
 
 // browser-app/main.ts
-function paletteToRGBA(palette) {
-  const rgba = new Uint8ClampedArray(palette.length * 4);
-  for (let i = 0; i < palette.length; i++) {
-    const color = palette[i];
-    rgba[i * 4] = color >> 24 & 255;
-    rgba[i * 4 + 1] = color >> 16 & 255;
-    rgba[i * 4 + 2] = color >> 8 & 255;
-    rgba[i * 4 + 3] = color & 255;
-  }
-  return rgba;
-}
-var PALETTE_RGBA = paletteToRGBA(DEFAULT_PALETTE_16);
 var browserCanvasBackend = {
   createCanvas(width, height) {
     const canvas = document.createElement("canvas");
@@ -805,6 +793,23 @@ var pdfPageCount = 0;
 var cancelThumbnailLoading = false;
 var currentStage = "cropped";
 var processedImages = /* @__PURE__ */ new Map();
+function u32ToHex(color) {
+  const r = color >> 24 & 255;
+  const g = color >> 16 & 255;
+  const b = color >> 8 & 255;
+  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+}
+function hexToRGBA(hex) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return [r, g, b, 255];
+}
+var userPalette = Array.from(DEFAULT_PALETTE_16).map((color) => ({
+  inputColor: u32ToHex(color),
+  outputColor: u32ToHex(color),
+  mapToBg: false
+}));
 var zoom = 1;
 var panX = 0;
 var panY = 0;
@@ -848,6 +853,9 @@ var backFromCropBtn = document.getElementById("backFromCropBtn");
 var statusText = document.getElementById("statusText");
 var resultsPanel = document.getElementById("resultsPanel");
 var resultsContainer = document.getElementById("resultsContainer");
+var paletteList = document.getElementById("paletteList");
+var addPaletteColorBtn = document.getElementById("addPaletteColorBtn");
+var resetPaletteBtn = document.getElementById("resetPaletteBtn");
 var processingScreen = document.getElementById("processingScreen");
 var processCanvasContainer = document.getElementById("processCanvasContainer");
 var processCanvas = document.getElementById("processCanvas");
@@ -1687,7 +1695,8 @@ async function startProcessing() {
     displayProcessingStage("threshold");
     showStatus("Palettizing...");
     const t3 = performance.now();
-    const palettized = await palettizeGPU(thresholded, PALETTE_RGBA);
+    const customPalette = buildPaletteRGBA();
+    const palettized = await palettizeGPU(thresholded, customPalette);
     const t4 = performance.now();
     showStatus(`Palettize: ${(t4 - t3).toFixed(1)}ms`);
     processedImages.set("palettized", palettized);
@@ -1733,11 +1742,14 @@ function displayProcessingStage(stage) {
   processCanvas.height = image.height;
   let rgbaData;
   if ("palette" in image && image.palette) {
-    rgbaData = new Uint8ClampedArray(image.width * image.height * 4);
-    for (let i = 0; i < image.data.length; i++) {
-      const colorIndex = image.data[i];
+    const numPixels = image.width * image.height;
+    rgbaData = new Uint8ClampedArray(numPixels * 4);
+    for (let pixelIndex = 0; pixelIndex < numPixels; pixelIndex++) {
+      const byteIndex = Math.floor(pixelIndex / 2);
+      const isHighNibble = pixelIndex % 2 === 0;
+      const colorIndex = isHighNibble ? image.data[byteIndex] >> 4 & 15 : image.data[byteIndex] & 15;
       const paletteOffset = colorIndex * 4;
-      const pixelOffset = i * 4;
+      const pixelOffset = pixelIndex * 4;
       rgbaData[pixelOffset] = image.palette[paletteOffset];
       rgbaData[pixelOffset + 1] = image.palette[paletteOffset + 1];
       rgbaData[pixelOffset + 2] = image.palette[paletteOffset + 2];
@@ -1923,3 +1935,311 @@ async function loadStoredFile(id) {
   await refreshFileList();
   await handleFileUpload(file);
 }
+function renderPaletteUI() {
+  paletteList.innerHTML = "";
+  userPalette.forEach((color, index) => {
+    const entry = document.createElement("div");
+    entry.className = "palette-entry";
+    if (index === 0) entry.classList.add("background");
+    const header = document.createElement("div");
+    header.className = "palette-entry-header";
+    const indexLabel = document.createElement("div");
+    indexLabel.className = index === 0 ? "palette-index bg-index" : "palette-index";
+    indexLabel.textContent = `${index}${index === 0 ? " (BG)" : ""}`;
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "remove-color";
+    removeBtn.textContent = "Remove";
+    removeBtn.disabled = index === 0;
+    removeBtn.onclick = () => {
+      if (index !== 0) {
+        userPalette.splice(index, 1);
+        renderPaletteUI();
+      }
+    };
+    header.appendChild(indexLabel);
+    header.appendChild(removeBtn);
+    entry.appendChild(header);
+    const inputGroup = document.createElement("div");
+    inputGroup.className = "color-picker-group";
+    const inputLabel = document.createElement("label");
+    inputLabel.textContent = "Input (matching):";
+    inputGroup.appendChild(inputLabel);
+    const inputWrapper = document.createElement("div");
+    inputWrapper.className = "color-picker-wrapper";
+    const inputColorPicker = document.createElement("input");
+    inputColorPicker.type = "color";
+    inputColorPicker.value = color.inputColor;
+    inputColorPicker.oninput = (e) => {
+      const hex = e.target.value;
+      userPalette[index].inputColor = hex;
+      inputHex.value = hex;
+    };
+    const inputHex = document.createElement("input");
+    inputHex.type = "text";
+    inputHex.value = color.inputColor;
+    inputHex.maxLength = 7;
+    inputHex.oninput = (e) => {
+      const hex = e.target.value;
+      if (/^#[0-9A-Fa-f]{6}$/.test(hex)) {
+        userPalette[index].inputColor = hex;
+        inputColorPicker.value = hex;
+      }
+    };
+    inputWrapper.appendChild(inputColorPicker);
+    inputWrapper.appendChild(inputHex);
+    inputGroup.appendChild(inputWrapper);
+    entry.appendChild(inputGroup);
+    const outputGroup = document.createElement("div");
+    outputGroup.className = "color-picker-group";
+    const outputLabel = document.createElement("label");
+    outputLabel.textContent = "Output (display):";
+    outputGroup.appendChild(outputLabel);
+    const outputWrapper = document.createElement("div");
+    outputWrapper.className = "color-picker-wrapper";
+    const outputColorPicker = document.createElement("input");
+    outputColorPicker.type = "color";
+    outputColorPicker.value = color.outputColor;
+    outputColorPicker.oninput = (e) => {
+      const hex = e.target.value;
+      userPalette[index].outputColor = hex;
+      outputHex.value = hex;
+    };
+    const outputHex = document.createElement("input");
+    outputHex.type = "text";
+    outputHex.value = color.outputColor;
+    outputHex.maxLength = 7;
+    outputHex.oninput = (e) => {
+      const hex = e.target.value;
+      if (/^#[0-9A-Fa-f]{6}$/.test(hex)) {
+        userPalette[index].outputColor = hex;
+        outputColorPicker.value = hex;
+      }
+    };
+    outputWrapper.appendChild(outputColorPicker);
+    outputWrapper.appendChild(outputHex);
+    outputGroup.appendChild(outputWrapper);
+    entry.appendChild(outputGroup);
+    const checkboxLabel = document.createElement("label");
+    checkboxLabel.className = "checkbox-label";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = color.mapToBg;
+    checkbox.disabled = index === 0;
+    checkbox.onchange = (e) => {
+      userPalette[index].mapToBg = e.target.checked;
+    };
+    checkboxLabel.appendChild(checkbox);
+    checkboxLabel.appendChild(document.createTextNode("Map to BG"));
+    entry.appendChild(checkboxLabel);
+    paletteList.appendChild(entry);
+  });
+}
+function addPaletteColor() {
+  if (userPalette.length >= 16) {
+    showStatus("Maximum 16 colors allowed", true);
+    return;
+  }
+  userPalette.push({
+    inputColor: "#808080",
+    outputColor: "#808080",
+    mapToBg: false
+  });
+  renderPaletteUI();
+}
+function resetPaletteToDefault() {
+  userPalette.length = 0;
+  Array.from(DEFAULT_PALETTE_16).forEach((color) => {
+    userPalette.push({
+      inputColor: u32ToHex(color),
+      outputColor: u32ToHex(color),
+      mapToBg: false
+    });
+  });
+  renderPaletteUI();
+  showStatus("Palette reset to default");
+}
+function showColorHistogram() {
+  if (!currentImage) {
+    showStatus("No image loaded", true);
+    return;
+  }
+  showStatus("\u23F3 Analyzing colors...");
+  const quantize = (value) => Math.round(value / 64) * 64;
+  const colorCounts = /* @__PURE__ */ new Map();
+  const data = currentImage.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const qR = quantize(r);
+    const qG = quantize(g);
+    const qB = quantize(b);
+    const key = `${qR},${qG},${qB}`;
+    const existing = colorCounts.get(key);
+    if (existing) {
+      existing.count++;
+      existing.avgR += r;
+      existing.avgG += g;
+      existing.avgB += b;
+      existing.samples++;
+    } else {
+      colorCounts.set(key, {
+        count: 1,
+        avgR: r,
+        avgG: g,
+        avgB: b,
+        samples: 1
+      });
+    }
+  }
+  const buckets = Array.from(colorCounts.entries()).map(([_key, data2]) => {
+    const avgR = Math.round(data2.avgR / data2.samples);
+    const avgG = Math.round(data2.avgG / data2.samples);
+    const avgB = Math.round(data2.avgB / data2.samples);
+    const hex = `#${avgR.toString(16).padStart(2, "0")}${avgG.toString(16).padStart(2, "0")}${avgB.toString(16).padStart(2, "0")}`;
+    return { hex, count: data2.count, r: avgR, g: avgG, b: avgB };
+  });
+  buckets.sort((a, b) => b.count - a.count);
+  const backgroundHex = buckets.length > 0 ? buckets[0].hex : "#ffffff";
+  const secondCount = buckets.length > 1 ? buckets[1].count : buckets[0].count;
+  if (buckets.length > 0) {
+    buckets[0].count = Math.min(buckets[0].count, secondCount);
+  }
+  const bgR = parseInt(backgroundHex.slice(1, 3), 16);
+  const bgG = parseInt(backgroundHex.slice(3, 5), 16);
+  const bgB = parseInt(backgroundHex.slice(5, 7), 16);
+  const borderColor = `rgb(${255 - bgR}, ${255 - bgG}, ${255 - bgB})`;
+  const rgbToHSV = (r, g, b) => {
+    const rNorm = r / 255;
+    const gNorm = g / 255;
+    const bNorm = b / 255;
+    const max = Math.max(rNorm, gNorm, bNorm);
+    const min = Math.min(rNorm, gNorm, bNorm);
+    const delta = max - min;
+    let h = 0;
+    if (delta !== 0) {
+      if (max === rNorm) {
+        h = ((gNorm - bNorm) / delta + (gNorm < bNorm ? 6 : 0)) / 6;
+      } else if (max === gNorm) {
+        h = ((bNorm - rNorm) / delta + 2) / 6;
+      } else {
+        h = ((rNorm - gNorm) / delta + 4) / 6;
+      }
+    }
+    const s = max === 0 ? 0 : delta / max;
+    const v = max;
+    return { h, s, v };
+  };
+  const grayscale = [];
+  const chromatic = [];
+  buckets.forEach((bucket) => {
+    const { s } = rgbToHSV(bucket.r, bucket.g, bucket.b);
+    if (s < 0.1) {
+      grayscale.push(bucket);
+    } else {
+      chromatic.push(bucket);
+    }
+  });
+  grayscale.sort((a, b) => {
+    const { v: vA } = rgbToHSV(a.r, a.g, a.b);
+    const { v: vB } = rgbToHSV(b.r, b.g, b.b);
+    return vA - vB;
+  });
+  chromatic.sort((a, b) => {
+    const hsvA = rgbToHSV(a.r, a.g, a.b);
+    const hsvB = rgbToHSV(b.r, b.g, b.b);
+    if (Math.abs(hsvA.h - hsvB.h) > 0.015) {
+      return hsvA.h - hsvB.h;
+    }
+    if (Math.abs(hsvA.s - hsvB.s) > 0.05) {
+      return hsvB.s - hsvA.s;
+    }
+    return hsvB.v - hsvA.v;
+  });
+  const allColorsSorted = [...chromatic, ...grayscale];
+  const modal = document.getElementById("histogramModal");
+  const body = document.getElementById("histogramBody");
+  const total = currentImage.width * currentImage.height;
+  body.style.backgroundColor = backgroundHex;
+  const tiles = document.createElement("div");
+  tiles.className = "histogram-tiles";
+  const maxCount = Math.max(...allColorsSorted.map((b) => b.count));
+  const minSize = 3;
+  const maxSize = 120;
+  allColorsSorted.forEach(({ hex, count }) => {
+    const percent = count / total * 100;
+    const sizeFactor = count / maxCount;
+    const size = Math.max(minSize, sizeFactor * maxSize);
+    const tile = document.createElement("div");
+    tile.className = "color-tile";
+    tile.style.backgroundColor = hex;
+    tile.style.width = `${size}px`;
+    tile.style.height = `${size}px`;
+    tile.style.border = `1px solid ${borderColor}`;
+    tile.title = `${hex.toUpperCase()} - ${percent.toFixed(3)}%`;
+    const label = document.createElement("div");
+    label.className = "color-tile-label";
+    if (size > 20) {
+      label.textContent = percent >= 1 ? `${percent.toFixed(1)}%` : `${percent.toFixed(2)}%`;
+    }
+    tile.appendChild(label);
+    tile.onclick = () => {
+      addColorToPalette(hex);
+      modal.classList.remove("active");
+      showStatus(`Added ${hex} (${percent.toFixed(2)}%) to palette`);
+    };
+    tiles.appendChild(tile);
+  });
+  body.innerHTML = "";
+  body.appendChild(tiles);
+  modal.classList.add("active");
+  showStatus(`${allColorsSorted.length} colors (${chromatic.length} chromatic, ${grayscale.length} grayscale, bg: ${backgroundHex})`);
+}
+function addColorToPalette(hex) {
+  if (userPalette.length >= 16) {
+    showStatus("Maximum 16 colors - remove one first", true);
+    return;
+  }
+  userPalette.push({
+    inputColor: hex,
+    outputColor: hex,
+    mapToBg: false
+  });
+  renderPaletteUI();
+  showStatus(`Added ${hex} to palette`);
+}
+var histogramModal = document.getElementById("histogramModal");
+var closeHistogramBtn = document.getElementById("closeHistogramBtn");
+closeHistogramBtn.addEventListener("click", () => {
+  histogramModal.classList.remove("active");
+});
+histogramModal.addEventListener("click", (e) => {
+  if (e.target === histogramModal) {
+    histogramModal.classList.remove("active");
+  }
+});
+function buildPaletteRGBA() {
+  const palette = new Uint8ClampedArray(16 * 4);
+  for (let i = 0; i < userPalette.length && i < 16; i++) {
+    const color = userPalette[i];
+    const useColor = color.mapToBg ? userPalette[0].outputColor : color.inputColor;
+    const [r, g, b, a] = hexToRGBA(useColor);
+    palette[i * 4] = r;
+    palette[i * 4 + 1] = g;
+    palette[i * 4 + 2] = b;
+    palette[i * 4 + 3] = a;
+  }
+  for (let i = userPalette.length; i < 16; i++) {
+    const [r, g, b, a] = hexToRGBA(userPalette[0].outputColor);
+    palette[i * 4] = r;
+    palette[i * 4 + 1] = g;
+    palette[i * 4 + 2] = b;
+    palette[i * 4 + 3] = a;
+  }
+  return palette;
+}
+addPaletteColorBtn.addEventListener("click", addPaletteColor);
+resetPaletteBtn.addEventListener("click", resetPaletteToDefault);
+var showHistogramBtn = document.getElementById("showHistogramBtn");
+showHistogramBtn.addEventListener("click", showColorHistogram);
+renderPaletteUI();
