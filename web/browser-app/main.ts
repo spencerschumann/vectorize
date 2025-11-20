@@ -53,8 +53,8 @@ let pdfPageCount = 0;
 let cancelThumbnailLoading = false;
 
 // Processing state
-type ProcessingStage = "raw" | "cropped" | "threshold" | "palettized" | "median" | "binary";
-let currentStage: ProcessingStage = "raw";
+type ProcessingStage = "cropped" | "threshold" | "palettized" | "median" | "binary";
+let currentStage: ProcessingStage = "cropped";
 const processedImages: Map<ProcessingStage, RGBAImage | PalettizedImage | BinaryImage> = new Map();
 
 // Canvas/Viewport State
@@ -75,6 +75,7 @@ let processPanY = 0;
 let isProcessPanning = false;
 let lastProcessPanX = 0;
 let lastProcessPanY = 0;
+let processViewInitialized = false;
 
 // DOM Elements
 const uploadFileList = document.getElementById("uploadFileList") as HTMLDivElement;
@@ -120,7 +121,6 @@ const processFitToScreenBtn = document.getElementById("processFitToScreenBtn") a
 const processStatusText = document.getElementById("processStatusText") as HTMLDivElement;
 const backToCropBtn = document.getElementById("backToCropBtn") as HTMLButtonElement;
 
-const stageRawBtn = document.getElementById("stageRawBtn") as HTMLButtonElement;
 const stageCroppedBtn = document.getElementById("stageCroppedBtn") as HTMLButtonElement;
 const stageThresholdBtn = document.getElementById("stageThresholdBtn") as HTMLButtonElement;
 const stagePalettizedBtn = document.getElementById("stagePalettizedBtn") as HTMLButtonElement;
@@ -132,7 +132,6 @@ backToCropBtn.addEventListener("click", () => {
   setMode("crop");
 });
 
-stageRawBtn.addEventListener("click", () => displayProcessingStage("raw"));
 stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
 stageThresholdBtn.addEventListener("click", () => displayProcessingStage("threshold"));
 stagePalettizedBtn.addEventListener("click", () => displayProcessingStage("palettized"));
@@ -1157,21 +1156,18 @@ async function startProcessing() {
   try {
     setMode("processing");
     processedImages.clear();
-    
-    // Store raw image and display it
-    processedImages.set("raw", currentImage);
-    displayProcessingStage("raw");
+    processViewInitialized = false; // Reset for new processing session
     
     // Apply crop if selected
     let processImage = currentImage;
     if (cropRegion && cropRegion.width > 0 && cropRegion.height > 0) {
       showStatus("Cropping image...");
       processImage = cropImage(currentImage, cropRegion);
-      processedImages.set("cropped", processImage);
-      displayProcessingStage("cropped");
-    } else {
-      processedImages.set("cropped", currentImage);
     }
+    
+    // Store and display cropped image
+    processedImages.set("cropped", processImage);
+    displayProcessingStage("cropped");
     
     // Run GPU pipeline with auto-advance after each stage
     showStatus("Running white threshold...");
@@ -1226,7 +1222,6 @@ function displayProcessingStage(stage: ProcessingStage) {
   // Update stage button states
   document.querySelectorAll(".stage-btn").forEach(btn => btn.classList.remove("active"));
   const stageButtons: Record<ProcessingStage, HTMLButtonElement> = {
-    raw: stageRawBtn,
     cropped: stageCroppedBtn,
     threshold: stageThresholdBtn,
     palettized: stagePalettizedBtn,
@@ -1278,8 +1273,13 @@ function displayProcessingStage(stage: ProcessingStage) {
   );
   processCtx.putImageData(imageData, 0, 0);
   
-  // Fit to screen
-  processFitToScreen();
+  // Only fit to screen on first display, then preserve zoom/pan
+  if (!processViewInitialized) {
+    processFitToScreen();
+    processViewInitialized = true;
+  } else {
+    updateProcessTransform();
+  }
   
   showStatus(`Viewing: ${stage} (${image.width}×${image.height})`);
 }

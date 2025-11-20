@@ -803,7 +803,7 @@ var currentImage = null;
 var currentSelectedPage = null;
 var pdfPageCount = 0;
 var cancelThumbnailLoading = false;
-var currentStage = "raw";
+var currentStage = "cropped";
 var processedImages = /* @__PURE__ */ new Map();
 var zoom = 1;
 var panX = 0;
@@ -820,6 +820,7 @@ var processPanY = 0;
 var isProcessPanning = false;
 var lastProcessPanX = 0;
 var lastProcessPanY = 0;
+var processViewInitialized = false;
 var uploadFileList = document.getElementById("uploadFileList");
 var uploadBtn = document.getElementById("uploadBtn");
 var clearAllBtn = document.getElementById("clearAllBtn");
@@ -857,7 +858,6 @@ var processZoomLevel = document.getElementById("processZoomLevel");
 var processFitToScreenBtn = document.getElementById("processFitToScreenBtn");
 var processStatusText = document.getElementById("processStatusText");
 var backToCropBtn = document.getElementById("backToCropBtn");
-var stageRawBtn = document.getElementById("stageRawBtn");
 var stageCroppedBtn = document.getElementById("stageCroppedBtn");
 var stageThresholdBtn = document.getElementById("stageThresholdBtn");
 var stagePalettizedBtn = document.getElementById("stagePalettizedBtn");
@@ -866,7 +866,6 @@ var stageBinaryBtn = document.getElementById("stageBinaryBtn");
 backToCropBtn.addEventListener("click", () => {
   setMode("crop");
 });
-stageRawBtn.addEventListener("click", () => displayProcessingStage("raw"));
 stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
 stageThresholdBtn.addEventListener("click", () => displayProcessingStage("threshold"));
 stagePalettizedBtn.addEventListener("click", () => displayProcessingStage("palettized"));
@@ -1671,17 +1670,14 @@ async function startProcessing() {
   try {
     setMode("processing");
     processedImages.clear();
-    processedImages.set("raw", currentImage);
-    displayProcessingStage("raw");
+    processViewInitialized = false;
     let processImage = currentImage;
     if (cropRegion && cropRegion.width > 0 && cropRegion.height > 0) {
       showStatus("Cropping image...");
       processImage = cropImage(currentImage, cropRegion);
-      processedImages.set("cropped", processImage);
-      displayProcessingStage("cropped");
-    } else {
-      processedImages.set("cropped", currentImage);
     }
+    processedImages.set("cropped", processImage);
+    displayProcessingStage("cropped");
     showStatus("Running white threshold...");
     const t1 = performance.now();
     const thresholded = await whiteThresholdGPU(processImage, 0.85);
@@ -1726,7 +1722,6 @@ function displayProcessingStage(stage) {
   currentStage = stage;
   document.querySelectorAll(".stage-btn").forEach((btn) => btn.classList.remove("active"));
   const stageButtons = {
-    raw: stageRawBtn,
     cropped: stageCroppedBtn,
     threshold: stageThresholdBtn,
     palettized: stagePalettizedBtn,
@@ -1768,7 +1763,12 @@ function displayProcessingStage(stage) {
     image.height
   );
   processCtx.putImageData(imageData, 0, 0);
-  processFitToScreen();
+  if (!processViewInitialized) {
+    processFitToScreen();
+    processViewInitialized = true;
+  } else {
+    updateProcessTransform();
+  }
   showStatus(`Viewing: ${stage} (${image.width}\xD7${image.height})`);
 }
 function processFitToScreen() {
