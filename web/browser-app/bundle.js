@@ -132,10 +132,69 @@ async function readGPUBuffer(device, buffer, size) {
   return data;
 }
 
-// src/gpu/white_threshold_gpu.ts
-var shaderCode = `
+// src/gpu/cleanup_gpu.ts
+var extractChannelsShader = `
 @group(0) @binding(0) var<storage, read> input: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+@group(0) @binding(1) var<storage, read_write> value_out: array<f32>;
+@group(0) @binding(2) var<storage, read_write> saturation_out: array<f32>;
+@group(0) @binding(3) var<storage, read_write> hue_out: array<f32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+struct Params {
+    width: u32,
+    height: u32,
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+    
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    
+    let pixel_idx = y * params.width + x;
+    let pixel = input[pixel_idx];
+    
+    // Extract RGBA bytes (little-endian: byte 0=R, 1=G, 2=B, 3=A)
+    // But when stored as u32 in GPU buffer from RGBA bytes:
+    // GPU sees it as: A|B|G|R (bytes 3|2|1|0 in memory become 0|1|2|3 in u32)
+    let r = f32((pixel >> 0u) & 0xFFu) / 255.0;
+    let g = f32((pixel >> 8u) & 0xFFu) / 255.0;
+    let b = f32((pixel >> 16u) & 0xFFu) / 255.0;
+    
+    // Calculate min and max for HSV
+    let min_rgb = min(min(r, g), b);
+    let max_rgb = max(max(r, g), b);
+    let delta = max_rgb - min_rgb;
+    
+    // Value = min(R,G,B) - gives 1.0 for white, 0.0 for black/colors
+    value_out[pixel_idx] = min_rgb;
+    
+    // Saturation = max(R,G,B) - min(R,G,B) - gives 0.0 for grayscale, higher for saturated
+    saturation_out[pixel_idx] = delta;
+    
+    // Hue calculation
+    var h: f32 = -1.0;
+    if (delta > 0.1) {
+        if (max_rgb == r) {
+            h = ((g - b) / delta) / 6.0;
+            if (h < 0.0) {
+                h = h + 1.0;
+            }
+        } else if (max_rgb == g) {
+            h = ((b - r) / delta + 2.0) / 6.0;
+        } else {
+            h = ((r - g) / delta + 4.0) / 6.0;
+        }
+    }
+    hue_out[pixel_idx] = h; // Store hue as 0.0 to 1.0
+}
+`;
+var thresholdShader = `
+@group(0) @binding(0) var<storage, read> value_in: array<f32>;
+@group(0) @binding(1) var<storage, read_write> value_out: array<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
 
 struct Params {
@@ -155,130 +214,596 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     
     let pixel_idx = y * params.width + x;
+    let value = value_in[pixel_idx];
     
-    // Read pixel from input
-    let pixel = input[pixel_idx];
-    
-    // Extract RGBA bytes (little-endian: R is lowest byte)
-    let r = (pixel & 0xFFu);
-    let g = (pixel >> 8u) & 0xFFu;
-    let b = (pixel >> 16u) & 0xFFu;
-    let a = (pixel >> 24u) & 0xFFu;
-    
-    // Calculate average brightness
-    let avg = (f32(r) + f32(g) + f32(b)) / (3.0 * 255.0);
-    
-    var out_r: u32;
-    var out_g: u32;
-    var out_b: u32;
-    var out_a: u32;
-    
-    if (avg >= params.threshold) {
-        // Set to pure white
-        out_r = 255u;
-        out_g = 255u;
-        out_b = 255u;
-        out_a = 255u;
-    } else {
-        // Keep original
-        out_r = r;
-        out_g = g;
-        out_b = b;
-        out_a = a;
-    }
-    
-    // Pack back into u32
-    output[pixel_idx] = out_r | (out_g << 8u) | (out_b << 16u) | (out_a << 24u);
+    // Binary threshold: above = 1.0 (white/background), below = 0.0 (lines)
+    value_out[pixel_idx] = select(0.0, 1.0, value >= params.threshold);
 }
 `;
-async function whiteThresholdGPU(image, threshold = 0.85) {
+var medianFilterShader = `
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+struct Params {
+    width: u32,
+    height: u32,
+}
+
+// Sorting network for 9 elements (median filter)
+fn median9(v: array<f32, 9>) -> f32 {
+    var arr = v;
+    
+    // Simple bubble sort for median (good enough for 9 elements)
+    for (var i = 0u; i < 9u; i = i + 1u) {
+        for (var j = 0u; j < 8u - i; j = j + 1u) {
+            if (arr[j] > arr[j + 1u]) {
+                let temp = arr[j];
+                arr[j] = arr[j + 1u];
+                arr[j + 1u] = temp;
+            }
+        }
+    }
+    
+    return arr[4]; // Middle element
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+    
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    
+    let w = i32(params.width);
+    let h = i32(params.height);
+    let ix = i32(x);
+    let iy = i32(y);
+    
+    var values: array<f32, 9>;
+    var idx = 0u;
+    
+    // Gather 3x3 neighborhood
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let nx = clamp(ix + dx, 0, w - 1);
+            let ny = clamp(iy + dy, 0, h - 1);
+            values[idx] = input[u32(ny) * params.width + u32(nx)];
+            idx = idx + 1u;
+        }
+    }
+    
+    let pixel_idx = y * params.width + x;
+    output[pixel_idx] = median9(values);
+}
+`;
+var recombineShader = `
+@group(0) @binding(0) var<storage, read> value_in: array<f32>;
+@group(0) @binding(1) var<storage, read> saturation_in: array<f32>;
+@group(0) @binding(2) var<storage, read> hue_in: array<f32>;
+@group(0) @binding(3) var<storage, read_write> output: array<u32>;
+@group(0) @binding(4) var<uniform> params: Params;
+
+struct Params {
+    width: u32,
+    height: u32,
+}
+
+// Convert HSV to RGB
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
+    if (h < 0 || s < 0.1) {
+        // Grayscale
+        return vec3<f32>(v, v, v);
+    }
+    
+    let h6 = h * 6.0;
+    let sector = u32(floor(h6));
+    let frac = h6 - f32(sector);
+    
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * frac);
+    let t = v * (1.0 - s * (1.0 - frac));
+    
+    switch (sector % 6u) {
+        case 0u: { return vec3<f32>(v, t, p); }
+        case 1u: { return vec3<f32>(q, v, p); }
+        case 2u: { return vec3<f32>(p, v, t); }
+        case 3u: { return vec3<f32>(p, q, v); }
+        case 4u: { return vec3<f32>(t, p, v); }
+        default: { return vec3<f32>(v, p, q); }
+    }
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+    
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    
+    let pixel_idx = y * params.width + x;
+    
+    let value = value_in[pixel_idx]; // Binary mask: 0 = line, 1 = background
+    let saturation = saturation_in[pixel_idx]; // Cleaned saturation
+    let hue = hue_in[pixel_idx]; // Cleaned hue
+    
+    // For background pixels (value = 1), output white
+    // For line pixels (value = 0), reconstruct color from cleaned hue and saturation
+    var rgb: vec3<f32>;
+    if (value > 0.6) {
+        // Background - output white
+        rgb = vec3<f32>(1.0, 1.0, 1.0);
+    } else {
+        // Line - reconstruct color with full brightness
+        // Use saturation and hue to rebuild the color
+        if (saturation < 0.1 || hue < 0.0) {
+            // Grayscale line - output black
+            rgb = vec3<f32>(0.0, 0.0, 0.0);
+        } else {
+            // Colored line - reconstruct from HSV with V=1.0 for full brightness
+            rgb = hsv_to_rgb(hue, 1.0, 1.0);
+        }
+    }
+    
+    let r = u32(clamp(rgb.x * 255.0, 0.0, 255.0));
+    let g = u32(clamp(rgb.y * 255.0, 0.0, 255.0));
+    let b = u32(clamp(rgb.z * 255.0, 0.0, 255.0));
+    let a = 255u;
+    
+    output[pixel_idx] = r | (g << 8u) | (b << 16u) | (a << 24u);
+}
+`;
+var channelToGrayscaleShader = `
+@group(0) @binding(0) var<storage, read> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+struct Params {
+    width: u32,
+    height: u32,
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+    
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    
+    let pixel_idx = y * params.width + x;
+    let value = input[pixel_idx];
+    
+    let gray = u32(clamp(value * 255.0, 0.0, 255.0));
+    output[pixel_idx] = gray | (gray << 8u) | (gray << 16u) | (255u << 24u);
+}
+`;
+var hueToRGBShader = `
+@group(0) @binding(0) var<storage, read> hue_in: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+struct Params {
+    width: u32,
+    height: u32,
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
+    if (h < 0 || s < 0.1) {
+        // Grayscale
+        return vec3<f32>(v, v, v);
+    }
+
+    let h6 = h * 6.0;
+    let sector = u32(floor(h6));
+    let frac = h6 - f32(sector);
+    
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * frac);
+    let t = v * (1.0 - s * (1.0 - frac));
+    
+    switch (sector % 6u) {
+        case 0u: { return vec3<f32>(v, t, p); }
+        case 1u: { return vec3<f32>(q, v, p); }
+        case 2u: { return vec3<f32>(p, v, t); }
+        case 3u: { return vec3<f32>(p, q, v); }
+        case 4u: { return vec3<f32>(t, p, v); }
+        default: { return vec3<f32>(v, p, q); }
+    }
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+    
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    
+    let pixel_idx = y * params.width + x;
+    let hue = hue_in[pixel_idx];
+    
+    // Convert hue to RGB with full saturation and value for visualization
+    let rgb = hsv_to_rgb(hue, 1.0, 1.0);
+    
+    let r = u32(clamp(rgb.x * 255.0, 0.0, 255.0));
+    let g = u32(clamp(rgb.y * 255.0, 0.0, 255.0));
+    let b = u32(clamp(rgb.z * 255.0, 0.0, 255.0));
+    
+    output[pixel_idx] = r | (g << 8u) | (b << 16u) | (255u << 24u);
+}
+`;
+async function cleanupGPU(image) {
   const { device } = await getGPUContext();
   const { width, height, data } = image;
   const pixelCount = width * height;
   const byteSize = pixelCount * 4;
-  console.log(`Image: ${width}x${height}, ${pixelCount} pixels, ${byteSize} bytes`);
-  console.log(`Input data length: ${data.length}, byteLength: ${data.byteLength}`);
+  const floatByteSize = pixelCount * 4;
+  console.log(`Cleanup: ${width}x${height}, ${pixelCount} pixels, data.length=${data.length}, expected=${byteSize}`);
   const inputBuffer = createGPUBuffer(
     device,
     new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
     GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
   );
-  console.log(`Input buffer created: ${byteSize} bytes`);
+  const valueBuffer1 = device.createBuffer({
+    size: floatByteSize,
+    usage: GPUBufferUsage.STORAGE
+  });
+  const valueBuffer2 = device.createBuffer({
+    size: floatByteSize,
+    usage: GPUBufferUsage.STORAGE
+  });
+  const saturationBuffer1 = device.createBuffer({
+    size: floatByteSize,
+    usage: GPUBufferUsage.STORAGE
+  });
+  const saturationBuffer2 = device.createBuffer({
+    size: floatByteSize,
+    usage: GPUBufferUsage.STORAGE
+  });
+  const hueBuffer1 = device.createBuffer({
+    size: floatByteSize,
+    usage: GPUBufferUsage.STORAGE
+  });
+  const hueBuffer2 = device.createBuffer({
+    size: floatByteSize,
+    usage: GPUBufferUsage.STORAGE
+  });
   const outputBuffer = device.createBuffer({
     size: byteSize,
-    // Size in bytes (= pixelCount * 4)
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
-    mappedAtCreation: false
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
   });
-  console.log(`Output buffer created: ${byteSize} bytes`);
-  const paramsBuffer = device.createBuffer({
-    size: 16,
-    // 4 floats * 4 bytes
+  const extractParams = new Uint32Array([width, height]);
+  const extractParamsBuffer = device.createBuffer({
+    size: 8,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
   });
-  const paramsArrayBuffer = new ArrayBuffer(16);
-  const paramsU32View = new Uint32Array(paramsArrayBuffer);
-  const paramsF32View = new Float32Array(paramsArrayBuffer);
-  paramsU32View[0] = width;
-  paramsU32View[1] = height;
-  paramsF32View[2] = threshold;
-  paramsF32View[3] = 0;
-  device.queue.writeBuffer(paramsBuffer, 0, paramsArrayBuffer);
-  const shaderModule = device.createShaderModule({ code: shaderCode });
-  const pipeline = device.createComputePipeline({
+  device.queue.writeBuffer(extractParamsBuffer, 0, extractParams);
+  const thresholdParamsBuffer = device.createBuffer({
+    size: 16,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  });
+  const thresholdParamsArray = new ArrayBuffer(16);
+  const thresholdParamsU32 = new Uint32Array(thresholdParamsArray);
+  const thresholdParamsF32 = new Float32Array(thresholdParamsArray);
+  thresholdParamsU32[0] = width;
+  thresholdParamsU32[1] = height;
+  thresholdParamsF32[2] = 0.5;
+  thresholdParamsF32[3] = 0;
+  device.queue.writeBuffer(thresholdParamsBuffer, 0, thresholdParamsArray);
+  const medianParams = new Uint32Array([width, height]);
+  const medianParamsBuffer = device.createBuffer({
+    size: 8,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  });
+  device.queue.writeBuffer(medianParamsBuffer, 0, medianParams);
+  const extractModule = device.createShaderModule({ code: extractChannelsShader });
+  const thresholdModule = device.createShaderModule({ code: thresholdShader });
+  const medianModule = device.createShaderModule({ code: medianFilterShader });
+  const recombineModule = device.createShaderModule({ code: recombineShader });
+  const extractPipeline = device.createComputePipeline({
     layout: "auto",
-    compute: {
-      module: shaderModule,
-      entryPoint: "main"
-    }
+    compute: { module: extractModule, entryPoint: "main" }
   });
-  const bindGroup = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: { buffer: inputBuffer } },
-      { binding: 1, resource: { buffer: outputBuffer } },
-      { binding: 2, resource: { buffer: paramsBuffer } }
-    ]
+  const thresholdPipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: thresholdModule, entryPoint: "main" }
   });
-  const commandEncoder = device.createCommandEncoder();
-  const passEncoder = commandEncoder.beginComputePass();
-  passEncoder.setPipeline(pipeline);
-  passEncoder.setBindGroup(0, bindGroup);
+  const medianPipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: medianModule, entryPoint: "main" }
+  });
+  const recombinePipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: recombineModule, entryPoint: "main" }
+  });
   const workgroupsX = Math.ceil(width / 8);
   const workgroupsY = Math.ceil(height / 8);
-  console.log(`Dispatching ${workgroupsX} x ${workgroupsY} workgroups for ${width}x${height} image`);
-  passEncoder.dispatchWorkgroups(workgroupsX, workgroupsY);
-  passEncoder.end();
-  device.queue.submit([commandEncoder.finish()]);
-  console.log("Submitted compute shader");
-  if (typeof window !== "undefined") {
-    console.log("Browser detected, using onSubmittedWorkDone()");
+  {
+    const bindGroup = device.createBindGroup({
+      layout: extractPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: inputBuffer } },
+        { binding: 1, resource: { buffer: valueBuffer1 } },
+        { binding: 2, resource: { buffer: saturationBuffer1 } },
+        { binding: 3, resource: { buffer: hueBuffer1 } },
+        { binding: 4, resource: { buffer: extractParamsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(extractPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();
-    console.log("GPU work completed");
+  }
+  {
+    const bindGroup = device.createBindGroup({
+      layout: thresholdPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: valueBuffer1 } },
+        { binding: 1, resource: { buffer: valueBuffer2 } },
+        { binding: 2, resource: { buffer: thresholdParamsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(thresholdPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+  }
+  {
+    const bindGroup = device.createBindGroup({
+      layout: medianPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: saturationBuffer1 } },
+        { binding: 1, resource: { buffer: saturationBuffer2 } },
+        { binding: 2, resource: { buffer: medianParamsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(medianPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+  }
+  {
+    const bindGroup = device.createBindGroup({
+      layout: medianPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: hueBuffer1 } },
+        { binding: 1, resource: { buffer: hueBuffer2 } },
+        { binding: 2, resource: { buffer: medianParamsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(medianPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+  }
+  {
+    const bindGroup = device.createBindGroup({
+      layout: recombinePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: valueBuffer2 } },
+        { binding: 1, resource: { buffer: saturationBuffer2 } },
+        { binding: 2, resource: { buffer: hueBuffer2 } },
+        { binding: 3, resource: { buffer: outputBuffer } },
+        { binding: 4, resource: { buffer: extractParamsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(recombinePipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+  }
+  if (typeof window !== "undefined") {
+    await device.queue.onSubmittedWorkDone();
   } else {
-    console.log("Deno detected, using delay workaround");
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  const outputData = await readGPUBuffer(device, outputBuffer, byteSize);
-  console.log(`Read back white threshold output data: ${outputData.length} bytes`);
-  console.log(`First 10 u32 values from output: ${Array.from(new Uint32Array(outputData.buffer, 0, 10))}`);
-  console.log(`First 10 RGBA pixels: ${Array.from(outputData.slice(0, 40))}`);
-  const row123Start = 123 * 6800 * 4;
-  const row124Start = 124 * 6800 * 4;
-  console.log(`Row 123 first 10 pixels: ${Array.from(outputData.slice(row123Start, row123Start + 40))}`);
-  console.log(`Row 124 first 10 pixels: ${Array.from(outputData.slice(row124Start, row124Start + 40))}`);
+  const grayscaleModule = device.createShaderModule({ code: channelToGrayscaleShader });
+  const hueVisModule = device.createShaderModule({ code: hueToRGBShader });
+  const grayscalePipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: grayscaleModule, entryPoint: "main" }
+  });
+  const hueVisPipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: hueVisModule, entryPoint: "main" }
+  });
+  const valueVisBuffer = device.createBuffer({
+    size: byteSize,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+  });
+  const saturationVisBuffer = device.createBuffer({
+    size: byteSize,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+  });
+  const saturationMedianVisBuffer = device.createBuffer({
+    size: byteSize,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+  });
+  const hueVisBuffer = device.createBuffer({
+    size: byteSize,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+  });
+  const hueMedianVisBuffer = device.createBuffer({
+    size: byteSize,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+  });
+  {
+    const bindGroup = device.createBindGroup({
+      layout: grayscalePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: valueBuffer2 } },
+        { binding: 1, resource: { buffer: valueVisBuffer } },
+        { binding: 2, resource: { buffer: extractParamsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(grayscalePipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+  }
+  {
+    const bindGroup = device.createBindGroup({
+      layout: grayscalePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: saturationBuffer1 } },
+        { binding: 1, resource: { buffer: saturationVisBuffer } },
+        { binding: 2, resource: { buffer: extractParamsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(grayscalePipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+  }
+  {
+    const bindGroup = device.createBindGroup({
+      layout: grayscalePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: saturationBuffer2 } },
+        { binding: 1, resource: { buffer: saturationMedianVisBuffer } },
+        { binding: 2, resource: { buffer: extractParamsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(grayscalePipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+  }
+  {
+    const bindGroup = device.createBindGroup({
+      layout: hueVisPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: hueBuffer1 } },
+        { binding: 1, resource: { buffer: hueVisBuffer } },
+        { binding: 2, resource: { buffer: extractParamsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(hueVisPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+  }
+  {
+    const bindGroup = device.createBindGroup({
+      layout: hueVisPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: hueBuffer2 } },
+        { binding: 1, resource: { buffer: hueMedianVisBuffer } },
+        { binding: 2, resource: { buffer: extractParamsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(hueVisPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+  }
+  const [finalData, valueData, satData, satMedianData, hueData, hueMedianData] = await Promise.all([
+    readGPUBuffer(device, outputBuffer, byteSize),
+    readGPUBuffer(device, valueVisBuffer, byteSize),
+    readGPUBuffer(device, saturationVisBuffer, byteSize),
+    readGPUBuffer(device, saturationMedianVisBuffer, byteSize),
+    readGPUBuffer(device, hueVisBuffer, byteSize),
+    readGPUBuffer(device, hueMedianVisBuffer, byteSize)
+  ]);
+  console.log(`Cleanup complete: ${finalData.length} bytes`);
   inputBuffer.destroy();
+  valueBuffer1.destroy();
+  valueBuffer2.destroy();
+  saturationBuffer1.destroy();
+  saturationBuffer2.destroy();
+  hueBuffer1.destroy();
+  hueBuffer2.destroy();
   outputBuffer.destroy();
-  paramsBuffer.destroy();
+  valueVisBuffer.destroy();
+  saturationVisBuffer.destroy();
+  saturationMedianVisBuffer.destroy();
+  hueVisBuffer.destroy();
+  hueMedianVisBuffer.destroy();
+  extractParamsBuffer.destroy();
+  thresholdParamsBuffer.destroy();
+  medianParamsBuffer.destroy();
   return {
-    width,
-    height,
-    data: new Uint8ClampedArray(outputData.buffer, 0, byteSize)
+    value: {
+      width,
+      height,
+      data: new Uint8ClampedArray(valueData.buffer, 0, byteSize)
+    },
+    saturation: {
+      width,
+      height,
+      data: new Uint8ClampedArray(satData.buffer, 0, byteSize)
+    },
+    saturationMedian: {
+      width,
+      height,
+      data: new Uint8ClampedArray(satMedianData.buffer, 0, byteSize)
+    },
+    hue: {
+      width,
+      height,
+      data: new Uint8ClampedArray(hueData.buffer, 0, byteSize)
+    },
+    hueMedian: {
+      width,
+      height,
+      data: new Uint8ClampedArray(hueMedianData.buffer, 0, byteSize)
+    },
+    final: {
+      width,
+      height,
+      data: new Uint8ClampedArray(finalData.buffer, 0, byteSize)
+    }
   };
 }
 
 // src/gpu/palettize_gpu.ts
-var shaderCode2 = `
+var shaderCode = `
 @group(0) @binding(0) var<storage, read> input: array<u32>;
 @group(0) @binding(1) var<storage, read_write> output: array<u32>;
 @group(0) @binding(2) var<storage, read> palette: array<u32>;
@@ -375,7 +900,7 @@ async function palettizeGPU(image, palette) {
     paramsData,
     GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
   );
-  const shaderModule = device.createShaderModule({ code: shaderCode2 });
+  const shaderModule = device.createShaderModule({ code: shaderCode });
   const pipeline = device.createComputePipeline({
     layout: "auto",
     compute: {
@@ -439,7 +964,7 @@ function getPixelPal(img, x, y) {
     return img.data[byteIndex] & 15;
   }
 }
-var DEFAULT_PALETTE_16 = new Uint32Array([
+var DEFAULT_PALETTE = new Uint32Array([
   4294967295,
   // 0: white
   255,
@@ -450,32 +975,18 @@ var DEFAULT_PALETTE_16 = new Uint32Array([
   // 3: green
   65535,
   // 4: blue
-  4294902015,
-  // 5: yellow
+  4289331455,
+  // 5: orange (yellow is too similar to white)
   4278255615,
   // 6: magenta
   16777215,
   // 7: cyan
-  2155905279,
+  2155905279
   // 8: gray
-  3233857791,
-  // 9: light gray
-  2147483903,
-  // 10: dark red
-  8388863,
-  // 11: dark green
-  33023,
-  // 12: dark blue
-  2155872511,
-  // 13: olive
-  2147516671,
-  // 14: purple
-  8421631
-  // 15: teal
 ]);
 
 // src/gpu/median_gpu.ts
-var shaderCode3 = `
+var shaderCode2 = `
 @group(0) @binding(0) var<storage, read> input: array<u32>;
 @group(0) @binding(1) var<storage, read_write> output: array<u32>;
 @group(0) @binding(2) var<uniform> params: Params;
@@ -569,7 +1080,7 @@ async function median3x3GPU(image) {
     paramsData,
     GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
   );
-  const shaderModule = device.createShaderModule({ code: shaderCode3 });
+  const shaderModule = device.createShaderModule({ code: shaderCode2 });
   const pipeline = device.createComputePipeline({
     layout: "auto",
     compute: {
@@ -805,7 +1316,7 @@ function hexToRGBA(hex) {
   const b = parseInt(hex.slice(5, 7), 16);
   return [r, g, b, 255];
 }
-var userPalette = Array.from(DEFAULT_PALETTE_16).map((color) => ({
+var userPalette = Array.from(DEFAULT_PALETTE).map((color) => ({
   inputColor: u32ToHex(color),
   outputColor: u32ToHex(color),
   mapToBg: false
@@ -867,7 +1378,12 @@ var processFitToScreenBtn = document.getElementById("processFitToScreenBtn");
 var processStatusText = document.getElementById("processStatusText");
 var backToCropBtn = document.getElementById("backToCropBtn");
 var stageCroppedBtn = document.getElementById("stageCroppedBtn");
-var stageThresholdBtn = document.getElementById("stageThresholdBtn");
+var stageValueBtn = document.getElementById("stageValueBtn");
+var stageSaturationBtn = document.getElementById("stageSaturationBtn");
+var stageSaturationMedianBtn = document.getElementById("stageSaturationMedianBtn");
+var stageHueBtn = document.getElementById("stageHueBtn");
+var stageHueMedianBtn = document.getElementById("stageHueMedianBtn");
+var stageCleanupBtn = document.getElementById("stageCleanupBtn");
 var stagePalettizedBtn = document.getElementById("stagePalettizedBtn");
 var stageMedianBtn = document.getElementById("stageMedianBtn");
 var stageBinaryBtn = document.getElementById("stageBinaryBtn");
@@ -875,7 +1391,12 @@ backToCropBtn.addEventListener("click", () => {
   setMode("crop");
 });
 stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
-stageThresholdBtn.addEventListener("click", () => displayProcessingStage("threshold"));
+stageValueBtn.addEventListener("click", () => displayProcessingStage("value"));
+stageSaturationBtn.addEventListener("click", () => displayProcessingStage("saturation"));
+stageSaturationMedianBtn.addEventListener("click", () => displayProcessingStage("saturation_median"));
+stageHueBtn.addEventListener("click", () => displayProcessingStage("hue"));
+stageHueMedianBtn.addEventListener("click", () => displayProcessingStage("hue_median"));
+stageCleanupBtn.addEventListener("click", () => displayProcessingStage("cleanup"));
 stagePalettizedBtn.addEventListener("click", () => displayProcessingStage("palettized"));
 stageMedianBtn.addEventListener("click", () => displayProcessingStage("median"));
 stageBinaryBtn.addEventListener("click", () => displayProcessingStage("binary"));
@@ -1686,17 +2207,22 @@ async function startProcessing() {
     }
     processedImages.set("cropped", processImage);
     displayProcessingStage("cropped");
-    showStatus("Running white threshold...");
+    showStatus("Running cleanup (removing JPEG noise)...");
     const t1 = performance.now();
-    const thresholded = await whiteThresholdGPU(processImage, 0.85);
+    const cleanupResults = await cleanupGPU(processImage);
     const t2 = performance.now();
-    showStatus(`White threshold: ${(t2 - t1).toFixed(1)}ms`);
-    processedImages.set("threshold", thresholded);
-    displayProcessingStage("threshold");
+    showStatus(`Cleanup: ${(t2 - t1).toFixed(1)}ms`);
+    processedImages.set("value", cleanupResults.value);
+    processedImages.set("saturation", cleanupResults.saturation);
+    processedImages.set("saturation_median", cleanupResults.saturationMedian);
+    processedImages.set("hue", cleanupResults.hue);
+    processedImages.set("hue_median", cleanupResults.hueMedian);
+    processedImages.set("cleanup", cleanupResults.final);
+    displayProcessingStage("cleanup");
     showStatus("Palettizing...");
     const t3 = performance.now();
     const customPalette = buildPaletteRGBA();
-    const palettized = await palettizeGPU(thresholded, customPalette);
+    const palettized = await palettizeGPU(cleanupResults.final, customPalette);
     const t4 = performance.now();
     showStatus(`Palettize: ${(t4 - t3).toFixed(1)}ms`);
     processedImages.set("palettized", palettized);
@@ -1732,7 +2258,12 @@ function displayProcessingStage(stage) {
   document.querySelectorAll(".stage-btn").forEach((btn) => btn.classList.remove("active"));
   const stageButtons = {
     cropped: stageCroppedBtn,
-    threshold: stageThresholdBtn,
+    value: stageValueBtn,
+    saturation: stageSaturationBtn,
+    saturation_median: stageSaturationMedianBtn,
+    hue: stageHueBtn,
+    hue_median: stageHueMedianBtn,
+    cleanup: stageCleanupBtn,
     palettized: stagePalettizedBtn,
     median: stageMedianBtn,
     binary: stageBinaryBtn
@@ -2048,7 +2579,7 @@ function addPaletteColor() {
 }
 function resetPaletteToDefault() {
   userPalette.length = 0;
-  Array.from(DEFAULT_PALETTE_16).forEach((color) => {
+  Array.from(DEFAULT_PALETTE).forEach((color) => {
     userPalette.push({
       inputColor: u32ToHex(color),
       outputColor: u32ToHex(color),

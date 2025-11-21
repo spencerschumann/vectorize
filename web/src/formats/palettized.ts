@@ -98,24 +98,16 @@ export function palettizedToRGBA(img: PalettizedImage): { width: number; height:
 }
 
 /**
- * Default 16-color palette
- * Based on the original Python implementation
+ * Default palette
  */
-export const DEFAULT_PALETTE_16: Uint32Array = new Uint32Array([
+export const DEFAULT_PALETTE: Uint32Array = new Uint32Array([
     0xffffffff, // 0: white
     0x000000ff, // 1: black
     0xff0000ff, // 2: red
     0x00ff00ff, // 3: green
     0x0000ffff, // 4: blue
-    0xffff00ff, // 5: yellow
+    0xffaa00ff, // 5: orange (yellow is too similar to white)
     0xff00ffff, // 6: magenta
     0x00ffffff, // 7: cyan
     0x808080ff, // 8: gray
-    0xc0c0c0ff, // 9: light gray
-    0x800000ff, // 10: dark red
-    0x008000ff, // 11: dark green
-    0x000080ff, // 12: dark blue
-    0x808000ff, // 13: olive
-    0x800080ff, // 14: purple
-    0x008080ff, // 15: teal
 ]);

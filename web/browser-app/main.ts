@@ -2,14 +2,14 @@
 import { loadImageFromFile } from "../src/pdf/image_load.ts";
 import { renderPdfPage } from "../src/pdf/pdf_render.ts";
 import type { CanvasBackend } from "../src/pdf/pdf_render.ts";
-import { whiteThresholdGPU } from "../src/gpu/white_threshold_gpu.ts";
+import { cleanupGPU, type CleanupResults } from "../src/gpu/cleanup_gpu.ts";
 import { palettizeGPU } from "../src/gpu/palettize_gpu.ts";
 import { median3x3GPU } from "../src/gpu/median_gpu.ts";
 import { extractBlack } from "../src/raster/threshold.ts";
 import type { RGBAImage } from "../src/formats/rgba_image.ts";
 import type { PalettizedImage } from "../src/formats/palettized.ts";
 import type { BinaryImage } from "../src/formats/binary.ts";
-import { DEFAULT_PALETTE_16 } from "../src/formats/palettized.ts";
+import { DEFAULT_PALETTE } from "../src/formats/palettized.ts";
 import { saveFile, getFile, listFiles, deleteFile, clearAllFiles, updateFile } from "./storage.ts";
 
 // Convert u32 palette to Uint8ClampedArray RGBA format
@@ -51,7 +51,17 @@ let pdfPageCount = 0;
 let cancelThumbnailLoading = false;
 
 // Processing state
-type ProcessingStage = "cropped" | "threshold" | "palettized" | "median" | "binary";
+type ProcessingStage = 
+  | "cropped" 
+  | "value" 
+  | "saturation" 
+  | "saturation_median" 
+  | "hue" 
+  | "hue_median" 
+  | "cleanup" 
+  | "palettized" 
+  | "median" 
+  | "binary";
 let currentStage: ProcessingStage = "cropped";
 const processedImages: Map<ProcessingStage, RGBAImage | PalettizedImage | BinaryImage> = new Map();
 
@@ -78,8 +88,8 @@ function hexToRGBA(hex: string): [number, number, number, number] {
   return [r, g, b, 255];
 }
 
-// Initialize palette from DEFAULT_PALETTE_16
-const userPalette: PaletteColor[] = Array.from(DEFAULT_PALETTE_16).map(color => ({
+// Initialize palette from DEFAULT_PALETTE
+const userPalette: PaletteColor[] = Array.from(DEFAULT_PALETTE).map(color => ({
   inputColor: u32ToHex(color),
   outputColor: u32ToHex(color),
   mapToBg: false,
@@ -155,7 +165,12 @@ const processStatusText = document.getElementById("processStatusText") as HTMLDi
 const backToCropBtn = document.getElementById("backToCropBtn") as HTMLButtonElement;
 
 const stageCroppedBtn = document.getElementById("stageCroppedBtn") as HTMLButtonElement;
-const stageThresholdBtn = document.getElementById("stageThresholdBtn") as HTMLButtonElement;
+const stageValueBtn = document.getElementById("stageValueBtn") as HTMLButtonElement;
+const stageSaturationBtn = document.getElementById("stageSaturationBtn") as HTMLButtonElement;
+const stageSaturationMedianBtn = document.getElementById("stageSaturationMedianBtn") as HTMLButtonElement;
+const stageHueBtn = document.getElementById("stageHueBtn") as HTMLButtonElement;
+const stageHueMedianBtn = document.getElementById("stageHueMedianBtn") as HTMLButtonElement;
+const stageCleanupBtn = document.getElementById("stageCleanupBtn") as HTMLButtonElement;
 const stagePalettizedBtn = document.getElementById("stagePalettizedBtn") as HTMLButtonElement;
 const stageMedianBtn = document.getElementById("stageMedianBtn") as HTMLButtonElement;
 const stageBinaryBtn = document.getElementById("stageBinaryBtn") as HTMLButtonElement;
@@ -166,7 +181,12 @@ backToCropBtn.addEventListener("click", () => {
 });
 
 stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
-stageThresholdBtn.addEventListener("click", () => displayProcessingStage("threshold"));
+stageValueBtn.addEventListener("click", () => displayProcessingStage("value"));
+stageSaturationBtn.addEventListener("click", () => displayProcessingStage("saturation"));
+stageSaturationMedianBtn.addEventListener("click", () => displayProcessingStage("saturation_median"));
+stageHueBtn.addEventListener("click", () => displayProcessingStage("hue"));
+stageHueMedianBtn.addEventListener("click", () => displayProcessingStage("hue_median"));
+stageCleanupBtn.addEventListener("click", () => displayProcessingStage("cleanup"));
 stagePalettizedBtn.addEventListener("click", () => displayProcessingStage("palettized"));
 stageMedianBtn.addEventListener("click", () => displayProcessingStage("median"));
 stageBinaryBtn.addEventListener("click", () => displayProcessingStage("binary"));
@@ -1203,18 +1223,25 @@ async function startProcessing() {
     displayProcessingStage("cropped");
     
     // Run GPU pipeline with auto-advance after each stage
-    showStatus("Running white threshold...");
+    showStatus("Running cleanup (removing JPEG noise)...");
     const t1 = performance.now();
-    const thresholded = await whiteThresholdGPU(processImage, 0.85);
+    const cleanupResults = await cleanupGPU(processImage);
     const t2 = performance.now();
-    showStatus(`White threshold: ${(t2 - t1).toFixed(1)}ms`);
-    processedImages.set("threshold", thresholded);
-    displayProcessingStage("threshold");
+    showStatus(`Cleanup: ${(t2 - t1).toFixed(1)}ms`);
+    
+    // Store all intermediate cleanup stages
+    processedImages.set("value", cleanupResults.value);
+    processedImages.set("saturation", cleanupResults.saturation);
+    processedImages.set("saturation_median", cleanupResults.saturationMedian);
+    processedImages.set("hue", cleanupResults.hue);
+    processedImages.set("hue_median", cleanupResults.hueMedian);
+    processedImages.set("cleanup", cleanupResults.final);
+    displayProcessingStage("cleanup");
     
     showStatus("Palettizing...");
     const t3 = performance.now();
     const customPalette = buildPaletteRGBA();
-    const palettized = await palettizeGPU(thresholded, customPalette);
+    const palettized = await palettizeGPU(cleanupResults.final, customPalette);
     const t4 = performance.now();
     showStatus(`Palettize: ${(t4 - t3).toFixed(1)}ms`);
     processedImages.set("palettized", palettized);
@@ -1257,7 +1284,12 @@ function displayProcessingStage(stage: ProcessingStage) {
   document.querySelectorAll(".stage-btn").forEach(btn => btn.classList.remove("active"));
   const stageButtons: Record<ProcessingStage, HTMLButtonElement> = {
     cropped: stageCroppedBtn,
-    threshold: stageThresholdBtn,
+    value: stageValueBtn,
+    saturation: stageSaturationBtn,
+    saturation_median: stageSaturationMedianBtn,
+    hue: stageHueBtn,
+    hue_median: stageHueMedianBtn,
+    cleanup: stageCleanupBtn,
     palettized: stagePalettizedBtn,
     median: stageMedianBtn,
     binary: stageBinaryBtn,
@@ -1694,7 +1726,7 @@ function addPaletteColor() {
 
 function resetPaletteToDefault() {
   userPalette.length = 0;
-  Array.from(DEFAULT_PALETTE_16).forEach(color => {
+  Array.from(DEFAULT_PALETTE).forEach(color => {
     userPalette.push({
       inputColor: u32ToHex(color),
       outputColor: u32ToHex(color),
