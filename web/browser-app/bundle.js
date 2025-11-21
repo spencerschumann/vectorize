@@ -194,7 +194,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 `;
 var thresholdShader = `
 @group(0) @binding(0) var<storage, read> value_in: array<f32>;
-@group(0) @binding(1) var<storage, read_write> value_out: array<f32>;
+@group(0) @binding(1) var<storage, read_write> value_out: array<u32>;
 @group(0) @binding(2) var<uniform> params: Params;
 
 struct Params {
@@ -216,8 +216,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let pixel_idx = y * params.width + x;
     let value = value_in[pixel_idx];
     
-    // Binary threshold: above = 1.0 (white/background), below = 0.0 (lines)
-    value_out[pixel_idx] = select(0.0, 1.0, value >= params.threshold);
+    // Binary threshold: 1 = background (white), 0 = line (black)
+    value_out[pixel_idx] = u32(value >= params.threshold);
 }
 `;
 var medianFilterShader = `
@@ -280,7 +280,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 var recombineShader = `
-@group(0) @binding(0) var<storage, read> value_in: array<f32>;
+@group(0) @binding(0) var<storage, read> value_in: array<u32>;
 @group(0) @binding(1) var<storage, read> saturation_in: array<f32>;
 @group(0) @binding(2) var<storage, read> hue_in: array<f32>;
 @group(0) @binding(3) var<storage, read_write> output: array<u32>;
@@ -327,14 +327,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     let pixel_idx = y * params.width + x;
     
-    let value = value_in[pixel_idx]; // Binary mask: 0 = line, 1 = background
+    let value = value_in[pixel_idx]; // Binary: 0 = line, 1 = background
     let saturation = saturation_in[pixel_idx]; // Cleaned saturation
     let hue = hue_in[pixel_idx]; // Cleaned hue
     
     // For background pixels (value = 1), output white
     // For line pixels (value = 0), reconstruct color from cleaned hue and saturation
     var rgb: vec3<f32>;
-    if (value > 0.6) {
+    if (value == 1u) {
         // Background - output white
         rgb = vec3<f32>(1.0, 1.0, 1.0);
     } else {
@@ -380,6 +380,32 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let value = input[pixel_idx];
     
     let gray = u32(clamp(value * 255.0, 0.0, 255.0));
+    output[pixel_idx] = gray | (gray << 8u) | (gray << 16u) | (255u << 24u);
+}
+`;
+var binaryToGrayscaleShader = `
+@group(0) @binding(0) var<storage, read> input: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+struct Params {
+    width: u32,
+    height: u32,
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+    
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    
+    let pixel_idx = y * params.width + x;
+    let bit = input[pixel_idx];
+    
+    let gray = bit * 255u;  // 0=black, 1=white (255)
     output[pixel_idx] = gray | (gray << 8u) | (gray << 16u) | (255u << 24u);
 }
 `;
@@ -453,14 +479,17 @@ async function cleanupGPU(image) {
   );
   const valueBuffer1 = device.createBuffer({
     size: floatByteSize,
+    // f32
     usage: GPUBufferUsage.STORAGE
   });
   const valueBuffer2 = device.createBuffer({
-    size: floatByteSize,
+    size: byteSize,
+    // u32 - binary format
     usage: GPUBufferUsage.STORAGE
   });
   const saturationBuffer1 = device.createBuffer({
     size: floatByteSize,
+    // f32
     usage: GPUBufferUsage.STORAGE
   });
   const saturationBuffer2 = device.createBuffer({
@@ -624,10 +653,15 @@ async function cleanupGPU(image) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   const grayscaleModule = device.createShaderModule({ code: channelToGrayscaleShader });
+  const binaryModule = device.createShaderModule({ code: binaryToGrayscaleShader });
   const hueVisModule = device.createShaderModule({ code: hueToRGBShader });
   const grayscalePipeline = device.createComputePipeline({
     layout: "auto",
     compute: { module: grayscaleModule, entryPoint: "main" }
+  });
+  const binaryPipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: binaryModule, entryPoint: "main" }
   });
   const hueVisPipeline = device.createComputePipeline({
     layout: "auto",
@@ -655,7 +689,7 @@ async function cleanupGPU(image) {
   });
   {
     const bindGroup = device.createBindGroup({
-      layout: grayscalePipeline.getBindGroupLayout(0),
+      layout: binaryPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: valueBuffer2 } },
         { binding: 1, resource: { buffer: valueVisBuffer } },
@@ -664,7 +698,7 @@ async function cleanupGPU(image) {
     });
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
-    pass.setPipeline(grayscalePipeline);
+    pass.setPipeline(binaryPipeline);
     pass.setBindGroup(0, bindGroup);
     pass.dispatchWorkgroups(workgroupsX, workgroupsY);
     pass.end();
@@ -754,11 +788,8 @@ async function cleanupGPU(image) {
   console.log(`Cleanup complete: ${finalData.length} bytes`);
   inputBuffer.destroy();
   valueBuffer1.destroy();
-  valueBuffer2.destroy();
   saturationBuffer1.destroy();
-  saturationBuffer2.destroy();
   hueBuffer1.destroy();
-  hueBuffer2.destroy();
   outputBuffer.destroy();
   valueVisBuffer.destroy();
   saturationVisBuffer.destroy();
@@ -798,7 +829,437 @@ async function cleanupGPU(image) {
       width,
       height,
       data: new Uint8ClampedArray(finalData.buffer, 0, byteSize)
+    },
+    valueBuffer: valueBuffer2,
+    // Don't destroy - pass to value processing
+    saturationBuffer: saturationBuffer2,
+    // Don't destroy - pass to recombination
+    hueBuffer: hueBuffer2,
+    // Don't destroy - pass to recombination
+    width,
+    height
+  };
+}
+async function recombineWithValue(valueBuffer, saturationBuffer, hueBuffer, width, height) {
+  const { device } = await getGPUContext();
+  const pixelCount = width * height;
+  const byteSize = pixelCount * 4;
+  const outputBuffer = device.createBuffer({
+    size: byteSize,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+  });
+  const paramsArray = new ArrayBuffer(8);
+  const paramsU32 = new Uint32Array(paramsArray);
+  paramsU32[0] = width;
+  paramsU32[1] = height;
+  const paramsBuffer = device.createBuffer({
+    size: 8,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  });
+  device.queue.writeBuffer(paramsBuffer, 0, paramsArray);
+  const recombineModule = device.createShaderModule({ code: recombineShader });
+  const recombinePipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: recombineModule, entryPoint: "main" }
+  });
+  const workgroupsX = Math.ceil(width / 8);
+  const workgroupsY = Math.ceil(height / 8);
+  const bindGroup = device.createBindGroup({
+    layout: recombinePipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: valueBuffer } },
+      { binding: 1, resource: { buffer: saturationBuffer } },
+      { binding: 2, resource: { buffer: hueBuffer } },
+      { binding: 3, resource: { buffer: outputBuffer } },
+      { binding: 4, resource: { buffer: paramsBuffer } }
+    ]
+  });
+  const encoder = device.createCommandEncoder();
+  const pass = encoder.beginComputePass();
+  pass.setPipeline(recombinePipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+  pass.end();
+  device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  const finalData = await readGPUBuffer(device, outputBuffer, byteSize);
+  outputBuffer.destroy();
+  paramsBuffer.destroy();
+  return {
+    width,
+    height,
+    data: new Uint8ClampedArray(finalData.buffer, 0, byteSize)
+  };
+}
+
+// src/gpu/value_process_gpu.ts
+var weightedMedianShader = `
+@group(0) @binding(0) var<storage, read> input: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+struct Params {
+    width: u32,
+    height: u32,
+}
+
+fn get_bit(data: ptr<storage, array<u32>, read>, x: u32, y: u32, w: u32, h: u32) -> u32 {
+    if (x >= w || y >= h) {
+        return 1u; // Background outside bounds
     }
+    let pixel_idx = y * w + x;
+    return (*data)[pixel_idx];
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+    
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    
+    let w = params.width;
+    let h = params.height;
+    
+    // Gather 3x3 neighborhood with cardinal directions weighted 2x
+    var sum = 0u;
+    
+    // Corners (1x each) = 4 samples
+    sum += get_bit(&input, max(x, 1u) - 1u, max(y, 1u) - 1u, w, h);
+    sum += get_bit(&input, min(x + 1u, w - 1u), max(y, 1u) - 1u, w, h);
+    sum += get_bit(&input, max(x, 1u) - 1u, min(y + 1u, h - 1u), w, h);
+    sum += get_bit(&input, min(x + 1u, w - 1u), min(y + 1u, h - 1u), w, h);
+    
+    // Cardinals (2x each) = 8 samples
+    let north = get_bit(&input, x, max(y, 1u) - 1u, w, h);
+    let south = get_bit(&input, x, min(y + 1u, h - 1u), w, h);
+    let west = get_bit(&input, max(x, 1u) - 1u, y, w, h);
+    let east = get_bit(&input, min(x + 1u, w - 1u), y, w, h);
+    sum += north * 2u;
+    sum += south * 2u;
+    sum += west * 2u;
+    sum += east * 2u;
+    
+    // Center = 0 samples (not included in median calculation)
+    
+    // Total: 12 samples, median is at position 6 (>= 6 means set to 1)
+    let median_bit = u32(sum >= 6u);
+    
+    let pixel_idx = y * w + x;
+    output[pixel_idx] = median_bit;
+}
+`;
+var skeletonizeShader = `
+@group(0) @binding(0) var<storage, read> input: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+struct Params {
+    width: u32,
+    height: u32,
+    iteration: u32,  // 0 or 1 for two-pass algorithm
+    _padding: u32,
+}
+
+fn get_bit(data: ptr<storage, array<u32>, read>, x: i32, y: i32, w: u32, h: u32) -> u32 {
+    if (x < 0 || y < 0 || x >= i32(w) || y >= i32(h)) {
+        return 1u; // Background outside bounds
+    }
+    let pixel_idx = u32(y) * w + u32(x);
+    return (*data)[pixel_idx];
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = i32(global_id.x);
+    let y = i32(global_id.y);
+    
+    if (x >= i32(params.width) || y >= i32(params.height)) {
+        return;
+    }
+    
+    let w = params.width;
+    let h = params.height;
+    
+    // Get center pixel (0 = line, 1 = background)
+    let center = get_bit(&input, x, y, w, h);
+    
+    // Only process line pixels
+    if (center == 1u) {
+        // Keep background as-is
+        let pixel_idx = u32(y) * w + u32(x);
+        output[pixel_idx] = 1u;
+        return;
+    }
+    
+    // Get 8-neighborhood (using standard labeling)
+    // P9 P2 P3
+    // P8 P1 P4
+    // P7 P6 P5
+    let p2 = get_bit(&input, x,     y - 1, w, h);
+    let p3 = get_bit(&input, x + 1, y - 1, w, h);
+    let p4 = get_bit(&input, x + 1, y,     w, h);
+    let p5 = get_bit(&input, x + 1, y + 1, w, h);
+    let p6 = get_bit(&input, x,     y + 1, w, h);
+    let p7 = get_bit(&input, x - 1, y + 1, w, h);
+    let p8 = get_bit(&input, x - 1, y,     w, h);
+    let p9 = get_bit(&input, x - 1, y - 1, w, h);
+    
+    // Count black neighbors (0 = line)
+    let black_neighbors = (1u - p2) + (1u - p3) + (1u - p4) + (1u - p5) + 
+                          (1u - p6) + (1u - p7) + (1u - p8) + (1u - p9);
+    
+    // Count transitions from white to black (0->1 in circular order)
+    var transitions = 0u;
+    if (p2 == 1u && p3 == 0u) { transitions += 1u; }
+    if (p3 == 1u && p4 == 0u) { transitions += 1u; }
+    if (p4 == 1u && p5 == 0u) { transitions += 1u; }
+    if (p5 == 1u && p6 == 0u) { transitions += 1u; }
+    if (p6 == 1u && p7 == 0u) { transitions += 1u; }
+    if (p7 == 1u && p8 == 0u) { transitions += 1u; }
+    if (p8 == 1u && p9 == 0u) { transitions += 1u; }
+    if (p9 == 1u && p2 == 0u) { transitions += 1u; }
+    
+    // Zhang-Suen conditions
+    var should_delete = false;
+    
+    // Common conditions for both iterations
+    if (black_neighbors >= 2u && black_neighbors <= 6u && transitions == 1u) {
+        if (params.iteration == 0u) {
+            // Iteration 1: Check P2 * P4 * P6 = 0 and P4 * P6 * P8 = 0
+            if ((p2 * p4 * p6) == 0u && (p4 * p6 * p8) == 0u) {
+                should_delete = true;
+            }
+        } else {
+            // Iteration 2: Check P2 * P4 * P8 = 0 and P2 * P6 * P8 = 0
+            if ((p2 * p4 * p8) == 0u && (p2 * p6 * p8) == 0u) {
+                should_delete = true;
+            }
+        }
+    }
+    
+    let output_bit = select(0u, 1u, should_delete); // Delete = set to white (1)
+    
+    let pixel_idx = u32(y) * w + u32(x);
+    output[pixel_idx] = output_bit;
+}
+`;
+var binaryToRGBAShader = `
+@group(0) @binding(0) var<storage, read> binary_in: array<u32>;
+@group(0) @binding(1) var<storage, read_write> rgba_out: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+struct Params {
+    width: u32,
+    height: u32,
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+    
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    
+    let pixel_idx = y * params.width + x;
+    let bit = binary_in[pixel_idx]; // Unpacked: 0 or 1
+    let gray = bit * 255u; // 1 = white (255), 0 = black (0)
+    
+    rgba_out[pixel_idx] = gray | (gray << 8u) | (gray << 16u) | (255u << 24u);
+}
+`;
+async function processValueChannel(valueBuffer, width, height) {
+  const { device } = await getGPUContext();
+  const pixelCount = width * height;
+  const binaryByteSize = pixelCount * 4;
+  const rgbaByteSize = pixelCount * 4;
+  console.log(`Value processing: ${width}x${height}`);
+  const binaryBuffer2 = device.createBuffer({
+    size: binaryByteSize,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+  });
+  const binaryBuffer3 = device.createBuffer({
+    size: binaryByteSize,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+  });
+  const binaryBuffer4 = device.createBuffer({
+    size: binaryByteSize,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+  });
+  const rgbaBuffer1 = device.createBuffer({
+    size: rgbaByteSize,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+  });
+  const rgbaBuffer2 = device.createBuffer({
+    size: rgbaByteSize,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+  });
+  const params = new Uint32Array([width, height]);
+  const paramsBuffer = device.createBuffer({
+    size: 8,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  });
+  device.queue.writeBuffer(paramsBuffer, 0, params);
+  const skeletonParamsBuffer = device.createBuffer({
+    size: 16,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  });
+  const medianModule = device.createShaderModule({ code: weightedMedianShader });
+  const skeletonModule = device.createShaderModule({ code: skeletonizeShader });
+  const toRGBAModule = device.createShaderModule({ code: binaryToRGBAShader });
+  const medianPipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: medianModule, entryPoint: "main" }
+  });
+  const skeletonPipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: skeletonModule, entryPoint: "main" }
+  });
+  const toRGBAPipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: toRGBAModule, entryPoint: "main" }
+  });
+  const workgroupsX = Math.ceil(width / 8);
+  const workgroupsY = Math.ceil(height / 8);
+  device.queue.writeBuffer(binaryBuffer2, 0, new Uint32Array(pixelCount));
+  device.queue.writeBuffer(binaryBuffer3, 0, new Uint32Array(pixelCount));
+  device.queue.writeBuffer(binaryBuffer4, 0, new Uint32Array(pixelCount));
+  {
+    const bindGroup = device.createBindGroup({
+      layout: medianPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: valueBuffer } },
+        { binding: 1, resource: { buffer: binaryBuffer2 } },
+        { binding: 2, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(medianPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+  }
+  {
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(binaryBuffer2, 0, binaryBuffer3, 0, binaryByteSize);
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+  }
+  for (let iter = 0; iter < 4; iter++) {
+    const inputBuffer = iter % 2 == 0 ? binaryBuffer3 : binaryBuffer4;
+    const outputBuffer = iter % 2 == 0 ? binaryBuffer4 : binaryBuffer3;
+    device.queue.writeBuffer(outputBuffer, 0, new Uint32Array(pixelCount));
+    {
+      const skeletonParams = new Uint32Array([width, height, 0, 0]);
+      device.queue.writeBuffer(skeletonParamsBuffer, 0, skeletonParams);
+      const bindGroup = device.createBindGroup({
+        layout: skeletonPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: inputBuffer } },
+          { binding: 1, resource: { buffer: outputBuffer } },
+          { binding: 2, resource: { buffer: skeletonParamsBuffer } }
+        ]
+      });
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(skeletonPipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+      pass.end();
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+    }
+    const nextTempBuffer = iter % 2 == 0 ? binaryBuffer3 : binaryBuffer4;
+    device.queue.writeBuffer(nextTempBuffer, 0, new Uint32Array(pixelCount));
+    {
+      const skeletonParams = new Uint32Array([width, height, 1, 0]);
+      device.queue.writeBuffer(skeletonParamsBuffer, 0, skeletonParams);
+      const bindGroup = device.createBindGroup({
+        layout: skeletonPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: outputBuffer } },
+          { binding: 1, resource: { buffer: nextTempBuffer } },
+          { binding: 2, resource: { buffer: skeletonParamsBuffer } }
+        ]
+      });
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(skeletonPipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+      pass.end();
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+    }
+  }
+  const finalSkeletonBuffer = binaryBuffer3;
+  {
+    const bindGroup = device.createBindGroup({
+      layout: toRGBAPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: binaryBuffer2 } },
+        { binding: 1, resource: { buffer: rgbaBuffer1 } },
+        { binding: 2, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(toRGBAPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+  }
+  {
+    const bindGroup = device.createBindGroup({
+      layout: toRGBAPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: finalSkeletonBuffer } },
+        { binding: 1, resource: { buffer: rgbaBuffer2 } },
+        { binding: 2, resource: { buffer: paramsBuffer } }
+      ]
+    });
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(toRGBAPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+  }
+  const [medianData, skeletonData] = await Promise.all([
+    readGPUBuffer(device, rgbaBuffer1, rgbaByteSize),
+    readGPUBuffer(device, rgbaBuffer2, rgbaByteSize)
+  ]);
+  console.log(`Value processing complete`);
+  binaryBuffer2.destroy();
+  binaryBuffer4.destroy();
+  rgbaBuffer1.destroy();
+  rgbaBuffer2.destroy();
+  paramsBuffer.destroy();
+  skeletonParamsBuffer.destroy();
+  return {
+    median: {
+      width,
+      height,
+      data: new Uint8ClampedArray(medianData.buffer, 0, rgbaByteSize)
+    },
+    skeleton: {
+      width,
+      height,
+      data: new Uint8ClampedArray(skeletonData.buffer, 0, rgbaByteSize)
+    },
+    skeletonBuffer: finalSkeletonBuffer
+    // Don't destroy - pass to recombination
   };
 }
 
@@ -1379,6 +1840,8 @@ var processStatusText = document.getElementById("processStatusText");
 var backToCropBtn = document.getElementById("backToCropBtn");
 var stageCroppedBtn = document.getElementById("stageCroppedBtn");
 var stageValueBtn = document.getElementById("stageValueBtn");
+var stageValueMedianBtn = document.getElementById("stageValueMedianBtn");
+var stageValueSkeletonBtn = document.getElementById("stageValueSkeletonBtn");
 var stageSaturationBtn = document.getElementById("stageSaturationBtn");
 var stageSaturationMedianBtn = document.getElementById("stageSaturationMedianBtn");
 var stageHueBtn = document.getElementById("stageHueBtn");
@@ -1392,6 +1855,8 @@ backToCropBtn.addEventListener("click", () => {
 });
 stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
 stageValueBtn.addEventListener("click", () => displayProcessingStage("value"));
+stageValueMedianBtn.addEventListener("click", () => displayProcessingStage("value_median"));
+stageValueSkeletonBtn.addEventListener("click", () => displayProcessingStage("value_skeleton"));
 stageSaturationBtn.addEventListener("click", () => displayProcessingStage("saturation"));
 stageSaturationMedianBtn.addEventListener("click", () => displayProcessingStage("saturation_median"));
 stageHueBtn.addEventListener("click", () => displayProcessingStage("hue"));
@@ -2207,7 +2672,7 @@ async function startProcessing() {
     }
     processedImages.set("cropped", processImage);
     displayProcessingStage("cropped");
-    showStatus("Running cleanup (removing JPEG noise)...");
+    showStatus("Running cleanup (extracting channels)...");
     const t1 = performance.now();
     const cleanupResults = await cleanupGPU(processImage);
     const t2 = performance.now();
@@ -2217,12 +2682,38 @@ async function startProcessing() {
     processedImages.set("saturation_median", cleanupResults.saturationMedian);
     processedImages.set("hue", cleanupResults.hue);
     processedImages.set("hue_median", cleanupResults.hueMedian);
-    processedImages.set("cleanup", cleanupResults.final);
+    showStatus("Processing value channel (median, skeleton)...");
+    const t2b = performance.now();
+    const valueResults = await processValueChannel(
+      cleanupResults.valueBuffer,
+      cleanupResults.width,
+      cleanupResults.height
+    );
+    const t2c = performance.now();
+    showStatus(`Value processing: ${(t2c - t2b).toFixed(1)}ms`);
+    processedImages.set("value_median", valueResults.median);
+    processedImages.set("value_skeleton", valueResults.skeleton);
+    showStatus("Recombining with skeletonized value...");
+    const t2d = performance.now();
+    const cleanupFinal = await recombineWithValue(
+      valueResults.skeletonBuffer,
+      cleanupResults.saturationBuffer,
+      cleanupResults.hueBuffer,
+      cleanupResults.width,
+      cleanupResults.height
+    );
+    const t2e = performance.now();
+    showStatus(`Recombine: ${(t2e - t2d).toFixed(1)}ms`);
+    processedImages.set("cleanup", cleanupFinal);
     displayProcessingStage("cleanup");
+    cleanupResults.valueBuffer.destroy();
+    cleanupResults.saturationBuffer.destroy();
+    cleanupResults.hueBuffer.destroy();
+    valueResults.skeletonBuffer.destroy();
     showStatus("Palettizing...");
     const t3 = performance.now();
     const customPalette = buildPaletteRGBA();
-    const palettized = await palettizeGPU(cleanupResults.final, customPalette);
+    const palettized = await palettizeGPU(cleanupFinal, customPalette);
     const t4 = performance.now();
     showStatus(`Palettize: ${(t4 - t3).toFixed(1)}ms`);
     processedImages.set("palettized", palettized);
@@ -2264,6 +2755,8 @@ function displayProcessingStage(stage) {
     hue: stageHueBtn,
     hue_median: stageHueMedianBtn,
     cleanup: stageCleanupBtn,
+    value_median: document.getElementById("stageValueMedianBtn"),
+    value_skeleton: document.getElementById("stageValueSkeletonBtn"),
     palettized: stagePalettizedBtn,
     median: stageMedianBtn,
     binary: stageBinaryBtn

@@ -99,6 +99,8 @@ export function palettizedToRGBA(img: PalettizedImage): { width: number; height:
 
 /**
  * Default palette
+ * The classic 8-bit color palette, https://en.wikipedia.org/wiki/List_of_monochrome_and_RGB_color_formats#3-bit_RGB,
+ * with orange instead of yellow to improve visibility, plus one gray.
  */
 export const DEFAULT_PALETTE: Uint32Array = new Uint32Array([
     0xffffffff, // 0: white

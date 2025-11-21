@@ -2,7 +2,8 @@
 import { loadImageFromFile } from "../src/pdf/image_load.ts";
 import { renderPdfPage } from "../src/pdf/pdf_render.ts";
 import type { CanvasBackend } from "../src/pdf/pdf_render.ts";
-import { cleanupGPU, type CleanupResults } from "../src/gpu/cleanup_gpu.ts";
+import { cleanupGPU, recombineWithValue, type CleanupResults } from "../src/gpu/cleanup_gpu.ts";
+import { processValueChannel, type ValueProcessResults } from "../src/gpu/value_process_gpu.ts";
 import { palettizeGPU } from "../src/gpu/palettize_gpu.ts";
 import { median3x3GPU } from "../src/gpu/median_gpu.ts";
 import { extractBlack } from "../src/raster/threshold.ts";
@@ -59,6 +60,8 @@ type ProcessingStage =
   | "hue" 
   | "hue_median" 
   | "cleanup" 
+  | "value_median"
+  | "value_skeleton"
   | "palettized" 
   | "median" 
   | "binary";
@@ -166,6 +169,8 @@ const backToCropBtn = document.getElementById("backToCropBtn") as HTMLButtonElem
 
 const stageCroppedBtn = document.getElementById("stageCroppedBtn") as HTMLButtonElement;
 const stageValueBtn = document.getElementById("stageValueBtn") as HTMLButtonElement;
+const stageValueMedianBtn = document.getElementById("stageValueMedianBtn") as HTMLButtonElement;
+const stageValueSkeletonBtn = document.getElementById("stageValueSkeletonBtn") as HTMLButtonElement;
 const stageSaturationBtn = document.getElementById("stageSaturationBtn") as HTMLButtonElement;
 const stageSaturationMedianBtn = document.getElementById("stageSaturationMedianBtn") as HTMLButtonElement;
 const stageHueBtn = document.getElementById("stageHueBtn") as HTMLButtonElement;
@@ -182,6 +187,8 @@ backToCropBtn.addEventListener("click", () => {
 
 stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
 stageValueBtn.addEventListener("click", () => displayProcessingStage("value"));
+stageValueMedianBtn.addEventListener("click", () => displayProcessingStage("value_median"));
+stageValueSkeletonBtn.addEventListener("click", () => displayProcessingStage("value_skeleton"));
 stageSaturationBtn.addEventListener("click", () => displayProcessingStage("saturation"));
 stageSaturationMedianBtn.addEventListener("click", () => displayProcessingStage("saturation_median"));
 stageHueBtn.addEventListener("click", () => displayProcessingStage("hue"));
@@ -1223,7 +1230,7 @@ async function startProcessing() {
     displayProcessingStage("cropped");
     
     // Run GPU pipeline with auto-advance after each stage
-    showStatus("Running cleanup (removing JPEG noise)...");
+    showStatus("Running cleanup (extracting channels)...");
     const t1 = performance.now();
     const cleanupResults = await cleanupGPU(processImage);
     const t2 = performance.now();
@@ -1235,13 +1242,48 @@ async function startProcessing() {
     processedImages.set("saturation_median", cleanupResults.saturationMedian);
     processedImages.set("hue", cleanupResults.hue);
     processedImages.set("hue_median", cleanupResults.hueMedian);
-    processedImages.set("cleanup", cleanupResults.final);
+    // Don't set "cleanup" yet - we'll recombine with skeleton value
+    
+    // Process value channel: weighted median, skeletonization
+    showStatus("Processing value channel (median, skeleton)...");
+    const t2b = performance.now();
+    const valueResults = await processValueChannel(
+        cleanupResults.valueBuffer,
+        cleanupResults.width,
+        cleanupResults.height
+    );
+    const t2c = performance.now();
+    showStatus(`Value processing: ${(t2c - t2b).toFixed(1)}ms`);
+    
+    // Store value processing stages
+    processedImages.set("value_median", valueResults.median);
+    processedImages.set("value_skeleton", valueResults.skeleton);
+    
+    // Now recombine with skeleton value instead of thresholded value
+    showStatus("Recombining with skeletonized value...");
+    const t2d = performance.now();
+    const cleanupFinal = await recombineWithValue(
+        valueResults.skeletonBuffer,
+        cleanupResults.saturationBuffer,
+        cleanupResults.hueBuffer,
+        cleanupResults.width,
+        cleanupResults.height
+    );
+    const t2e = performance.now();
+    showStatus(`Recombine: ${(t2e - t2d).toFixed(1)}ms`);
+    processedImages.set("cleanup", cleanupFinal);
     displayProcessingStage("cleanup");
+    
+    // Clean up buffers now that we're done with them
+    cleanupResults.valueBuffer.destroy();
+    cleanupResults.saturationBuffer.destroy();
+    cleanupResults.hueBuffer.destroy();
+    valueResults.skeletonBuffer.destroy();
     
     showStatus("Palettizing...");
     const t3 = performance.now();
     const customPalette = buildPaletteRGBA();
-    const palettized = await palettizeGPU(cleanupResults.final, customPalette);
+    const palettized = await palettizeGPU(cleanupFinal, customPalette);
     const t4 = performance.now();
     showStatus(`Palettize: ${(t4 - t3).toFixed(1)}ms`);
     processedImages.set("palettized", palettized);
@@ -1290,6 +1332,8 @@ function displayProcessingStage(stage: ProcessingStage) {
     hue: stageHueBtn,
     hue_median: stageHueMedianBtn,
     cleanup: stageCleanupBtn,
+    value_median: document.getElementById("stageValueMedianBtn") as HTMLButtonElement,
+    value_skeleton: document.getElementById("stageValueSkeletonBtn") as HTMLButtonElement,
     palettized: stagePalettizedBtn,
     median: stageMedianBtn,
     binary: stageBinaryBtn,

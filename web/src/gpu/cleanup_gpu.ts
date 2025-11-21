@@ -73,10 +73,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
-// Step 2: Threshold value channel
+// Step 2: Threshold value channel to binary (u32)
 const thresholdShader = `
 @group(0) @binding(0) var<storage, read> value_in: array<f32>;
-@group(0) @binding(1) var<storage, read_write> value_out: array<f32>;
+@group(0) @binding(1) var<storage, read_write> value_out: array<u32>;
 @group(0) @binding(2) var<uniform> params: Params;
 
 struct Params {
@@ -98,8 +98,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let pixel_idx = y * params.width + x;
     let value = value_in[pixel_idx];
     
-    // Binary threshold: above = 1.0 (white/background), below = 0.0 (lines)
-    value_out[pixel_idx] = select(0.0, 1.0, value >= params.threshold);
+    // Binary threshold: 1 = background (white), 0 = line (black)
+    value_out[pixel_idx] = u32(value >= params.threshold);
 }
 `;
 
@@ -166,7 +166,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 // Step 4: Recombine channels into RGB
 const recombineShader = `
-@group(0) @binding(0) var<storage, read> value_in: array<f32>;
+@group(0) @binding(0) var<storage, read> value_in: array<u32>;
 @group(0) @binding(1) var<storage, read> saturation_in: array<f32>;
 @group(0) @binding(2) var<storage, read> hue_in: array<f32>;
 @group(0) @binding(3) var<storage, read_write> output: array<u32>;
@@ -213,14 +213,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     let pixel_idx = y * params.width + x;
     
-    let value = value_in[pixel_idx]; // Binary mask: 0 = line, 1 = background
+    let value = value_in[pixel_idx]; // Binary: 0 = line, 1 = background
     let saturation = saturation_in[pixel_idx]; // Cleaned saturation
     let hue = hue_in[pixel_idx]; // Cleaned hue
     
     // For background pixels (value = 1), output white
     // For line pixels (value = 0), reconstruct color from cleaned hue and saturation
     var rgb: vec3<f32>;
-    if (value > 0.6) {
+    if (value == 1u) {
         // Background - output white
         rgb = vec3<f32>(1.0, 1.0, 1.0);
     } else {
@@ -268,6 +268,34 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let value = input[pixel_idx];
     
     let gray = u32(clamp(value * 255.0, 0.0, 255.0));
+    output[pixel_idx] = gray | (gray << 8u) | (gray << 16u) | (255u << 24u);
+}
+`;
+
+// Helper: Convert binary u32 to grayscale RGBA
+const binaryToGrayscaleShader = `
+@group(0) @binding(0) var<storage, read> input: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+struct Params {
+    width: u32,
+    height: u32,
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+    
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    
+    let pixel_idx = y * params.width + x;
+    let bit = input[pixel_idx];
+    
+    let gray = bit * 255u;  // 0=black, 1=white (255)
     output[pixel_idx] = gray | (gray << 8u) | (gray << 16u) | (255u << 24u);
 }
 `;
@@ -331,12 +359,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 `;
 
 export interface CleanupResults {
-    value: RGBAImage;              // Thresholded value channel
+    value: RGBAImage;              // Thresholded value channel (visualized)
     saturation: RGBAImage;         // Raw saturation channel
     saturationMedian: RGBAImage;   // Median-filtered saturation
     hue: RGBAImage;                // Raw hue channel
     hueMedian: RGBAImage;          // Median-filtered hue
     final: RGBAImage;              // Final recombined result
+    valueBuffer: GPUBuffer;        // Binary value buffer (u32 array: 0=line, 1=bg)
+    saturationBuffer: GPUBuffer;   // Median-filtered saturation buffer (f32)
+    hueBuffer: GPUBuffer;          // Median-filtered hue buffer (f32)
+    width: number;
+    height: number;
 }
 
 /**
@@ -361,19 +394,19 @@ export async function cleanupGPU(image: RGBAImage): Promise<CleanupResults> {
         GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     );
     
-    // Create channel buffers (f32 arrays)
+    // Create channel buffers
     const valueBuffer1 = device.createBuffer({
-        size: floatByteSize,
+        size: floatByteSize,  // f32
         usage: GPUBufferUsage.STORAGE,
     });
     
     const valueBuffer2 = device.createBuffer({
-        size: floatByteSize,
+        size: byteSize,  // u32 - binary format
         usage: GPUBufferUsage.STORAGE,
     });
     
     const saturationBuffer1 = device.createBuffer({
-        size: floatByteSize,
+        size: floatByteSize,  // f32
         usage: GPUBufferUsage.STORAGE,
     });
     
@@ -573,11 +606,17 @@ export async function cleanupGPU(image: RGBAImage): Promise<CleanupResults> {
     
     // Create visualization pipelines
     const grayscaleModule = device.createShaderModule({ code: channelToGrayscaleShader });
+    const binaryModule = device.createShaderModule({ code: binaryToGrayscaleShader });
     const hueVisModule = device.createShaderModule({ code: hueToRGBShader });
     
     const grayscalePipeline = device.createComputePipeline({
         layout: "auto",
         compute: { module: grayscaleModule, entryPoint: "main" },
+    });
+    
+    const binaryPipeline = device.createComputePipeline({
+        layout: "auto",
+        compute: { module: binaryModule, entryPoint: "main" },
     });
     
     const hueVisPipeline = device.createComputePipeline({
@@ -611,10 +650,10 @@ export async function cleanupGPU(image: RGBAImage): Promise<CleanupResults> {
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
     
-    // Visualize value channel (thresholded)
+    // Visualize value channel (binary thresholded)
     {
         const bindGroup = device.createBindGroup({
-            layout: grayscalePipeline.getBindGroupLayout(0),
+            layout: binaryPipeline.getBindGroupLayout(0),
             entries: [
                 { binding: 0, resource: { buffer: valueBuffer2 } },
                 { binding: 1, resource: { buffer: valueVisBuffer } },
@@ -623,7 +662,7 @@ export async function cleanupGPU(image: RGBAImage): Promise<CleanupResults> {
         });
         const encoder = device.createCommandEncoder();
         const pass = encoder.beginComputePass();
-        pass.setPipeline(grayscalePipeline);
+        pass.setPipeline(binaryPipeline);
         pass.setBindGroup(0, bindGroup);
         pass.dispatchWorkgroups(workgroupsX, workgroupsY);
         pass.end();
@@ -723,14 +762,14 @@ export async function cleanupGPU(image: RGBAImage): Promise<CleanupResults> {
     
     console.log(`Cleanup complete: ${finalData.length} bytes`);
     
-    // Cleanup buffers
+    // Cleanup buffers (keep valueBuffer2, saturationBuffer2, hueBuffer2 for further processing)
     inputBuffer.destroy();
     valueBuffer1.destroy();
-    valueBuffer2.destroy();
+    // valueBuffer2 kept - returned for value processing
     saturationBuffer1.destroy();
-    saturationBuffer2.destroy();
+    // saturationBuffer2 kept - returned for recombination
     hueBuffer1.destroy();
-    hueBuffer2.destroy();
+    // hueBuffer2 kept - returned for recombination
     outputBuffer.destroy();
     valueVisBuffer.destroy();
     saturationVisBuffer.destroy();
@@ -772,5 +811,89 @@ export async function cleanupGPU(image: RGBAImage): Promise<CleanupResults> {
             height,
             data: new Uint8ClampedArray(finalData.buffer, 0, byteSize),
         },
+        valueBuffer: valueBuffer2,  // Don't destroy - pass to value processing
+        saturationBuffer: saturationBuffer2,  // Don't destroy - pass to recombination
+        hueBuffer: hueBuffer2,  // Don't destroy - pass to recombination
+        width,
+        height,
+    };
+}
+
+/**
+ * Recombine channels with a custom value buffer (e.g., skeletonized)
+ * Uses the saturation and hue buffers from cleanup, but with processed value
+ */
+export async function recombineWithValue(
+    valueBuffer: GPUBuffer,  // u32 binary buffer (0=line, 1=background)
+    saturationBuffer: GPUBuffer,  // f32 buffer
+    hueBuffer: GPUBuffer,  // f32 buffer
+    width: number,
+    height: number,
+): Promise<RGBAImage> {
+    const { device } = await getGPUContext();
+    
+    const pixelCount = width * height;
+    const byteSize = pixelCount * 4;
+    
+    // Create output buffer
+    const outputBuffer = device.createBuffer({
+        size: byteSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    
+    // Create params buffer
+    const paramsArray = new ArrayBuffer(8);
+    const paramsU32 = new Uint32Array(paramsArray);
+    paramsU32[0] = width;
+    paramsU32[1] = height;
+    
+    const paramsBuffer = device.createBuffer({
+        size: 8,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(paramsBuffer, 0, paramsArray);
+    
+    // Create pipeline
+    const recombineModule = device.createShaderModule({ code: recombineShader });
+    const recombinePipeline = device.createComputePipeline({
+        layout: "auto",
+        compute: { module: recombineModule, entryPoint: "main" },
+    });
+    
+    const workgroupsX = Math.ceil(width / 8);
+    const workgroupsY = Math.ceil(height / 8);
+    
+    // Recombine
+    const bindGroup = device.createBindGroup({
+        layout: recombinePipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: valueBuffer } },
+            { binding: 1, resource: { buffer: saturationBuffer } },
+            { binding: 2, resource: { buffer: hueBuffer } },
+            { binding: 3, resource: { buffer: outputBuffer } },
+            { binding: 4, resource: { buffer: paramsBuffer } },
+        ],
+    });
+    
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(recombinePipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(workgroupsX, workgroupsY);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    
+    // Read result
+    const finalData = await readGPUBuffer(device, outputBuffer, byteSize);
+    
+    // Cleanup
+    outputBuffer.destroy();
+    paramsBuffer.destroy();
+    
+    return {
+        width,
+        height,
+        data: new Uint8ClampedArray(finalData.buffer, 0, byteSize),
     };
 }
