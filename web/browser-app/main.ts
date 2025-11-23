@@ -146,15 +146,24 @@ const fitToScreenBtn = document.getElementById("fitToScreenBtn") as HTMLButtonEl
 const clearCropBtn = document.getElementById("clearCropBtn") as HTMLButtonElement;
 const cropInfo = document.getElementById("cropInfo") as HTMLDivElement;
 const processBtn = document.getElementById("processBtn") as HTMLButtonElement;
-const backFromCropBtn = document.getElementById("backFromCropBtn") as HTMLButtonElement;
 const statusText = document.getElementById("statusText") as HTMLDivElement;
 const resultsPanel = document.getElementById("resultsPanel") as HTMLDivElement;
 const resultsContainer = document.getElementById("resultsContainer") as HTMLDivElement;
 
-// Palette editor elements
-const paletteList = document.getElementById("paletteList") as HTMLDivElement;
+// Top navigation elements
+const navStepFile = document.getElementById("navStepFile") as HTMLDivElement;
+const navStepPage = document.getElementById("navStepPage") as HTMLDivElement;
+const navStepConfigure = document.getElementById("navStepConfigure") as HTMLDivElement;
+const navPalettePreview = document.getElementById("navPalettePreview") as HTMLDivElement;
+const toggleToolbarBtn = document.getElementById("toggleToolbarBtn") as HTMLButtonElement;
+const cropSidebar = document.getElementById("cropSidebar") as HTMLDivElement;
+const processSidebar = document.getElementById("processSidebar") as HTMLDivElement;
+
+// Palette editor elements (removed const paletteList - now defined in renderPaletteUI)
 const addPaletteColorBtn = document.getElementById("addPaletteColorBtn") as HTMLButtonElement;
 const resetPaletteBtn = document.getElementById("resetPaletteBtn") as HTMLButtonElement;
+
+console.log("Palette buttons:", { addPaletteColorBtn, resetPaletteBtn });
 
 const processingScreen = document.getElementById("processingScreen") as HTMLDivElement;
 const processCanvasContainer = document.getElementById("processCanvasContainer") as HTMLDivElement;
@@ -165,7 +174,6 @@ const processZoomOutBtn = document.getElementById("processZoomOutBtn") as HTMLBu
 const processZoomLevel = document.getElementById("processZoomLevel") as HTMLDivElement;
 const processFitToScreenBtn = document.getElementById("processFitToScreenBtn") as HTMLButtonElement;
 const processStatusText = document.getElementById("processStatusText") as HTMLDivElement;
-const backToCropBtn = document.getElementById("backToCropBtn") as HTMLButtonElement;
 
 const stageCroppedBtn = document.getElementById("stageCroppedBtn") as HTMLButtonElement;
 const stageValueBtn = document.getElementById("stageValueBtn") as HTMLButtonElement;
@@ -181,10 +189,6 @@ const stageMedianBtn = document.getElementById("stageMedianBtn") as HTMLButtonEl
 const stageBinaryBtn = document.getElementById("stageBinaryBtn") as HTMLButtonElement;
 
 // Processing screen event handlers
-backToCropBtn.addEventListener("click", () => {
-  setMode("crop");
-});
-
 stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
 stageValueBtn.addEventListener("click", () => displayProcessingStage("value"));
 stageValueMedianBtn.addEventListener("click", () => displayProcessingStage("value_median"));
@@ -212,6 +216,25 @@ processZoomOutBtn.addEventListener("click", () => {
 
 processFitToScreenBtn.addEventListener("click", () => {
   processFitToScreen();
+});
+
+// Navigation step click handlers
+navStepFile.addEventListener("click", () => {
+  if (!navStepFile.classList.contains("disabled")) {
+    setMode("upload");
+  }
+});
+
+navStepPage.addEventListener("click", () => {
+  if (!navStepPage.classList.contains("disabled") && currentPdfData) {
+    setMode("pageSelection");
+  }
+});
+
+// Sidebar toggle
+toggleToolbarBtn.addEventListener("click", () => {
+  cropSidebar?.classList.toggle("collapsed");
+  processSidebar?.classList.toggle("collapsed");
 });
 
 // Initialize
@@ -279,14 +302,6 @@ backToFilesBtn.addEventListener("click", () => {
   cropRegion = null;
   setMode("upload");
   refreshFileList();
-});
-
-backFromCropBtn.addEventListener("click", () => {
-  if (currentFile?.type === "application/pdf") {
-    setMode("pageSelection");
-  } else {
-    setMode("upload");
-  }
 });
 
 // Zoom controls
@@ -411,9 +426,9 @@ canvasContainer.addEventListener("wheel", (e) => {
     
     // Apply zoom with constant speed in log space (feels consistent at all zoom levels)
     // Instead of multiplying by a factor, we adjust by a fixed percentage of the current zoom
-    const zoomSpeed = 0.005; // Adjust this to change overall zoom speed
+    const zoomSpeed = 0.01; // Adjust this to change overall zoom speed
     const zoomChange = -e.deltaY * zoomSpeed * zoom;
-    const newZoom = Math.max(0.1, Math.min(10, zoom + zoomChange));
+    const newZoom = Math.max(0.1, Math.min(20, zoom + zoomChange));
     
     // Adjust pan to keep the point under the mouse
     panX = mouseX - canvasX * newZoom;
@@ -498,6 +513,36 @@ processCanvasContainer.addEventListener("wheel", (e) => {
 });
 
 // Mode management
+function updateNavigation(mode: AppMode) {
+  // Update navigation step states
+  navStepFile.classList.remove("active", "completed", "disabled");
+  navStepPage.classList.remove("active", "completed", "disabled");
+  navStepConfigure.classList.remove("active", "completed", "disabled");
+  
+  switch (mode) {
+    case "upload":
+      navStepFile.classList.add("active");
+      navStepPage.classList.add("disabled");
+      navStepConfigure.classList.add("disabled");
+      break;
+    case "pageSelection":
+      navStepFile.classList.add("completed");
+      navStepPage.classList.add("active");
+      navStepConfigure.classList.add("disabled");
+      break;
+    case "crop":
+      navStepFile.classList.add("completed");
+      navStepPage.classList.add("completed");
+      navStepConfigure.classList.add("active");
+      break;
+    case "processing":
+      navStepFile.classList.add("completed");
+      navStepPage.classList.add("completed");
+      navStepConfigure.classList.add("completed");
+      break;
+  }
+}
+
 function setMode(mode: AppMode) {
   console.log("setMode called:", mode);
   currentMode = mode;
@@ -534,6 +579,9 @@ function setMode(mode: AppMode) {
       console.log("Processing screen activated");
       break;
   }
+  
+  // Update navigation
+  updateNavigation(mode);
 }
 
 function showStatus(message: string, isError = false) {
@@ -1629,136 +1677,265 @@ async function loadStoredFile(id: string) {
 
 // Palette Editor Functions
 function renderPaletteUI() {
-  paletteList.innerHTML = "";
+  console.log("renderPaletteUI called, userPalette length:", userPalette.length);
+  // Render compact display in sidebar with colors and hex values
+  const paletteDisplay = document.getElementById("paletteDisplay") as HTMLDivElement;
+  console.log("paletteDisplay element:", paletteDisplay);
+  if (!paletteDisplay) {
+    console.error("paletteDisplay not found in DOM!");
+    return;
+  }
+  paletteDisplay.innerHTML = "";
   
   userPalette.forEach((color, index) => {
-    const entry = document.createElement("div");
-    entry.className = "palette-entry";
-    if (index === 0) entry.classList.add("background");
+    const item = document.createElement("div");
+    item.style.cssText = "display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem; border-bottom: 1px solid #3a3a3a; cursor: pointer; transition: background 0.2s;";
+    item.onmouseover = () => item.style.background = "#333";
+    item.onmouseout = () => item.style.background = "transparent";
+    item.onclick = () => openColorEditor(index);
     
-    // Header with index and remove button
-    const header = document.createElement("div");
-    header.className = "palette-entry-header";
+    // Color visualization
+    const colorViz = document.createElement("div");
+    colorViz.style.cssText = "display: flex; align-items: center; gap: 4px;";
     
-    const indexLabel = document.createElement("div");
-    indexLabel.className = index === 0 ? "palette-index bg-index" : "palette-index";
-    indexLabel.textContent = `${index}${index === 0 ? " (BG)" : ""}`;
+    const inputSwatch = document.createElement("div");
+    inputSwatch.style.cssText = `width: 28px; height: 28px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.inputColor}; flex-shrink: 0;`;
+    colorViz.appendChild(inputSwatch);
     
-    const removeBtn = document.createElement("button");
-    removeBtn.className = "remove-color";
-    removeBtn.textContent = "Remove";
-    removeBtn.disabled = index === 0; // Can't remove background
-    removeBtn.onclick = () => {
-      if (index !== 0) {
-        userPalette.splice(index, 1);
-        renderPaletteUI();
-      }
-    };
+    // Show arrow if colors differ or (Remove) if mapped to background
+    if (color.mapToBg) {
+      const removeLabel = document.createElement("span");
+      removeLabel.textContent = "(Remove)";
+      removeLabel.style.cssText = "color: #ef4444; font-size: 0.85rem; font-weight: 500; white-space: nowrap;";
+      colorViz.appendChild(removeLabel);
+    } else if (color.inputColor.toLowerCase() !== color.outputColor.toLowerCase()) {
+      const arrow = document.createElement("span");
+      arrow.textContent = "→";
+      arrow.style.cssText = "color: #999; font-size: 1rem; flex-shrink: 0;";
+      colorViz.appendChild(arrow);
+      
+      const outputSwatch = document.createElement("div");
+      outputSwatch.style.cssText = `width: 28px; height: 28px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.outputColor}; flex-shrink: 0;`;
+      colorViz.appendChild(outputSwatch);
+    }
     
-    header.appendChild(indexLabel);
-    header.appendChild(removeBtn);
-    entry.appendChild(header);
+    item.appendChild(colorViz);
     
-    // Input color picker
-    const inputGroup = document.createElement("div");
-    inputGroup.className = "color-picker-group";
+    // Hex value(s)
+    const hexLabel = document.createElement("div");
+    hexLabel.style.cssText = "font-family: 'Courier New', monospace; font-size: 0.8rem; color: #aaa; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;";
+    if (color.mapToBg) {
+      hexLabel.textContent = color.inputColor.toUpperCase();
+    } else if (color.inputColor.toLowerCase() !== color.outputColor.toLowerCase()) {
+      hexLabel.textContent = `${color.inputColor.toUpperCase()} → ${color.outputColor.toUpperCase()}`;
+    } else {
+      hexLabel.textContent = color.inputColor.toUpperCase();
+    }
+    hexLabel.title = hexLabel.textContent; // Tooltip for long values
+    item.appendChild(hexLabel);
     
-    const inputLabel = document.createElement("label");
-    inputLabel.textContent = "Input (matching):";
-    inputGroup.appendChild(inputLabel);
+    // Index indicator
+    if (index === 0) {
+      const bgLabel = document.createElement("span");
+      bgLabel.textContent = "BG";
+      bgLabel.style.cssText = "font-size: 0.75rem; color: #4f46e5; font-weight: 600; flex-shrink: 0;";
+      item.appendChild(bgLabel);
+    }
     
-    const inputWrapper = document.createElement("div");
-    inputWrapper.className = "color-picker-wrapper";
-    
-    const inputColorPicker = document.createElement("input");
-    inputColorPicker.type = "color";
-    inputColorPicker.value = color.inputColor;
-    inputColorPicker.oninput = (e) => {
-      const hex = (e.target as HTMLInputElement).value;
-      userPalette[index].inputColor = hex;
-      inputHex.value = hex;
-    };
-    
-    const inputHex = document.createElement("input");
-    inputHex.type = "text";
-    inputHex.value = color.inputColor;
-    inputHex.maxLength = 7;
-    inputHex.oninput = (e) => {
-      const hex = (e.target as HTMLInputElement).value;
-      if (/^#[0-9A-Fa-f]{6}$/.test(hex)) {
-        userPalette[index].inputColor = hex;
-        inputColorPicker.value = hex;
-      }
-    };
-    
-    inputWrapper.appendChild(inputColorPicker);
-    inputWrapper.appendChild(inputHex);
-    inputGroup.appendChild(inputWrapper);
-    entry.appendChild(inputGroup);
-    
-    // Output color picker
-    const outputGroup = document.createElement("div");
-    outputGroup.className = "color-picker-group";
-    
-    const outputLabel = document.createElement("label");
-    outputLabel.textContent = "Output (display):";
-    outputGroup.appendChild(outputLabel);
-    
-    const outputWrapper = document.createElement("div");
-    outputWrapper.className = "color-picker-wrapper";
-    
-    const outputColorPicker = document.createElement("input");
-    outputColorPicker.type = "color";
-    outputColorPicker.value = color.outputColor;
-    outputColorPicker.oninput = (e) => {
-      const hex = (e.target as HTMLInputElement).value;
-      userPalette[index].outputColor = hex;
-      outputHex.value = hex;
-    };
-    
-    const outputHex = document.createElement("input");
-    outputHex.type = "text";
-    outputHex.value = color.outputColor;
-    outputHex.maxLength = 7;
-    outputHex.oninput = (e) => {
-      const hex = (e.target as HTMLInputElement).value;
-      if (/^#[0-9A-Fa-f]{6}$/.test(hex)) {
-        userPalette[index].outputColor = hex;
-        outputColorPicker.value = hex;
-      }
-    };
-    
-    outputWrapper.appendChild(outputColorPicker);
-    outputWrapper.appendChild(outputHex);
-    outputGroup.appendChild(outputWrapper);
-    entry.appendChild(outputGroup);
-    
-    // Map to background checkbox
-    const checkboxLabel = document.createElement("label");
-    checkboxLabel.className = "checkbox-label";
-    
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = color.mapToBg;
-    checkbox.disabled = index === 0; // Background can't map to itself
-    checkbox.onchange = (e) => {
-      userPalette[index].mapToBg = (e.target as HTMLInputElement).checked;
-    };
-    
-    checkboxLabel.appendChild(checkbox);
-    checkboxLabel.appendChild(document.createTextNode("Map to BG"));
-    entry.appendChild(checkboxLabel);
-    
-    paletteList.appendChild(entry);
+    paletteDisplay.appendChild(item);
+  });
+  
+  // Render mini swatches in navigation bar
+  navPalettePreview.innerHTML = "";
+  userPalette.slice(0, 8).forEach((color) => {
+    const miniSwatch = document.createElement("div");
+    miniSwatch.className = "mini-swatch";
+    miniSwatch.style.backgroundColor = color.outputColor;
+    navPalettePreview.appendChild(miniSwatch);
   });
 }
 
+// Color Editor Panel - opens when clicking a palette color
+let colorEditorIndex: number | null = null;
+let eyedropperMode: 'input' | 'output' | null = null;
+
+function openColorEditor(index: number) {
+  colorEditorIndex = index;
+  const color = userPalette[index];
+  
+  // Create or get color editor modal
+  let modal = document.getElementById("colorEditorModal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "colorEditorModal";
+    modal.style.cssText = `
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(4px);
+      z-index: 3000; display: flex; align-items: center; justify-content: center;
+    `;
+    document.body.appendChild(modal);
+  }
+  
+  modal.innerHTML = `
+    <div style="background: #1a1a1a; border: 2px solid #4f46e5; border-radius: 8px; padding: 1.5rem; min-width: 400px; max-width: 500px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+        <h3 style="margin: 0; color: #fff;">Edit Color ${index}${index === 0 ? ' (Background)' : ''}</h3>
+        <button id="closeColorEditor" style="background: none; border: none; color: #999; font-size: 1.5rem; cursor: pointer; padding: 0; width: 32px; height: 32px;">×</button>
+      </div>
+      
+      <div style="display: flex; flex-direction: column; gap: 1.25rem;">
+        <!-- Input Color -->
+        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+          <label style="color: #aaa; font-size: 0.9rem; font-weight: 500;">Input Color (from document)</label>
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <div style="width: 48px; height: 48px; border-radius: 6px; border: 2px solid #3a3a3a; background: ${color.inputColor}; flex-shrink: 0;"></div>
+            <input type="text" id="inputColorHex" value="${color.inputColor}" maxlength="7" 
+              style="flex: 1; padding: 0.75rem; background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 4px; color: #fff; font-family: 'Courier New', monospace; font-size: 1rem;">
+            <button id="eyedropperInput" style="padding: 0.75rem; background: #4f46e5; border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 1.2rem;" title="Pick from canvas">💧</button>
+          </div>
+        </div>
+        
+        <!-- Output Options -->
+        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+          <label style="color: #aaa; font-size: 0.9rem; font-weight: 500;">Output (in vectorized result)</label>
+          
+          <div style="display: flex; gap: 0.75rem; margin-bottom: 0.5rem;">
+            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #fff;">
+              <input type="radio" name="outputMode" value="same" ${!color.mapToBg && color.inputColor === color.outputColor ? 'checked' : ''} style="cursor: pointer;">
+              <span>Keep same color</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #fff;">
+              <input type="radio" name="outputMode" value="different" ${!color.mapToBg && color.inputColor !== color.outputColor ? 'checked' : ''} style="cursor: pointer;">
+              <span>Transform to:</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #fff;">
+              <input type="radio" name="outputMode" value="remove" ${color.mapToBg ? 'checked' : ''} style="cursor: pointer;">
+              <span style="color: #ef4444;">Remove</span>
+            </label>
+          </div>
+          
+          <div id="outputColorSection" style="display: flex; gap: 0.5rem; align-items: center; ${color.mapToBg || color.inputColor === color.outputColor ? 'opacity: 0.4; pointer-events: none;' : ''}">
+            <div style="width: 48px; height: 48px; border-radius: 6px; border: 2px solid #3a3a3a; background: ${color.outputColor}; flex-shrink: 0;"></div>
+            <input type="text" id="outputColorHex" value="${color.outputColor}" maxlength="7" 
+              style="flex: 1; padding: 0.75rem; background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 4px; color: #fff; font-family: 'Courier New', monospace; font-size: 1rem;">
+            <button id="eyedropperOutput" style="padding: 0.75rem; background: #4f46e5; border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 1.2rem;" title="Pick from canvas">💧</button>
+          </div>
+        </div>
+        
+        <!-- Action Buttons -->
+        <div style="display: flex; gap: 0.75rem; margin-top: 0.5rem;">
+          <button id="saveColorEdit" style="flex: 1; padding: 0.75rem; background: #4f46e5; border: none; border-radius: 4px; color: white; cursor: pointer; font-weight: 600;">Save</button>
+          ${index !== 0 ? '<button id="deleteColor" style="padding: 0.75rem 1.25rem; background: #ef4444; border: none; border-radius: 4px; color: white; cursor: pointer;">Delete</button>' : ''}
+          <button id="cancelColorEdit" style="padding: 0.75rem 1.25rem; background: #3a3a3a; border: none; border-radius: 4px; color: white; cursor: pointer;">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `;
+  
+  modal.style.display = "flex";
+  
+  // Setup event listeners
+  const inputHexField = document.getElementById("inputColorHex") as HTMLInputElement;
+  const outputHexField = document.getElementById("outputColorHex") as HTMLInputElement;
+  const outputSection = document.getElementById("outputColorSection") as HTMLDivElement;
+  const outputModeRadios = document.getElementsByName("outputMode") as NodeListOf<HTMLInputElement>;
+  
+  // Update output section visibility based on mode
+  outputModeRadios.forEach(radio => {
+    radio.addEventListener("change", () => {
+      if (radio.value === "different") {
+        outputSection.style.opacity = "1";
+        outputSection.style.pointerEvents = "auto";
+      } else {
+        outputSection.style.opacity = "0.4";
+        outputSection.style.pointerEvents = "none";
+      }
+    });
+  });
+  
+  // Eyedropper buttons
+  document.getElementById("eyedropperInput")!.addEventListener("click", () => {
+    eyedropperMode = 'input';
+    activateEyedropper();
+    modal!.style.display = "none";
+  });
+  
+  document.getElementById("eyedropperOutput")!.addEventListener("click", () => {
+    eyedropperMode = 'output';
+    activateEyedropper();
+    modal!.style.display = "none";
+  });
+  
+  // Save button
+  document.getElementById("saveColorEdit")!.addEventListener("click", () => {
+    const inputColor = inputHexField.value;
+    const outputColor = outputHexField.value;
+    const selectedMode = Array.from(outputModeRadios).find(r => r.checked)?.value;
+    
+    if (!/^#[0-9A-Fa-f]{6}$/.test(inputColor)) {
+      alert("Invalid input color format. Use #RRGGBB");
+      return;
+    }
+    
+    if (selectedMode === 'different' && !/^#[0-9A-Fa-f]{6}$/.test(outputColor)) {
+      alert("Invalid output color format. Use #RRGGBB");
+      return;
+    }
+    
+    userPalette[index].inputColor = inputColor;
+    
+    if (selectedMode === 'remove') {
+      userPalette[index].mapToBg = true;
+      userPalette[index].outputColor = inputColor; // Keep it same for display
+    } else if (selectedMode === 'different') {
+      userPalette[index].mapToBg = false;
+      userPalette[index].outputColor = outputColor;
+    } else { // same
+      userPalette[index].mapToBg = false;
+      userPalette[index].outputColor = inputColor;
+    }
+    
+    renderPaletteUI();
+    closeColorEditor();
+  });
+  
+  // Delete button
+  const deleteBtn = document.getElementById("deleteColor");
+  if (deleteBtn) {
+    deleteBtn.addEventListener("click", () => {
+      if (index !== 0 && confirm("Delete this color?")) {
+        userPalette.splice(index, 1);
+        renderPaletteUI();
+        closeColorEditor();
+      }
+    });
+  }
+  
+  // Cancel/Close buttons
+  document.getElementById("cancelColorEdit")!.addEventListener("click", closeColorEditor);
+  document.getElementById("closeColorEditor")!.addEventListener("click", closeColorEditor);
+  
+  // Click outside to close
+  modal.addEventListener("click", (e) => {
+    if (e.target === modal) closeColorEditor();
+  });
+}
+
+function closeColorEditor() {
+  const modal = document.getElementById("colorEditorModal");
+  if (modal) modal.style.display = "none";
+  colorEditorIndex = null;
+  eyedropperMode = null;
+}
+
 function addPaletteColor() {
+  console.log("Add palette color clicked, current length:", userPalette.length);
   if (userPalette.length >= 16) {
     showStatus("Maximum 16 colors allowed", true);
     return;
   }
   
+  const newIndex = userPalette.length;
   userPalette.push({
     inputColor: "#808080",
     outputColor: "#808080",
@@ -1766,6 +1943,9 @@ function addPaletteColor() {
   });
   
   renderPaletteUI();
+  
+  // Immediately open editor for the new color
+  openColorEditor(newIndex);
 }
 
 function resetPaletteToDefault() {
@@ -1781,197 +1961,68 @@ function resetPaletteToDefault() {
   showStatus("Palette reset to default");
 }
 
-function showColorHistogram() {
+let eyedropperActive = false;
+
+function activateEyedropper() {
   if (!currentImage) {
     showStatus("No image loaded", true);
     return;
   }
   
-  showStatus("⏳ Analyzing colors...");
+  eyedropperActive = true;
+  document.body.classList.add("eyedropper-active");
+  mainCanvas.style.cursor = "crosshair";
+  showStatus("💧 Click on the image to pick a color (ESC to cancel)");
+}
+
+function deactivateEyedropper() {
+  eyedropperActive = false;
+  document.body.classList.remove("eyedropper-active");
+  mainCanvas.style.cursor = "";
+  showStatus("Eyedropper cancelled");
+}
+
+function pickColorFromCanvas(x: number, y: number) {
+  if (!currentImage) return;
   
-  // Quantization function - reduce to 5 levels per channel (5^3 = 125 buckets)
-  // Levels: 0, 64, 128, 192, 255
-  const quantize = (value: number) => Math.round(value / 64) * 64;
+  // Convert canvas coordinates to image coordinates
+  const rect = mainCanvas.getBoundingClientRect();
+  const scaleX = currentImage.width / rect.width;
+  const scaleY = currentImage.height / rect.height;
+  const imgX = Math.floor((x - rect.left) * scaleX);
+  const imgY = Math.floor((y - rect.top) * scaleY);
   
-  // Count quantized color frequencies
-  const colorCounts = new Map<string, { count: number; avgR: number; avgG: number; avgB: number; samples: number }>();
-  const data = currentImage.data;
-  
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    
-    // Quantize to bucket
-    const qR = quantize(r);
-    const qG = quantize(g);
-    const qB = quantize(b);
-    const key = `${qR},${qG},${qB}`;
-    
-    const existing = colorCounts.get(key);
-    if (existing) {
-      existing.count++;
-      existing.avgR += r;
-      existing.avgG += g;
-      existing.avgB += b;
-      existing.samples++;
-    } else {
-      colorCounts.set(key, {
-        count: 1,
-        avgR: r,
-        avgG: g,
-        avgB: b,
-        samples: 1,
-      });
-    }
+  // Check bounds
+  if (imgX < 0 || imgX >= currentImage.width || imgY < 0 || imgY >= currentImage.height) {
+    return;
   }
   
-  // Convert to array and compute average colors for each bucket
-  const buckets = Array.from(colorCounts.entries()).map(([_key, data]) => {
-    const avgR = Math.round(data.avgR / data.samples);
-    const avgG = Math.round(data.avgG / data.samples);
-    const avgB = Math.round(data.avgB / data.samples);
-    const hex = `#${avgR.toString(16).padStart(2, '0')}${avgG.toString(16).padStart(2, '0')}${avgB.toString(16).padStart(2, '0')}`;
-    return { hex, count: data.count, r: avgR, g: avgG, b: avgB };
-  });
+  // Get pixel color
+  const pixelIndex = (imgY * currentImage.width + imgX) * 4;
+  const r = currentImage.data[pixelIndex];
+  const g = currentImage.data[pixelIndex + 1];
+  const b = currentImage.data[pixelIndex + 2];
   
-  // Find background (most prevalent) and cap its size
-  buckets.sort((a, b) => b.count - a.count);
-  const backgroundHex = buckets.length > 0 ? buckets[0].hex : "#ffffff";
-  const secondCount = buckets.length > 1 ? buckets[1].count : buckets[0].count;
+  const hex = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
   
-  // Cap background to second most prevalent
-  if (buckets.length > 0) {
-    buckets[0].count = Math.min(buckets[0].count, secondCount);
+  deactivateEyedropper();
+  
+  // If we're in color editor mode, update the color editor
+  if (colorEditorIndex !== null && eyedropperMode) {
+    if (eyedropperMode === 'input') {
+      userPalette[colorEditorIndex].inputColor = hex;
+    } else if (eyedropperMode === 'output') {
+      userPalette[colorEditorIndex].outputColor = hex;
+      userPalette[colorEditorIndex].mapToBg = false; // Ensure it's not set to remove
+    }
+    // Reopen the color editor with updated values
+    openColorEditor(colorEditorIndex);
+    showStatus(`Picked ${hex.toUpperCase()}`);
+  } else {
+    // Old behavior: add to palette
+    addColorToPalette(hex);
+    showStatus(`Added ${hex.toUpperCase()} to palette`);
   }
-  
-  // Calculate opposite color for border
-  const bgR = parseInt(backgroundHex.slice(1, 3), 16);
-  const bgG = parseInt(backgroundHex.slice(3, 5), 16);
-  const bgB = parseInt(backgroundHex.slice(5, 7), 16);
-  const borderColor = `rgb(${255 - bgR}, ${255 - bgG}, ${255 - bgB})`;
-  
-  // HSV conversion for sorting
-  const rgbToHSV = (r: number, g: number, b: number) => {
-    const rNorm = r / 255;
-    const gNorm = g / 255;
-    const bNorm = b / 255;
-    
-    const max = Math.max(rNorm, gNorm, bNorm);
-    const min = Math.min(rNorm, gNorm, bNorm);
-    const delta = max - min;
-    
-    let h = 0;
-    if (delta !== 0) {
-      if (max === rNorm) {
-        h = ((gNorm - bNorm) / delta + (gNorm < bNorm ? 6 : 0)) / 6;
-      } else if (max === gNorm) {
-        h = ((bNorm - rNorm) / delta + 2) / 6;
-      } else {
-        h = ((rNorm - gNorm) / delta + 4) / 6;
-      }
-    }
-    
-    const s = max === 0 ? 0 : delta / max;
-    const v = max;
-    
-    return { h, s, v };
-  };
-  
-  // Separate grayscale from chromatic and sort consistently
-  const grayscale: typeof buckets = [];
-  const chromatic: typeof buckets = [];
-  
-  buckets.forEach(bucket => {
-    const { s } = rgbToHSV(bucket.r, bucket.g, bucket.b);
-    if (s < 0.1) {
-      grayscale.push(bucket);
-    } else {
-      chromatic.push(bucket);
-    }
-  });
-  
-  // Sort grayscale by brightness (dark to light)
-  grayscale.sort((a, b) => {
-    const { v: vA } = rgbToHSV(a.r, a.g, a.b);
-    const { v: vB } = rgbToHSV(b.r, b.g, b.b);
-    return vA - vB;
-  });
-  
-  // Sort chromatic by hue, then saturation, then brightness
-  chromatic.sort((a, b) => {
-    const hsvA = rgbToHSV(a.r, a.g, a.b);
-    const hsvB = rgbToHSV(b.r, b.g, b.b);
-    
-    // Sort by hue first
-    if (Math.abs(hsvA.h - hsvB.h) > 0.015) {
-      return hsvA.h - hsvB.h;
-    }
-    // Then by saturation (more saturated first)
-    if (Math.abs(hsvA.s - hsvB.s) > 0.05) {
-      return hsvB.s - hsvA.s;
-    }
-    // Then by value (brighter first)
-    return hsvB.v - hsvA.v;
-  });
-  
-  // Combine: chromatic first, then grayscale
-  const allColorsSorted = [...chromatic, ...grayscale];
-  
-  // Show histogram modal
-  const modal = document.getElementById("histogramModal") as HTMLDivElement;
-  const body = document.getElementById("histogramBody") as HTMLDivElement;
-  
-  const total = currentImage.width * currentImage.height;
-  
-  // Set background color
-  body.style.backgroundColor = backgroundHex;
-  
-  // Create tiles container
-  const tiles = document.createElement("div");
-  tiles.className = "histogram-tiles";
-  
-  // Calculate tile sizes - direct proportion with minimum
-  const maxCount = Math.max(...allColorsSorted.map(b => b.count));
-  const minSize = 3;   // Minimum 3px
-  const maxSize = 120; // Maximum size for largest tile
-  
-  allColorsSorted.forEach(({ hex, count }) => {
-    const percent = (count / total) * 100;
-    
-    // Direct linear proportion from count
-    const sizeFactor = count / maxCount;
-    const size = Math.max(minSize, sizeFactor * maxSize);
-    
-    const tile = document.createElement("div");
-    tile.className = "color-tile";
-    tile.style.backgroundColor = hex;
-    tile.style.width = `${size}px`;
-    tile.style.height = `${size}px`;
-    tile.style.border = `1px solid ${borderColor}`;
-    tile.title = `${hex.toUpperCase()} - ${percent.toFixed(3)}%`;
-    
-    const label = document.createElement("div");
-    label.className = "color-tile-label";
-    if (size > 20) {
-      label.textContent = percent >= 1 ? `${percent.toFixed(1)}%` : `${percent.toFixed(2)}%`;
-    }
-    tile.appendChild(label);
-    
-    tile.onclick = () => {
-      addColorToPalette(hex);
-      modal.classList.remove("active");
-      showStatus(`Added ${hex} (${percent.toFixed(2)}%) to palette`);
-    };
-    
-    tiles.appendChild(tile);
-  });
-  
-  body.innerHTML = "";
-  body.appendChild(tiles);
-  modal.classList.add("active");
-  
-  showStatus(`${allColorsSorted.length} colors (${chromatic.length} chromatic, ${grayscale.length} grayscale, bg: ${backgroundHex})`);
 }
 
 function addColorToPalette(hex: string) {
@@ -1989,21 +2040,6 @@ function addColorToPalette(hex: string) {
   renderPaletteUI();
   showStatus(`Added ${hex} to palette`);
 }
-
-// Histogram modal handlers
-const histogramModal = document.getElementById("histogramModal") as HTMLDivElement;
-const closeHistogramBtn = document.getElementById("closeHistogramBtn") as HTMLButtonElement;
-
-closeHistogramBtn.addEventListener("click", () => {
-  histogramModal.classList.remove("active");
-});
-
-// Close on outside click
-histogramModal.addEventListener("click", (e) => {
-  if (e.target === histogramModal) {
-    histogramModal.classList.remove("active");
-  }
-});
 
 // Convert userPalette to RGBA format for GPU processing
 function buildPaletteRGBA(): Uint8ClampedArray {
@@ -2033,10 +2069,38 @@ function buildPaletteRGBA(): Uint8ClampedArray {
 }
 
 // Palette editor event handlers
-addPaletteColorBtn.addEventListener("click", addPaletteColor);
-resetPaletteBtn.addEventListener("click", resetPaletteToDefault);
-const showHistogramBtn = document.getElementById("showHistogramBtn") as HTMLButtonElement;
-showHistogramBtn.addEventListener("click", showColorHistogram);
+console.log("Setting up palette event listeners...");
+if (addPaletteColorBtn) {
+  addPaletteColorBtn.addEventListener("click", () => {
+    console.log("Add button clicked!");
+    addPaletteColor();
+  });
+} else {
+  console.error("addPaletteColorBtn not found!");
+}
+
+if (resetPaletteBtn) {
+  resetPaletteBtn.addEventListener("click", () => {
+    console.log("Reset button clicked!");
+    resetPaletteToDefault();
+  });
+} else {
+  console.error("resetPaletteBtn not found!");
+}
+
+// Canvas click handler for eyedropper
+mainCanvas.addEventListener("click", (e: MouseEvent) => {
+  if (eyedropperActive) {
+    pickColorFromCanvas(e.clientX, e.clientY);
+  }
+});
+
+// ESC key to cancel eyedropper
+document.addEventListener("keydown", (e: KeyboardEvent) => {
+  if (e.key === "Escape" && eyedropperActive) {
+    deactivateEyedropper();
+  }
+});
 
 // Initialize palette UI on load
 renderPaletteUI();

@@ -18,20 +18,152 @@
             color: #fff;
             overflow: hidden;
             height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Top Navigation Bar */
+        .top-nav {
+            height: 60px;
+            background: #2a2a2a;
+            border-bottom: 2px solid #4f46e5;
+            display: flex;
+            align-items: center;
+            padding: 0 1.5rem;
+            gap: 2rem;
+            z-index: 1001;
+            flex-shrink: 0;
+        }
+
+        .nav-brand {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #4f46e5;
+            white-space: nowrap;
+        }
+
+        .nav-steps {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            flex: 1;
+        }
+
+        .nav-step {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: #1a1a1a;
+            border: 1px solid #3a3a3a;
+            position: relative;
+        }
+
+        .nav-step:hover {
+            background: #333;
+            border-color: #4f46e5;
+        }
+
+        .nav-step.active {
+            background: #4f46e5;
+            border-color: #4f46e5;
+            color: white;
+            font-weight: 600;
+        }
+
+        .nav-step.completed {
+            border-color: #10b981;
+            background: #064e3b;
+        }
+
+        .nav-step.completed:hover {
+            background: #065f46;
+        }
+
+        .nav-step.disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .nav-step.disabled:hover {
+            background: #1a1a1a;
+            border-color: #3a3a3a;
+        }
+
+        .step-number {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: #3a3a3a;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .nav-step.active .step-number {
+            background: white;
+            color: #4f46e5;
+        }
+
+        .nav-step.completed .step-number {
+            background: #10b981;
+            color: white;
+        }
+
+        .step-label {
+            font-size: 0.9rem;
+        }
+
+        .nav-separator {
+            color: #666;
+            font-size: 1.2rem;
+        }
+
+        .nav-palette-preview {
+            display: flex;
+            gap: 2px;
+            margin-left: 0.5rem;
+        }
+
+        .nav-palette-preview .mini-swatch {
+            width: 18px;
+            height: 18px;
+            border-radius: 3px;
+            border: 1px solid #3a3a3a;
+        }
+
+        .toggle-toolbar-btn {
+            background: #3a3a3a;
+            border: none;
+            color: white;
+            padding: 0.5rem 0.75rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1.2rem;
+            transition: background 0.2s;
+        }
+
+        .toggle-toolbar-btn:hover {
+            background: #4f46e5;
         }
 
         /* Sidebar - File Manager */
         .sidebar {
             position: fixed;
             left: 0;
-            top: 0;
+            top: 60px;
             bottom: 0;
             width: 320px;
             background: #2a2a2a;
             border-right: 1px solid #3a3a3a;
             display: flex;
             flex-direction: column;
-            z-index: 1000;
+            z-index: 900;
             transition: transform 0.3s ease;
         }
 
@@ -180,11 +312,9 @@
 
         /* Main Content Area */
         .main-content {
-            position: fixed;
-            left: 0;
-            right: 0;
-            top: 0;
-            bottom: 0;
+            flex: 1;
+            position: relative;
+            overflow: hidden;
         }
 
         /* Upload Screen */
@@ -419,12 +549,25 @@
         }
 
         .crop-screen.active {
-            display: block;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .crop-screen-layout {
+            flex: 1;
+            display: flex;
+            position: relative;
+        }
+
+        .processing-screen-layout {
+            flex: 1;
+            display: flex;
+            position: relative;
         }
 
         .canvas-container {
-            position: absolute;
-            inset: 0;
+            flex: 1;
+            position: relative;
             overflow: hidden;
             cursor: grab;
         }
@@ -447,22 +590,24 @@
             pointer-events: none;
         }
 
-        /* Floating Toolbar */
-        .toolbar {
-            position: absolute;
-            top: 1rem;
-            right: 1rem;
-            bottom: 4rem;
+        /* Sidebar for crop/process screens */
+        .crop-screen .sidebar,
+        .processing-screen .sidebar {
+            width: 320px;
             background: rgba(42, 42, 42, 0.95);
             backdrop-filter: blur(10px);
-            border-radius: 8px;
+            border-left: 1px solid #3a3a3a;
             padding: 1rem;
             display: flex;
             flex-direction: column;
             gap: 0.75rem;
-            width: 350px;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
             overflow-y: auto;
+            transition: transform 0.3s ease;
+        }
+
+        .crop-screen .sidebar.collapsed,
+        .processing-screen .sidebar.collapsed {
+            transform: translateX(320px);
         }
 
         .toolbar-section {
@@ -471,7 +616,7 @@
             gap: 0.5rem;
         }
 
-        .toolbar .palette-section {
+        .sidebar .palette-section {
             border-top: 2px solid #3a3a3a;
             padding-top: 0.75rem;
             margin-top: 0.5rem;
@@ -490,7 +635,8 @@
             gap: 0.5rem;
         }
 
-        .toolbar button {
+        .sidebar button,
+        .toolbar-section button {
             padding: 0.5rem 1rem;
             background: #3a3a3a;
             color: white;
@@ -501,7 +647,8 @@
             flex: 1;
         }
 
-        .toolbar button:hover {
+        .sidebar button:hover,
+        .toolbar-section button:hover {
             background: #4a4a4a;
         }
 
@@ -545,18 +692,16 @@
 
         /* Status Bar */
         .status-bar {
-            position: absolute;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            padding: 0.75rem 1rem;
+            height: 36px;
+            padding: 0.5rem 1rem;
             background: rgba(42, 42, 42, 0.95);
             backdrop-filter: blur(10px);
             border-top: 1px solid #3a3a3a;
             display: flex;
             align-items: center;
             gap: 1rem;
-            font-size: 0.9rem;
+            font-size: 0.85rem;
+            flex-shrink: 0;
         }
 
         .status-text {
@@ -599,7 +744,8 @@
         }
 
         .processing-screen.active {
-            display: block;
+            display: flex;
+            flex-direction: column;
         }
 
         .stage-btn {
@@ -838,10 +984,97 @@
             padding-top: 1rem;
         }
 
-        .palette-editor-compact {
+        /* Palette Display and Editor */
+        .toolbar-section-title {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .icon-btn {
+            background: none;
+            border: none;
+            color: #999;
+            cursor: pointer;
+            padding: 0.25rem;
+            font-size: 1rem;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+
+        .icon-btn:hover {
+            background: #2a2a2a;
+            color: white;
+        }
+
+        .palette-display {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            padding: 0.5rem 0;
+        }
+
+        .palette-swatch {
+            width: 32px;
+            height: 32px;
+            border-radius: 4px;
+            border: 2px solid #3a3a3a;
+            cursor: pointer;
+            transition: all 0.2s;
+            position: relative;
+        }
+
+        .palette-swatch:hover {
+            transform: scale(1.1);
+            border-color: #fff;
+            z-index: 10;
+        }
+
+        .palette-swatch.background {
+            border-color: #4f46e5;
+            border-width: 3px;
+        }
+
+        .palette-editor-full {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.9);
+            z-index: 2000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(4px);
+        }
+
+        .palette-editor-full > div {
+            background: #0a0a0a;
+            border: 1px solid #3a3a3a;
+            border-radius: 8px;
+            padding: 1.5rem;
+            max-width: 600px;
+            width: 90%;
+            max-height: 80vh;
             display: flex;
             flex-direction: column;
             gap: 1rem;
+        }
+
+        .palette-editor-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 1.2rem;
+            font-weight: bold;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid #3a3a3a;
+        }
+
+        .palette-editor-full .palette-list {
+            flex: 1;
+            overflow-y: auto;
         }
 
         .toolbar .palette-list {
@@ -857,10 +1090,11 @@
             background: #0a0a0a;
             border: 1px solid #3a3a3a;
             border-radius: 6px;
-            padding: 0.75rem;
-            display: flex;
-            flex-direction: column;
-            gap: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            display: grid;
+            grid-template-columns: auto 1fr 1fr auto auto;
+            gap: 0.75rem;
+            align-items: center;
         }
 
         .toolbar .palette-entry.background {
@@ -869,9 +1103,7 @@
         }
 
         .toolbar .palette-entry-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
+            display: contents;
         }
 
         .toolbar .palette-index {
@@ -890,7 +1122,13 @@
             border-radius: 4px;
             color: white;
             cursor: pointer;
-            font-size: 0.8rem;
+            font-size: 1rem;
+            line-height: 1;
+            width: 28px;
+            height: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
         }
 
         .toolbar .palette-entry button.remove-color:hover {
@@ -1127,6 +1365,31 @@
 </head>
 
 <body>
+    <!-- Top Navigation Bar -->
+    <nav class="top-nav">
+        <div class="nav-brand">📄 Document Vectorizer</div>
+        <div class="nav-steps">
+            <div class="nav-step" id="navStepFile" data-step="file">
+                <span class="step-number">1</span>
+                <span class="step-label">File</span>
+            </div>
+            <div class="nav-separator">›</div>
+            <div class="nav-step" id="navStepPage" data-step="page">
+                <span class="step-number">2</span>
+                <span class="step-label">Page</span>
+            </div>
+            <div class="nav-separator">›</div>
+            <div class="nav-step" id="navStepConfigure" data-step="configure">
+                <span class="step-number">3</span>
+                <span class="step-label">Configure</span>
+                <div class="nav-palette-preview" id="navPalettePreview">
+                    <!-- Mini swatches will appear here -->
+                </div>
+            </div>
+        </div>
+        <button id="toggleToolbarBtn" class="toggle-toolbar-btn" title="Toggle sidebar">☰</button>
+    </nav>
+
     <div class="main-content">
         <!-- Upload Screen -->
         <div class="upload-screen" id="uploadScreen">
@@ -1161,12 +1424,13 @@
 
         <!-- Crop/Edit Screen -->
         <div class="crop-screen" id="cropScreen">
-            <div class="canvas-container" id="canvasContainer">
-                <canvas id="mainCanvas"></canvas>
-                <canvas id="cropOverlay"></canvas>
-            </div>
+            <div class="crop-screen-layout">
+                <div class="canvas-container" id="canvasContainer">
+                    <canvas id="mainCanvas"></canvas>
+                    <canvas id="cropOverlay"></canvas>
+                </div>
 
-            <div class="toolbar">
+                <div class="sidebar" id="cropSidebar">
                 <div class="toolbar-section">
                     <div class="toolbar-section-title">View</div>
                     <div class="zoom-controls">
@@ -1185,21 +1449,18 @@
 
                 <div class="toolbar-section">
                     <button id="processBtn" class="primary">Process Image</button>
-                    <button id="backFromCropBtn">← Change Page</button>
                 </div>
 
                 <div class="toolbar-section palette-section">
-                    <div class="toolbar-section-title">Palette Configuration</div>
-                    <div class="palette-editor-compact">
-                        <div class="palette-list" id="paletteList">
-                            <!-- Palette entries will be added here dynamically -->
-                        </div>
-                        <div class="palette-controls">
-                            <button id="showHistogramBtn">📊 Show Histogram</button>
-                            <button id="addPaletteColorBtn">+ Add Color</button>
-                            <button id="resetPaletteBtn">Reset to Default</button>
-                        </div>
+                    <div class="toolbar-section-title">Palette</div>
+                    <button id="addPaletteColorBtn" class="icon-btn" title="Add color">+</button>
+                    <button id="resetPaletteBtn" class="icon-btn" title="Reset to default palette">↻</button>
+                    
+                    <!-- Compact palette display -->
+                    <div class="palette-display" id="paletteDisplay">
+                        <!-- Color swatches will be added here -->
                     </div>
+                </div>
                 </div>
             </div>
 
@@ -1213,29 +1474,14 @@
             </div>
         </div>
 
-        <!-- Color Histogram Modal -->
-        <div class="histogram-modal" id="histogramModal">
-            <div class="histogram-content">
-                <div class="histogram-header">
-                    <h2>Color Histogram</h2>
-                    <button id="closeHistogramBtn" class="close-btn">×</button>
-                </div>
-                <div class="histogram-body" id="histogramBody">
-                    <!-- Color swatches will be added here -->
-                </div>
-                <div class="histogram-footer">
-                    <p>Click any color to add it to your palette</p>
-                </div>
-            </div>
-        </div>
-
         <!-- Processing Screen -->
         <div class="processing-screen" id="processingScreen">
-            <div class="canvas-container" id="processCanvasContainer">
-                <canvas id="processCanvas"></canvas>
-            </div>
+            <div class="processing-screen-layout">
+                <div class="canvas-container" id="processCanvasContainer">
+                    <canvas id="processCanvas"></canvas>
+                </div>
 
-            <div class="toolbar">
+                <div class="sidebar" id="processSidebar">
                 <div class="toolbar-section">
                     <div class="toolbar-section-title">View</div>
                     <div class="zoom-controls">
@@ -1261,9 +1507,6 @@
                     <button id="stageMedianBtn" class="stage-btn">Median</button>
                     <button id="stageBinaryBtn" class="stage-btn">Binary</button>
                 </div>
-
-                <div class="toolbar-section">
-                    <button id="backToCropBtn">← Back to Crop</button>
                 </div>
             </div>
 

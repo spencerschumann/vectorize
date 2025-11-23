@@ -194,7 +194,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 `;
 var thresholdShader = `
 @group(0) @binding(0) var<storage, read> value_in: array<f32>;
-@group(0) @binding(1) var<storage, read_write> value_out: array<u32>;
+@group(0) @binding(1) var<storage, read_write> value_out: array<atomic<u32>>;
 @group(0) @binding(2) var<uniform> params: Params;
 
 struct Params {
@@ -216,8 +216,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let pixel_idx = y * params.width + x;
     let value = value_in[pixel_idx];
     
-    // Binary threshold: 1 = background (white), 0 = line (black)
-    value_out[pixel_idx] = u32(value >= params.threshold);
+    // Binary threshold: 1 = line (dark), 0 = background (light)
+    // Inverted from original: value < threshold means it's dark (a line)
+    if (value < params.threshold) {
+        let word_idx = pixel_idx / 32u;
+        let bit_idx = pixel_idx % 32u;
+        atomicOr(&value_out[word_idx], 1u << bit_idx);
+    }
 }
 `;
 var medianFilterShader = `
@@ -327,14 +332,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     let pixel_idx = y * params.width + x;
     
-    let value = value_in[pixel_idx]; // Binary: 0 = line, 1 = background
+    // Read packed binary value: 1 = line, 0 = background
+    let word_idx = pixel_idx / 32u;
+    let bit_idx = pixel_idx % 32u;
+    let value_bit = (value_in[word_idx] >> bit_idx) & 1u;
+    
     let saturation = saturation_in[pixel_idx]; // Cleaned saturation
     let hue = hue_in[pixel_idx]; // Cleaned hue
     
-    // For background pixels (value = 1), output white
-    // For line pixels (value = 0), reconstruct color from cleaned hue and saturation
+    // For background pixels (value_bit = 0), output white
+    // For line pixels (value_bit = 1), reconstruct color from cleaned hue and saturation
     var rgb: vec3<f32>;
-    if (value == 1u) {
+    if (value_bit == 0u) {
         // Background - output white
         rgb = vec3<f32>(1.0, 1.0, 1.0);
     } else {
@@ -403,9 +412,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     
     let pixel_idx = y * params.width + x;
-    let bit = input[pixel_idx];
+    let word_idx = pixel_idx / 32u;
+    let bit_idx = pixel_idx % 32u;
+    let bit = (input[word_idx] >> bit_idx) & 1u;
     
-    let gray = bit * 255u;  // 0=black, 1=white (255)
+    // 1 = line (black), 0 = background (white)
+    let gray = (1u - bit) * 255u;
     output[pixel_idx] = gray | (gray << 8u) | (gray << 16u) | (255u << 24u);
 }
 `;
@@ -471,6 +483,8 @@ async function cleanupGPU(image) {
   const pixelCount = width * height;
   const byteSize = pixelCount * 4;
   const floatByteSize = pixelCount * 4;
+  const binaryWordCount = Math.ceil(pixelCount / 32);
+  const binaryByteSize = binaryWordCount * 4;
   console.log(`Cleanup: ${width}x${height}, ${pixelCount} pixels, data.length=${data.length}, expected=${byteSize}`);
   const inputBuffer = createGPUBuffer(
     device,
@@ -483,9 +497,9 @@ async function cleanupGPU(image) {
     usage: GPUBufferUsage.STORAGE
   });
   const valueBuffer2 = device.createBuffer({
-    size: byteSize,
-    // u32 - binary format
-    usage: GPUBufferUsage.STORAGE
+    size: binaryByteSize,
+    // Packed binary format
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
   });
   const saturationBuffer1 = device.createBuffer({
     size: floatByteSize,
@@ -574,6 +588,7 @@ async function cleanupGPU(image) {
     device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();
   }
+  device.queue.writeBuffer(valueBuffer2, 0, new Uint32Array(binaryWordCount));
   {
     const bindGroup = device.createBindGroup({
       layout: thresholdPipeline.getBindGroupLayout(0),
@@ -895,7 +910,7 @@ async function recombineWithValue(valueBuffer, saturationBuffer, hueBuffer, widt
 // src/gpu/value_process_gpu.ts
 var weightedMedianShader = `
 @group(0) @binding(0) var<storage, read> input: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<atomic<u32>>;
 @group(0) @binding(2) var<uniform> params: Params;
 
 struct Params {
@@ -905,10 +920,12 @@ struct Params {
 
 fn get_bit(data: ptr<storage, array<u32>, read>, x: u32, y: u32, w: u32, h: u32) -> u32 {
     if (x >= w || y >= h) {
-        return 1u; // Background outside bounds
+        return 0u; // Background outside bounds
     }
     let pixel_idx = y * w + x;
-    return (*data)[pixel_idx];
+    let word_idx = pixel_idx / 32u;
+    let bit_idx = pixel_idx % 32u;
+    return ((*data)[word_idx] >> bit_idx) & 1u;
 }
 
 @compute @workgroup_size(8, 8)
@@ -923,38 +940,40 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let w = params.width;
     let h = params.height;
     
-    // Gather 3x3 neighborhood with cardinal directions weighted 2x
+    // Gather 3x3 neighborhood
     var sum = 0u;
     
-    // Corners (1x each) = 4 samples
-    sum += get_bit(&input, max(x, 1u) - 1u, max(y, 1u) - 1u, w, h);
-    sum += get_bit(&input, min(x + 1u, w - 1u), max(y, 1u) - 1u, w, h);
-    sum += get_bit(&input, max(x, 1u) - 1u, min(y + 1u, h - 1u), w, h);
-    sum += get_bit(&input, min(x + 1u, w - 1u), min(y + 1u, h - 1u), w, h);
+    // Corners = 4 samples
+    //sum += get_bit(&input, max(x, 1u) - 1u, max(y, 1u) - 1u, w, h);
+    //sum += get_bit(&input, min(x + 1u, w - 1u), max(y, 1u) - 1u, w, h);
+    //sum += get_bit(&input, max(x, 1u) - 1u, min(y + 1u, h - 1u), w, h);
+    //sum += get_bit(&input, min(x + 1u, w - 1u), min(y + 1u, h - 1u), w, h);
     
-    // Cardinals (2x each) = 8 samples
-    let north = get_bit(&input, x, max(y, 1u) - 1u, w, h);
-    let south = get_bit(&input, x, min(y + 1u, h - 1u), w, h);
-    let west = get_bit(&input, max(x, 1u) - 1u, y, w, h);
-    let east = get_bit(&input, min(x + 1u, w - 1u), y, w, h);
-    sum += north * 2u;
-    sum += south * 2u;
-    sum += west * 2u;
-    sum += east * 2u;
+    // Cardinals = 4 samples
+    //sum += get_bit(&input, x, max(y, 1u) - 1u, w, h);
+    //sum += get_bit(&input, x, min(y + 1u, h - 1u), w, h);
+    //sum += get_bit(&input, max(x, 1u) - 1u, y, w, h);
+    //sum += get_bit(&input, min(x + 1u, w - 1u), y, w, h);
     
-    // Center = 0 samples (not included in median calculation)
+    // Center = 1 sample
+    sum += get_bit(&input, x, y, w, h);
     
-    // Total: 12 samples, median is at position 6 (>= 6 means set to 1)
-    let median_bit = u32(sum >= 6u);
+    // If any pixels in neighborhood are set, output a 1.
+    let median_bit = u32(sum > 0u);
     
-    let pixel_idx = y * w + x;
-    output[pixel_idx] = median_bit;
+    if (median_bit == 1u) {
+        let pixel_idx = y * w + x;
+        let word_idx = pixel_idx / 32u;
+        let bit_idx = pixel_idx % 32u;
+        atomicOr(&output[word_idx], 1u << bit_idx);
+    }
 }
 `;
 var skeletonizeShader = `
 @group(0) @binding(0) var<storage, read> input: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<atomic<u32>>;
 @group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(3) var<storage, read_write> change_counter: array<atomic<u32>>;
 
 struct Params {
     width: u32,
@@ -965,10 +984,12 @@ struct Params {
 
 fn get_bit(data: ptr<storage, array<u32>, read>, x: i32, y: i32, w: u32, h: u32) -> u32 {
     if (x < 0 || y < 0 || x >= i32(w) || y >= i32(h)) {
-        return 1u; // Background outside bounds
+        return 0u; // Background outside bounds
     }
     let pixel_idx = u32(y) * w + u32(x);
-    return (*data)[pixel_idx];
+    let word_idx = pixel_idx / 32u;
+    let bit_idx = pixel_idx % 32u;
+    return (input[word_idx] >> bit_idx) & 1u;
 }
 
 @compute @workgroup_size(8, 8)
@@ -983,67 +1004,89 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let w = params.width;
     let h = params.height;
     
-    // Get center pixel (0 = line, 1 = background)
-    let center = get_bit(&input, x, y, w, h);
+    // Get center pixel (1 = line, 0 = background)
+    let p1 = get_bit(&input, x, y, w, h);
     
     // Only process line pixels
-    if (center == 1u) {
-        // Keep background as-is
-        let pixel_idx = u32(y) * w + u32(x);
-        output[pixel_idx] = 1u;
+    if (p1 == 0u) {
         return;
     }
     
-    // Get 8-neighborhood (using standard labeling)
+    // Get 8-neighborhood in Zhang-Suen order (P2-P9):
     // P9 P2 P3
     // P8 P1 P4
     // P7 P6 P5
-    let p2 = get_bit(&input, x,     y - 1, w, h);
-    let p3 = get_bit(&input, x + 1, y - 1, w, h);
-    let p4 = get_bit(&input, x + 1, y,     w, h);
-    let p5 = get_bit(&input, x + 1, y + 1, w, h);
-    let p6 = get_bit(&input, x,     y + 1, w, h);
-    let p7 = get_bit(&input, x - 1, y + 1, w, h);
-    let p8 = get_bit(&input, x - 1, y,     w, h);
-    let p9 = get_bit(&input, x - 1, y - 1, w, h);
+    let p2 = get_bit(&input, x,     y - 1, w, h);  // N
+    let p3 = get_bit(&input, x + 1, y - 1, w, h);  // NE
+    let p4 = get_bit(&input, x + 1, y,     w, h);  // E
+    let p5 = get_bit(&input, x + 1, y + 1, w, h);  // SE
+    let p6 = get_bit(&input, x,     y + 1, w, h);  // S
+    let p7 = get_bit(&input, x - 1, y + 1, w, h);  // SW
+    let p8 = get_bit(&input, x - 1, y,     w, h);  // W
+    let p9 = get_bit(&input, x - 1, y - 1, w, h);  // NW
     
-    // Count black neighbors (0 = line)
-    let black_neighbors = (1u - p2) + (1u - p3) + (1u - p4) + (1u - p5) + 
-                          (1u - p6) + (1u - p7) + (1u - p8) + (1u - p9);
+    // Condition 1: 2 <= B(P1) <= 6
+    // B(P1) = number of line neighbors
+    let b = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+    if (b < 2u || b > 6u) {
+        // Keep pixel
+        let pixel_idx = u32(y) * w + u32(x);
+        let word_idx = pixel_idx / 32u;
+        let bit_idx = pixel_idx % 32u;
+        atomicOr(&output[word_idx], 1u << bit_idx);
+        return;
+    }
     
-    // Count transitions from white to black (0->1 in circular order)
-    var transitions = 0u;
-    if (p2 == 1u && p3 == 0u) { transitions += 1u; }
-    if (p3 == 1u && p4 == 0u) { transitions += 1u; }
-    if (p4 == 1u && p5 == 0u) { transitions += 1u; }
-    if (p5 == 1u && p6 == 0u) { transitions += 1u; }
-    if (p6 == 1u && p7 == 0u) { transitions += 1u; }
-    if (p7 == 1u && p8 == 0u) { transitions += 1u; }
-    if (p8 == 1u && p9 == 0u) { transitions += 1u; }
-    if (p9 == 1u && p2 == 0u) { transitions += 1u; }
+    // Condition 2: A(P1) = 1
+    // A(P1) = number of 0->1 transitions in ordered sequence P2,P3,...,P9,P2
+    var a = 0u;
+    if (p2 == 0u && p3 == 1u) { a += 1u; }
+    if (p3 == 0u && p4 == 1u) { a += 1u; }
+    if (p4 == 0u && p5 == 1u) { a += 1u; }
+    if (p5 == 0u && p6 == 1u) { a += 1u; }
+    if (p6 == 0u && p7 == 1u) { a += 1u; }
+    if (p7 == 0u && p8 == 1u) { a += 1u; }
+    if (p8 == 0u && p9 == 1u) { a += 1u; }
+    if (p9 == 0u && p2 == 1u) { a += 1u; }
     
-    // Zhang-Suen conditions
+    if (a != 1u) {
+        // Keep pixel
+        let pixel_idx = u32(y) * w + u32(x);
+        let word_idx = pixel_idx / 32u;
+        let bit_idx = pixel_idx % 32u;
+        atomicOr(&output[word_idx], 1u << bit_idx);
+        return;
+    }
+    
+    // Conditions 3 & 4 depend on iteration (step 1 vs step 2)
+    // BOTH conditions must be satisfied (both products = 0) to delete
     var should_delete = false;
     
-    // Common conditions for both iterations
-    if (black_neighbors >= 2u && black_neighbors <= 6u && transitions == 1u) {
-        if (params.iteration == 0u) {
-            // Iteration 1: Check P2 * P4 * P6 = 0 and P4 * P6 * P8 = 0
-            if ((p2 * p4 * p6) == 0u && (p4 * p6 * p8) == 0u) {
-                should_delete = true;
-            }
-        } else {
-            // Iteration 2: Check P2 * P4 * P8 = 0 and P2 * P6 * P8 = 0
-            if ((p2 * p4 * p8) == 0u && (p2 * p6 * p8) == 0u) {
-                should_delete = true;
-            }
+    if (params.iteration == 0u) {
+        // Step 1:
+        // Condition 3: P2 * P4 * P6 = 0 (at least one of N, E, S is background)
+        // Condition 4: P4 * P6 * P8 = 0 (at least one of E, S, W is background)
+        if ((p2 * p4 * p6) == 0u && (p4 * p6 * p8) == 0u) {
+            should_delete = true;
+        }
+    } else {
+        // Step 2:
+        // Condition 3: P2 * P4 * P8 = 0 (at least one of N, E, W is background)
+        // Condition 4: P2 * P6 * P8 = 0 (at least one of N, S, W is background)
+        if ((p2 * p4 * p8) == 0u && (p2 * p6 * p8) == 0u) {
+            should_delete = true;
         }
     }
     
-    let output_bit = select(0u, 1u, should_delete); // Delete = set to white (1)
-    
-    let pixel_idx = u32(y) * w + u32(x);
-    output[pixel_idx] = output_bit;
+    if (!should_delete) {
+        let pixel_idx = u32(y) * w + u32(x);
+        let word_idx = pixel_idx / 32u;
+        let bit_idx = pixel_idx % 32u;
+        atomicOr(&output[word_idx], 1u << bit_idx);
+    } else {
+        // Pixel was deleted - increment change counter
+        atomicAdd(&change_counter[0], 1u);
+    }
 }
 `;
 var binaryToRGBAShader = `
@@ -1066,8 +1109,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     
     let pixel_idx = y * params.width + x;
-    let bit = binary_in[pixel_idx]; // Unpacked: 0 or 1
-    let gray = bit * 255u; // 1 = white (255), 0 = black (0)
+    let word_idx = pixel_idx / 32u;
+    let bit_idx = pixel_idx % 32u;
+    let bit = (binary_in[word_idx] >> bit_idx) & 1u;
+    
+    // 1 = line (black), 0 = background (white)
+    let gray = (1u - bit) * 255u;
     
     rgba_out[pixel_idx] = gray | (gray << 8u) | (gray << 16u) | (255u << 24u);
 }
@@ -1075,7 +1122,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 async function processValueChannel(valueBuffer, width, height) {
   const { device } = await getGPUContext();
   const pixelCount = width * height;
-  const binaryByteSize = pixelCount * 4;
+  const binaryWordCount = Math.ceil(pixelCount / 32);
+  const binaryByteSize = binaryWordCount * 4;
   const rgbaByteSize = pixelCount * 4;
   console.log(`Value processing: ${width}x${height}`);
   const binaryBuffer2 = device.createBuffer({
@@ -1084,9 +1132,13 @@ async function processValueChannel(valueBuffer, width, height) {
   });
   const binaryBuffer3 = device.createBuffer({
     size: binaryByteSize,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
   });
   const binaryBuffer4 = device.createBuffer({
+    size: binaryByteSize,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+  });
+  const binaryBufferTemp = device.createBuffer({
     size: binaryByteSize,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
   });
@@ -1108,6 +1160,14 @@ async function processValueChannel(valueBuffer, width, height) {
     size: 16,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
   });
+  const changeCounterBuffer = device.createBuffer({
+    size: 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC
+  });
+  const stagingBuffer = device.createBuffer({
+    size: 4,
+    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+  });
   const medianModule = device.createShaderModule({ code: weightedMedianShader });
   const skeletonModule = device.createShaderModule({ code: skeletonizeShader });
   const toRGBAModule = device.createShaderModule({ code: binaryToRGBAShader });
@@ -1125,9 +1185,9 @@ async function processValueChannel(valueBuffer, width, height) {
   });
   const workgroupsX = Math.ceil(width / 8);
   const workgroupsY = Math.ceil(height / 8);
-  device.queue.writeBuffer(binaryBuffer2, 0, new Uint32Array(pixelCount));
-  device.queue.writeBuffer(binaryBuffer3, 0, new Uint32Array(pixelCount));
-  device.queue.writeBuffer(binaryBuffer4, 0, new Uint32Array(pixelCount));
+  device.queue.writeBuffer(binaryBuffer2, 0, new Uint32Array(binaryWordCount));
+  device.queue.writeBuffer(binaryBuffer3, 0, new Uint32Array(binaryWordCount));
+  device.queue.writeBuffer(binaryBuffer4, 0, new Uint32Array(binaryWordCount));
   {
     const bindGroup = device.createBindGroup({
       layout: medianPipeline.getBindGroupLayout(0),
@@ -1152,10 +1212,13 @@ async function processValueChannel(valueBuffer, width, height) {
     device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();
   }
-  for (let iter = 0; iter < 4; iter++) {
+  let convergedIter = -1;
+  for (let iter = 0; iter < 20; iter++) {
     const inputBuffer = iter % 2 == 0 ? binaryBuffer3 : binaryBuffer4;
     const outputBuffer = iter % 2 == 0 ? binaryBuffer4 : binaryBuffer3;
-    device.queue.writeBuffer(outputBuffer, 0, new Uint32Array(pixelCount));
+    device.queue.writeBuffer(binaryBufferTemp, 0, new Uint32Array(binaryWordCount));
+    device.queue.writeBuffer(outputBuffer, 0, new Uint32Array(binaryWordCount));
+    device.queue.writeBuffer(changeCounterBuffer, 0, new Uint32Array(1));
     {
       const skeletonParams = new Uint32Array([width, height, 0, 0]);
       device.queue.writeBuffer(skeletonParamsBuffer, 0, skeletonParams);
@@ -1163,8 +1226,9 @@ async function processValueChannel(valueBuffer, width, height) {
         layout: skeletonPipeline.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: inputBuffer } },
-          { binding: 1, resource: { buffer: outputBuffer } },
-          { binding: 2, resource: { buffer: skeletonParamsBuffer } }
+          { binding: 1, resource: { buffer: binaryBufferTemp } },
+          { binding: 2, resource: { buffer: skeletonParamsBuffer } },
+          { binding: 3, resource: { buffer: changeCounterBuffer } }
         ]
       });
       const encoder = device.createCommandEncoder();
@@ -1176,17 +1240,16 @@ async function processValueChannel(valueBuffer, width, height) {
       device.queue.submit([encoder.finish()]);
       await device.queue.onSubmittedWorkDone();
     }
-    const nextTempBuffer = iter % 2 == 0 ? binaryBuffer3 : binaryBuffer4;
-    device.queue.writeBuffer(nextTempBuffer, 0, new Uint32Array(pixelCount));
     {
       const skeletonParams = new Uint32Array([width, height, 1, 0]);
       device.queue.writeBuffer(skeletonParamsBuffer, 0, skeletonParams);
       const bindGroup = device.createBindGroup({
         layout: skeletonPipeline.getBindGroupLayout(0),
         entries: [
-          { binding: 0, resource: { buffer: outputBuffer } },
-          { binding: 1, resource: { buffer: nextTempBuffer } },
-          { binding: 2, resource: { buffer: skeletonParamsBuffer } }
+          { binding: 0, resource: { buffer: binaryBufferTemp } },
+          { binding: 1, resource: { buffer: outputBuffer } },
+          { binding: 2, resource: { buffer: skeletonParamsBuffer } },
+          { binding: 3, resource: { buffer: changeCounterBuffer } }
         ]
       });
       const encoder = device.createCommandEncoder();
@@ -1198,8 +1261,27 @@ async function processValueChannel(valueBuffer, width, height) {
       device.queue.submit([encoder.finish()]);
       await device.queue.onSubmittedWorkDone();
     }
+    {
+      const encoder = device.createCommandEncoder();
+      encoder.copyBufferToBuffer(changeCounterBuffer, 0, stagingBuffer, 0, 4);
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      await stagingBuffer.mapAsync(GPUMapMode.READ);
+      const counterData = new Uint32Array(stagingBuffer.getMappedRange());
+      const changeCount = counterData[0];
+      stagingBuffer.unmap();
+      if (changeCount === 0) {
+        convergedIter = iter;
+        console.log(`Zhang-Suen converged after ${iter + 1} iteration(s) (${(iter + 1) * 2} passes)`);
+        break;
+      }
+    }
   }
-  const finalSkeletonBuffer = binaryBuffer3;
+  if (convergedIter === -1) {
+    console.log(`Zhang-Suen completed maximum 20 iterations (40 passes) without full convergence`);
+  }
+  const finalIterCount = convergedIter === -1 ? 19 : convergedIter;
+  const finalSkeletonBuffer = finalIterCount % 2 == 0 ? binaryBuffer4 : binaryBuffer3;
   {
     const bindGroup = device.createBindGroup({
       layout: toRGBAPipeline.getBindGroupLayout(0),
@@ -1821,13 +1903,19 @@ var fitToScreenBtn = document.getElementById("fitToScreenBtn");
 var clearCropBtn = document.getElementById("clearCropBtn");
 var cropInfo = document.getElementById("cropInfo");
 var processBtn = document.getElementById("processBtn");
-var backFromCropBtn = document.getElementById("backFromCropBtn");
 var statusText = document.getElementById("statusText");
 var resultsPanel = document.getElementById("resultsPanel");
 var resultsContainer = document.getElementById("resultsContainer");
-var paletteList = document.getElementById("paletteList");
+var navStepFile = document.getElementById("navStepFile");
+var navStepPage = document.getElementById("navStepPage");
+var navStepConfigure = document.getElementById("navStepConfigure");
+var navPalettePreview = document.getElementById("navPalettePreview");
+var toggleToolbarBtn = document.getElementById("toggleToolbarBtn");
+var cropSidebar = document.getElementById("cropSidebar");
+var processSidebar = document.getElementById("processSidebar");
 var addPaletteColorBtn = document.getElementById("addPaletteColorBtn");
 var resetPaletteBtn = document.getElementById("resetPaletteBtn");
+console.log("Palette buttons:", { addPaletteColorBtn, resetPaletteBtn });
 var processingScreen = document.getElementById("processingScreen");
 var processCanvasContainer = document.getElementById("processCanvasContainer");
 var processCanvas = document.getElementById("processCanvas");
@@ -1837,7 +1925,6 @@ var processZoomOutBtn = document.getElementById("processZoomOutBtn");
 var processZoomLevel = document.getElementById("processZoomLevel");
 var processFitToScreenBtn = document.getElementById("processFitToScreenBtn");
 var processStatusText = document.getElementById("processStatusText");
-var backToCropBtn = document.getElementById("backToCropBtn");
 var stageCroppedBtn = document.getElementById("stageCroppedBtn");
 var stageValueBtn = document.getElementById("stageValueBtn");
 var stageValueMedianBtn = document.getElementById("stageValueMedianBtn");
@@ -1850,9 +1937,6 @@ var stageCleanupBtn = document.getElementById("stageCleanupBtn");
 var stagePalettizedBtn = document.getElementById("stagePalettizedBtn");
 var stageMedianBtn = document.getElementById("stageMedianBtn");
 var stageBinaryBtn = document.getElementById("stageBinaryBtn");
-backToCropBtn.addEventListener("click", () => {
-  setMode("crop");
-});
 stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
 stageValueBtn.addEventListener("click", () => displayProcessingStage("value"));
 stageValueMedianBtn.addEventListener("click", () => displayProcessingStage("value_median"));
@@ -1877,6 +1961,20 @@ processZoomOutBtn.addEventListener("click", () => {
 });
 processFitToScreenBtn.addEventListener("click", () => {
   processFitToScreen();
+});
+navStepFile.addEventListener("click", () => {
+  if (!navStepFile.classList.contains("disabled")) {
+    setMode("upload");
+  }
+});
+navStepPage.addEventListener("click", () => {
+  if (!navStepPage.classList.contains("disabled") && currentPdfData) {
+    setMode("pageSelection");
+  }
+});
+toggleToolbarBtn.addEventListener("click", () => {
+  cropSidebar?.classList.toggle("collapsed");
+  processSidebar?.classList.toggle("collapsed");
 });
 refreshFileList();
 setMode("upload");
@@ -1930,13 +2028,6 @@ backToFilesBtn.addEventListener("click", () => {
   cropRegion = null;
   setMode("upload");
   refreshFileList();
-});
-backFromCropBtn.addEventListener("click", () => {
-  if (currentFile?.type === "application/pdf") {
-    setMode("pageSelection");
-  } else {
-    setMode("upload");
-  }
 });
 zoomInBtn.addEventListener("click", () => {
   zoom = Math.min(10, zoom * 1.2);
@@ -2030,9 +2121,9 @@ canvasContainer.addEventListener("wheel", (e) => {
     const mouseY = e.clientY - rect.top;
     const canvasX = (mouseX - panX) / zoom;
     const canvasY = (mouseY - panY) / zoom;
-    const zoomSpeed = 5e-3;
+    const zoomSpeed = 0.01;
     const zoomChange = -e.deltaY * zoomSpeed * zoom;
-    const newZoom = Math.max(0.1, Math.min(10, zoom + zoomChange));
+    const newZoom = Math.max(0.1, Math.min(20, zoom + zoomChange));
     panX = mouseX - canvasX * newZoom;
     panY = mouseY - canvasY * newZoom;
     zoom = newZoom;
@@ -2096,6 +2187,33 @@ processCanvasContainer.addEventListener("wheel", (e) => {
     updateProcessTransform();
   }
 });
+function updateNavigation(mode) {
+  navStepFile.classList.remove("active", "completed", "disabled");
+  navStepPage.classList.remove("active", "completed", "disabled");
+  navStepConfigure.classList.remove("active", "completed", "disabled");
+  switch (mode) {
+    case "upload":
+      navStepFile.classList.add("active");
+      navStepPage.classList.add("disabled");
+      navStepConfigure.classList.add("disabled");
+      break;
+    case "pageSelection":
+      navStepFile.classList.add("completed");
+      navStepPage.classList.add("active");
+      navStepConfigure.classList.add("disabled");
+      break;
+    case "crop":
+      navStepFile.classList.add("completed");
+      navStepPage.classList.add("completed");
+      navStepConfigure.classList.add("active");
+      break;
+    case "processing":
+      navStepFile.classList.add("completed");
+      navStepPage.classList.add("completed");
+      navStepConfigure.classList.add("completed");
+      break;
+  }
+}
 function setMode(mode) {
   console.log("setMode called:", mode);
   currentMode = mode;
@@ -2127,6 +2245,7 @@ function setMode(mode) {
       console.log("Processing screen activated");
       break;
   }
+  updateNavigation(mode);
 }
 function showStatus(message, isError = false) {
   let activeStatusText = statusText;
@@ -2960,115 +3079,226 @@ async function loadStoredFile(id) {
   await handleFileUpload(file);
 }
 function renderPaletteUI() {
-  paletteList.innerHTML = "";
+  console.log("renderPaletteUI called, userPalette length:", userPalette.length);
+  const paletteDisplay = document.getElementById("paletteDisplay");
+  console.log("paletteDisplay element:", paletteDisplay);
+  if (!paletteDisplay) {
+    console.error("paletteDisplay not found in DOM!");
+    return;
+  }
+  paletteDisplay.innerHTML = "";
   userPalette.forEach((color, index) => {
-    const entry = document.createElement("div");
-    entry.className = "palette-entry";
-    if (index === 0) entry.classList.add("background");
-    const header = document.createElement("div");
-    header.className = "palette-entry-header";
-    const indexLabel = document.createElement("div");
-    indexLabel.className = index === 0 ? "palette-index bg-index" : "palette-index";
-    indexLabel.textContent = `${index}${index === 0 ? " (BG)" : ""}`;
-    const removeBtn = document.createElement("button");
-    removeBtn.className = "remove-color";
-    removeBtn.textContent = "Remove";
-    removeBtn.disabled = index === 0;
-    removeBtn.onclick = () => {
-      if (index !== 0) {
-        userPalette.splice(index, 1);
-        renderPaletteUI();
-      }
-    };
-    header.appendChild(indexLabel);
-    header.appendChild(removeBtn);
-    entry.appendChild(header);
-    const inputGroup = document.createElement("div");
-    inputGroup.className = "color-picker-group";
-    const inputLabel = document.createElement("label");
-    inputLabel.textContent = "Input (matching):";
-    inputGroup.appendChild(inputLabel);
-    const inputWrapper = document.createElement("div");
-    inputWrapper.className = "color-picker-wrapper";
-    const inputColorPicker = document.createElement("input");
-    inputColorPicker.type = "color";
-    inputColorPicker.value = color.inputColor;
-    inputColorPicker.oninput = (e) => {
-      const hex = e.target.value;
-      userPalette[index].inputColor = hex;
-      inputHex.value = hex;
-    };
-    const inputHex = document.createElement("input");
-    inputHex.type = "text";
-    inputHex.value = color.inputColor;
-    inputHex.maxLength = 7;
-    inputHex.oninput = (e) => {
-      const hex = e.target.value;
-      if (/^#[0-9A-Fa-f]{6}$/.test(hex)) {
-        userPalette[index].inputColor = hex;
-        inputColorPicker.value = hex;
-      }
-    };
-    inputWrapper.appendChild(inputColorPicker);
-    inputWrapper.appendChild(inputHex);
-    inputGroup.appendChild(inputWrapper);
-    entry.appendChild(inputGroup);
-    const outputGroup = document.createElement("div");
-    outputGroup.className = "color-picker-group";
-    const outputLabel = document.createElement("label");
-    outputLabel.textContent = "Output (display):";
-    outputGroup.appendChild(outputLabel);
-    const outputWrapper = document.createElement("div");
-    outputWrapper.className = "color-picker-wrapper";
-    const outputColorPicker = document.createElement("input");
-    outputColorPicker.type = "color";
-    outputColorPicker.value = color.outputColor;
-    outputColorPicker.oninput = (e) => {
-      const hex = e.target.value;
-      userPalette[index].outputColor = hex;
-      outputHex.value = hex;
-    };
-    const outputHex = document.createElement("input");
-    outputHex.type = "text";
-    outputHex.value = color.outputColor;
-    outputHex.maxLength = 7;
-    outputHex.oninput = (e) => {
-      const hex = e.target.value;
-      if (/^#[0-9A-Fa-f]{6}$/.test(hex)) {
-        userPalette[index].outputColor = hex;
-        outputColorPicker.value = hex;
-      }
-    };
-    outputWrapper.appendChild(outputColorPicker);
-    outputWrapper.appendChild(outputHex);
-    outputGroup.appendChild(outputWrapper);
-    entry.appendChild(outputGroup);
-    const checkboxLabel = document.createElement("label");
-    checkboxLabel.className = "checkbox-label";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = color.mapToBg;
-    checkbox.disabled = index === 0;
-    checkbox.onchange = (e) => {
-      userPalette[index].mapToBg = e.target.checked;
-    };
-    checkboxLabel.appendChild(checkbox);
-    checkboxLabel.appendChild(document.createTextNode("Map to BG"));
-    entry.appendChild(checkboxLabel);
-    paletteList.appendChild(entry);
+    const item = document.createElement("div");
+    item.style.cssText = "display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem; border-bottom: 1px solid #3a3a3a; cursor: pointer; transition: background 0.2s;";
+    item.onmouseover = () => item.style.background = "#333";
+    item.onmouseout = () => item.style.background = "transparent";
+    item.onclick = () => openColorEditor(index);
+    const colorViz = document.createElement("div");
+    colorViz.style.cssText = "display: flex; align-items: center; gap: 4px;";
+    const inputSwatch = document.createElement("div");
+    inputSwatch.style.cssText = `width: 28px; height: 28px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.inputColor}; flex-shrink: 0;`;
+    colorViz.appendChild(inputSwatch);
+    if (color.mapToBg) {
+      const removeLabel = document.createElement("span");
+      removeLabel.textContent = "(Remove)";
+      removeLabel.style.cssText = "color: #ef4444; font-size: 0.85rem; font-weight: 500; white-space: nowrap;";
+      colorViz.appendChild(removeLabel);
+    } else if (color.inputColor.toLowerCase() !== color.outputColor.toLowerCase()) {
+      const arrow = document.createElement("span");
+      arrow.textContent = "\u2192";
+      arrow.style.cssText = "color: #999; font-size: 1rem; flex-shrink: 0;";
+      colorViz.appendChild(arrow);
+      const outputSwatch = document.createElement("div");
+      outputSwatch.style.cssText = `width: 28px; height: 28px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.outputColor}; flex-shrink: 0;`;
+      colorViz.appendChild(outputSwatch);
+    }
+    item.appendChild(colorViz);
+    const hexLabel = document.createElement("div");
+    hexLabel.style.cssText = "font-family: 'Courier New', monospace; font-size: 0.8rem; color: #aaa; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;";
+    if (color.mapToBg) {
+      hexLabel.textContent = color.inputColor.toUpperCase();
+    } else if (color.inputColor.toLowerCase() !== color.outputColor.toLowerCase()) {
+      hexLabel.textContent = `${color.inputColor.toUpperCase()} \u2192 ${color.outputColor.toUpperCase()}`;
+    } else {
+      hexLabel.textContent = color.inputColor.toUpperCase();
+    }
+    hexLabel.title = hexLabel.textContent;
+    item.appendChild(hexLabel);
+    if (index === 0) {
+      const bgLabel = document.createElement("span");
+      bgLabel.textContent = "BG";
+      bgLabel.style.cssText = "font-size: 0.75rem; color: #4f46e5; font-weight: 600; flex-shrink: 0;";
+      item.appendChild(bgLabel);
+    }
+    paletteDisplay.appendChild(item);
+  });
+  navPalettePreview.innerHTML = "";
+  userPalette.slice(0, 8).forEach((color) => {
+    const miniSwatch = document.createElement("div");
+    miniSwatch.className = "mini-swatch";
+    miniSwatch.style.backgroundColor = color.outputColor;
+    navPalettePreview.appendChild(miniSwatch);
   });
 }
+var colorEditorIndex = null;
+var eyedropperMode = null;
+function openColorEditor(index) {
+  colorEditorIndex = index;
+  const color = userPalette[index];
+  let modal = document.getElementById("colorEditorModal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "colorEditorModal";
+    modal.style.cssText = `
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(4px);
+      z-index: 3000; display: flex; align-items: center; justify-content: center;
+    `;
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `
+    <div style="background: #1a1a1a; border: 2px solid #4f46e5; border-radius: 8px; padding: 1.5rem; min-width: 400px; max-width: 500px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+        <h3 style="margin: 0; color: #fff;">Edit Color ${index}${index === 0 ? " (Background)" : ""}</h3>
+        <button id="closeColorEditor" style="background: none; border: none; color: #999; font-size: 1.5rem; cursor: pointer; padding: 0; width: 32px; height: 32px;">\xD7</button>
+      </div>
+      
+      <div style="display: flex; flex-direction: column; gap: 1.25rem;">
+        <!-- Input Color -->
+        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+          <label style="color: #aaa; font-size: 0.9rem; font-weight: 500;">Input Color (from document)</label>
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <div style="width: 48px; height: 48px; border-radius: 6px; border: 2px solid #3a3a3a; background: ${color.inputColor}; flex-shrink: 0;"></div>
+            <input type="text" id="inputColorHex" value="${color.inputColor}" maxlength="7" 
+              style="flex: 1; padding: 0.75rem; background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 4px; color: #fff; font-family: 'Courier New', monospace; font-size: 1rem;">
+            <button id="eyedropperInput" style="padding: 0.75rem; background: #4f46e5; border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 1.2rem;" title="Pick from canvas">\u{1F4A7}</button>
+          </div>
+        </div>
+        
+        <!-- Output Options -->
+        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+          <label style="color: #aaa; font-size: 0.9rem; font-weight: 500;">Output (in vectorized result)</label>
+          
+          <div style="display: flex; gap: 0.75rem; margin-bottom: 0.5rem;">
+            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #fff;">
+              <input type="radio" name="outputMode" value="same" ${!color.mapToBg && color.inputColor === color.outputColor ? "checked" : ""} style="cursor: pointer;">
+              <span>Keep same color</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #fff;">
+              <input type="radio" name="outputMode" value="different" ${!color.mapToBg && color.inputColor !== color.outputColor ? "checked" : ""} style="cursor: pointer;">
+              <span>Transform to:</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #fff;">
+              <input type="radio" name="outputMode" value="remove" ${color.mapToBg ? "checked" : ""} style="cursor: pointer;">
+              <span style="color: #ef4444;">Remove</span>
+            </label>
+          </div>
+          
+          <div id="outputColorSection" style="display: flex; gap: 0.5rem; align-items: center; ${color.mapToBg || color.inputColor === color.outputColor ? "opacity: 0.4; pointer-events: none;" : ""}">
+            <div style="width: 48px; height: 48px; border-radius: 6px; border: 2px solid #3a3a3a; background: ${color.outputColor}; flex-shrink: 0;"></div>
+            <input type="text" id="outputColorHex" value="${color.outputColor}" maxlength="7" 
+              style="flex: 1; padding: 0.75rem; background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 4px; color: #fff; font-family: 'Courier New', monospace; font-size: 1rem;">
+            <button id="eyedropperOutput" style="padding: 0.75rem; background: #4f46e5; border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 1.2rem;" title="Pick from canvas">\u{1F4A7}</button>
+          </div>
+        </div>
+        
+        <!-- Action Buttons -->
+        <div style="display: flex; gap: 0.75rem; margin-top: 0.5rem;">
+          <button id="saveColorEdit" style="flex: 1; padding: 0.75rem; background: #4f46e5; border: none; border-radius: 4px; color: white; cursor: pointer; font-weight: 600;">Save</button>
+          ${index !== 0 ? '<button id="deleteColor" style="padding: 0.75rem 1.25rem; background: #ef4444; border: none; border-radius: 4px; color: white; cursor: pointer;">Delete</button>' : ""}
+          <button id="cancelColorEdit" style="padding: 0.75rem 1.25rem; background: #3a3a3a; border: none; border-radius: 4px; color: white; cursor: pointer;">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `;
+  modal.style.display = "flex";
+  const inputHexField = document.getElementById("inputColorHex");
+  const outputHexField = document.getElementById("outputColorHex");
+  const outputSection = document.getElementById("outputColorSection");
+  const outputModeRadios = document.getElementsByName("outputMode");
+  outputModeRadios.forEach((radio) => {
+    radio.addEventListener("change", () => {
+      if (radio.value === "different") {
+        outputSection.style.opacity = "1";
+        outputSection.style.pointerEvents = "auto";
+      } else {
+        outputSection.style.opacity = "0.4";
+        outputSection.style.pointerEvents = "none";
+      }
+    });
+  });
+  document.getElementById("eyedropperInput").addEventListener("click", () => {
+    eyedropperMode = "input";
+    activateEyedropper();
+    modal.style.display = "none";
+  });
+  document.getElementById("eyedropperOutput").addEventListener("click", () => {
+    eyedropperMode = "output";
+    activateEyedropper();
+    modal.style.display = "none";
+  });
+  document.getElementById("saveColorEdit").addEventListener("click", () => {
+    const inputColor = inputHexField.value;
+    const outputColor = outputHexField.value;
+    const selectedMode = Array.from(outputModeRadios).find((r) => r.checked)?.value;
+    if (!/^#[0-9A-Fa-f]{6}$/.test(inputColor)) {
+      alert("Invalid input color format. Use #RRGGBB");
+      return;
+    }
+    if (selectedMode === "different" && !/^#[0-9A-Fa-f]{6}$/.test(outputColor)) {
+      alert("Invalid output color format. Use #RRGGBB");
+      return;
+    }
+    userPalette[index].inputColor = inputColor;
+    if (selectedMode === "remove") {
+      userPalette[index].mapToBg = true;
+      userPalette[index].outputColor = inputColor;
+    } else if (selectedMode === "different") {
+      userPalette[index].mapToBg = false;
+      userPalette[index].outputColor = outputColor;
+    } else {
+      userPalette[index].mapToBg = false;
+      userPalette[index].outputColor = inputColor;
+    }
+    renderPaletteUI();
+    closeColorEditor();
+  });
+  const deleteBtn = document.getElementById("deleteColor");
+  if (deleteBtn) {
+    deleteBtn.addEventListener("click", () => {
+      if (index !== 0 && confirm("Delete this color?")) {
+        userPalette.splice(index, 1);
+        renderPaletteUI();
+        closeColorEditor();
+      }
+    });
+  }
+  document.getElementById("cancelColorEdit").addEventListener("click", closeColorEditor);
+  document.getElementById("closeColorEditor").addEventListener("click", closeColorEditor);
+  modal.addEventListener("click", (e) => {
+    if (e.target === modal) closeColorEditor();
+  });
+}
+function closeColorEditor() {
+  const modal = document.getElementById("colorEditorModal");
+  if (modal) modal.style.display = "none";
+  colorEditorIndex = null;
+  eyedropperMode = null;
+}
 function addPaletteColor() {
+  console.log("Add palette color clicked, current length:", userPalette.length);
   if (userPalette.length >= 16) {
     showStatus("Maximum 16 colors allowed", true);
     return;
   }
+  const newIndex = userPalette.length;
   userPalette.push({
     inputColor: "#808080",
     outputColor: "#808080",
     mapToBg: false
   });
   renderPaletteUI();
+  openColorEditor(newIndex);
 }
 function resetPaletteToDefault() {
   userPalette.length = 0;
@@ -3082,142 +3312,52 @@ function resetPaletteToDefault() {
   renderPaletteUI();
   showStatus("Palette reset to default");
 }
-function showColorHistogram() {
+var eyedropperActive = false;
+function activateEyedropper() {
   if (!currentImage) {
     showStatus("No image loaded", true);
     return;
   }
-  showStatus("\u23F3 Analyzing colors...");
-  const quantize = (value) => Math.round(value / 64) * 64;
-  const colorCounts = /* @__PURE__ */ new Map();
-  const data = currentImage.data;
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
-    const qR = quantize(r);
-    const qG = quantize(g);
-    const qB = quantize(b);
-    const key = `${qR},${qG},${qB}`;
-    const existing = colorCounts.get(key);
-    if (existing) {
-      existing.count++;
-      existing.avgR += r;
-      existing.avgG += g;
-      existing.avgB += b;
-      existing.samples++;
-    } else {
-      colorCounts.set(key, {
-        count: 1,
-        avgR: r,
-        avgG: g,
-        avgB: b,
-        samples: 1
-      });
-    }
+  eyedropperActive = true;
+  document.body.classList.add("eyedropper-active");
+  mainCanvas.style.cursor = "crosshair";
+  showStatus("\u{1F4A7} Click on the image to pick a color (ESC to cancel)");
+}
+function deactivateEyedropper() {
+  eyedropperActive = false;
+  document.body.classList.remove("eyedropper-active");
+  mainCanvas.style.cursor = "";
+  showStatus("Eyedropper cancelled");
+}
+function pickColorFromCanvas(x, y) {
+  if (!currentImage) return;
+  const rect = mainCanvas.getBoundingClientRect();
+  const scaleX = currentImage.width / rect.width;
+  const scaleY = currentImage.height / rect.height;
+  const imgX = Math.floor((x - rect.left) * scaleX);
+  const imgY = Math.floor((y - rect.top) * scaleY);
+  if (imgX < 0 || imgX >= currentImage.width || imgY < 0 || imgY >= currentImage.height) {
+    return;
   }
-  const buckets = Array.from(colorCounts.entries()).map(([_key, data2]) => {
-    const avgR = Math.round(data2.avgR / data2.samples);
-    const avgG = Math.round(data2.avgG / data2.samples);
-    const avgB = Math.round(data2.avgB / data2.samples);
-    const hex = `#${avgR.toString(16).padStart(2, "0")}${avgG.toString(16).padStart(2, "0")}${avgB.toString(16).padStart(2, "0")}`;
-    return { hex, count: data2.count, r: avgR, g: avgG, b: avgB };
-  });
-  buckets.sort((a, b) => b.count - a.count);
-  const backgroundHex = buckets.length > 0 ? buckets[0].hex : "#ffffff";
-  const secondCount = buckets.length > 1 ? buckets[1].count : buckets[0].count;
-  if (buckets.length > 0) {
-    buckets[0].count = Math.min(buckets[0].count, secondCount);
+  const pixelIndex = (imgY * currentImage.width + imgX) * 4;
+  const r = currentImage.data[pixelIndex];
+  const g = currentImage.data[pixelIndex + 1];
+  const b = currentImage.data[pixelIndex + 2];
+  const hex = `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+  deactivateEyedropper();
+  if (colorEditorIndex !== null && eyedropperMode) {
+    if (eyedropperMode === "input") {
+      userPalette[colorEditorIndex].inputColor = hex;
+    } else if (eyedropperMode === "output") {
+      userPalette[colorEditorIndex].outputColor = hex;
+      userPalette[colorEditorIndex].mapToBg = false;
+    }
+    openColorEditor(colorEditorIndex);
+    showStatus(`Picked ${hex.toUpperCase()}`);
+  } else {
+    addColorToPalette(hex);
+    showStatus(`Added ${hex.toUpperCase()} to palette`);
   }
-  const bgR = parseInt(backgroundHex.slice(1, 3), 16);
-  const bgG = parseInt(backgroundHex.slice(3, 5), 16);
-  const bgB = parseInt(backgroundHex.slice(5, 7), 16);
-  const borderColor = `rgb(${255 - bgR}, ${255 - bgG}, ${255 - bgB})`;
-  const rgbToHSV = (r, g, b) => {
-    const rNorm = r / 255;
-    const gNorm = g / 255;
-    const bNorm = b / 255;
-    const max = Math.max(rNorm, gNorm, bNorm);
-    const min = Math.min(rNorm, gNorm, bNorm);
-    const delta = max - min;
-    let h = 0;
-    if (delta !== 0) {
-      if (max === rNorm) {
-        h = ((gNorm - bNorm) / delta + (gNorm < bNorm ? 6 : 0)) / 6;
-      } else if (max === gNorm) {
-        h = ((bNorm - rNorm) / delta + 2) / 6;
-      } else {
-        h = ((rNorm - gNorm) / delta + 4) / 6;
-      }
-    }
-    const s = max === 0 ? 0 : delta / max;
-    const v = max;
-    return { h, s, v };
-  };
-  const grayscale = [];
-  const chromatic = [];
-  buckets.forEach((bucket) => {
-    const { s } = rgbToHSV(bucket.r, bucket.g, bucket.b);
-    if (s < 0.1) {
-      grayscale.push(bucket);
-    } else {
-      chromatic.push(bucket);
-    }
-  });
-  grayscale.sort((a, b) => {
-    const { v: vA } = rgbToHSV(a.r, a.g, a.b);
-    const { v: vB } = rgbToHSV(b.r, b.g, b.b);
-    return vA - vB;
-  });
-  chromatic.sort((a, b) => {
-    const hsvA = rgbToHSV(a.r, a.g, a.b);
-    const hsvB = rgbToHSV(b.r, b.g, b.b);
-    if (Math.abs(hsvA.h - hsvB.h) > 0.015) {
-      return hsvA.h - hsvB.h;
-    }
-    if (Math.abs(hsvA.s - hsvB.s) > 0.05) {
-      return hsvB.s - hsvA.s;
-    }
-    return hsvB.v - hsvA.v;
-  });
-  const allColorsSorted = [...chromatic, ...grayscale];
-  const modal = document.getElementById("histogramModal");
-  const body = document.getElementById("histogramBody");
-  const total = currentImage.width * currentImage.height;
-  body.style.backgroundColor = backgroundHex;
-  const tiles = document.createElement("div");
-  tiles.className = "histogram-tiles";
-  const maxCount = Math.max(...allColorsSorted.map((b) => b.count));
-  const minSize = 3;
-  const maxSize = 120;
-  allColorsSorted.forEach(({ hex, count }) => {
-    const percent = count / total * 100;
-    const sizeFactor = count / maxCount;
-    const size = Math.max(minSize, sizeFactor * maxSize);
-    const tile = document.createElement("div");
-    tile.className = "color-tile";
-    tile.style.backgroundColor = hex;
-    tile.style.width = `${size}px`;
-    tile.style.height = `${size}px`;
-    tile.style.border = `1px solid ${borderColor}`;
-    tile.title = `${hex.toUpperCase()} - ${percent.toFixed(3)}%`;
-    const label = document.createElement("div");
-    label.className = "color-tile-label";
-    if (size > 20) {
-      label.textContent = percent >= 1 ? `${percent.toFixed(1)}%` : `${percent.toFixed(2)}%`;
-    }
-    tile.appendChild(label);
-    tile.onclick = () => {
-      addColorToPalette(hex);
-      modal.classList.remove("active");
-      showStatus(`Added ${hex} (${percent.toFixed(2)}%) to palette`);
-    };
-    tiles.appendChild(tile);
-  });
-  body.innerHTML = "";
-  body.appendChild(tiles);
-  modal.classList.add("active");
-  showStatus(`${allColorsSorted.length} colors (${chromatic.length} chromatic, ${grayscale.length} grayscale, bg: ${backgroundHex})`);
 }
 function addColorToPalette(hex) {
   if (userPalette.length >= 16) {
@@ -3232,16 +3372,6 @@ function addColorToPalette(hex) {
   renderPaletteUI();
   showStatus(`Added ${hex} to palette`);
 }
-var histogramModal = document.getElementById("histogramModal");
-var closeHistogramBtn = document.getElementById("closeHistogramBtn");
-closeHistogramBtn.addEventListener("click", () => {
-  histogramModal.classList.remove("active");
-});
-histogramModal.addEventListener("click", (e) => {
-  if (e.target === histogramModal) {
-    histogramModal.classList.remove("active");
-  }
-});
 function buildPaletteRGBA() {
   const palette = new Uint8ClampedArray(16 * 4);
   for (let i = 0; i < userPalette.length && i < 16; i++) {
@@ -3262,8 +3392,31 @@ function buildPaletteRGBA() {
   }
   return palette;
 }
-addPaletteColorBtn.addEventListener("click", addPaletteColor);
-resetPaletteBtn.addEventListener("click", resetPaletteToDefault);
-var showHistogramBtn = document.getElementById("showHistogramBtn");
-showHistogramBtn.addEventListener("click", showColorHistogram);
+console.log("Setting up palette event listeners...");
+if (addPaletteColorBtn) {
+  addPaletteColorBtn.addEventListener("click", () => {
+    console.log("Add button clicked!");
+    addPaletteColor();
+  });
+} else {
+  console.error("addPaletteColorBtn not found!");
+}
+if (resetPaletteBtn) {
+  resetPaletteBtn.addEventListener("click", () => {
+    console.log("Reset button clicked!");
+    resetPaletteToDefault();
+  });
+} else {
+  console.error("resetPaletteBtn not found!");
+}
+mainCanvas.addEventListener("click", (e) => {
+  if (eyedropperActive) {
+    pickColorFromCanvas(e.clientX, e.clientY);
+  }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && eyedropperActive) {
+    deactivateEyedropper();
+  }
+});
 renderPaletteUI();
