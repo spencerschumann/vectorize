@@ -8,40 +8,12 @@
 import type { RGBAImage } from "../formats/rgba_image.ts";
 import { getGPUContext, createGPUBuffer, readGPUBuffer } from "./gpu_context.ts";
 
-// Step 1: Convert grayscale value channel to unpacked binary (u32 per pixel)
-const valueToBinaryShader = `
-@group(0) @binding(0) var<storage, read> value_in: array<f32>;
-@group(0) @binding(1) var<storage, read_write> binary_out: array<u32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
-struct Params {
-    width: u32,
-    height: u32,
-}
-
-@compute @workgroup_size(8, 8)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let x = global_id.x;
-    let y = global_id.y;
-    
-    if (x >= params.width || y >= params.height) {
-        return;
-    }
-    
-    let pixel_idx = y * params.width + x;
-    let value = value_in[pixel_idx];
-    
-    // Convert to 1-bit: 1 = background (white), 0 = line (black)
-    // Store unpacked (one u32 per pixel for now - will pack later if needed)
-    binary_out[pixel_idx] = u32(value >= 0.5);
-}
-`;
-
-// Step 2: Weighted 3x3 median filter on unpacked binary data
+// Step 1: Weighted 3x3 median filter on packed binary data
 // Cardinals (N/E/S/W) counted twice, diagonals once = 12 total samples
+// Input/output: 1 = line (signal), 0 = background
 const weightedMedianShader = `
 @group(0) @binding(0) var<storage, read> input: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<atomic<u32>>;
 @group(0) @binding(2) var<uniform> params: Params;
 
 struct Params {
@@ -51,10 +23,12 @@ struct Params {
 
 fn get_bit(data: ptr<storage, array<u32>, read>, x: u32, y: u32, w: u32, h: u32) -> u32 {
     if (x >= w || y >= h) {
-        return 1u; // Background outside bounds
+        return 0u; // Background outside bounds
     }
     let pixel_idx = y * w + x;
-    return (*data)[pixel_idx];
+    let word_idx = pixel_idx / 32u;
+    let bit_idx = pixel_idx % 32u;
+    return ((*data)[word_idx] >> bit_idx) & 1u;
 }
 
 @compute @workgroup_size(8, 8)
@@ -73,34 +47,37 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var sum = 0u;
     
     // Corners = 4 samples
-    sum += get_bit(&input, max(x, 1u) - 1u, max(y, 1u) - 1u, w, h);
-    sum += get_bit(&input, min(x + 1u, w - 1u), max(y, 1u) - 1u, w, h);
-    sum += get_bit(&input, max(x, 1u) - 1u, min(y + 1u, h - 1u), w, h);
-    sum += get_bit(&input, min(x + 1u, w - 1u), min(y + 1u, h - 1u), w, h);
+    //sum += get_bit(&input, max(x, 1u) - 1u, max(y, 1u) - 1u, w, h);
+    //sum += get_bit(&input, min(x + 1u, w - 1u), max(y, 1u) - 1u, w, h);
+    //sum += get_bit(&input, max(x, 1u) - 1u, min(y + 1u, h - 1u), w, h);
+    //sum += get_bit(&input, min(x + 1u, w - 1u), min(y + 1u, h - 1u), w, h);
     
     // Cardinals = 4 samples
-    sum += get_bit(&input, x, max(y, 1u) - 1u, w, h);
-    sum += get_bit(&input, x, min(y + 1u, h - 1u), w, h);
-    sum += get_bit(&input, max(x, 1u) - 1u, y, w, h);
-    sum += get_bit(&input, min(x + 1u, w - 1u), y, w, h);
+    //sum += get_bit(&input, x, max(y, 1u) - 1u, w, h);
+    //sum += get_bit(&input, x, min(y + 1u, h - 1u), w, h);
+    //sum += get_bit(&input, max(x, 1u) - 1u, y, w, h);
+    //sum += get_bit(&input, min(x + 1u, w - 1u), y, w, h);
     
     // Center = 1 sample
     sum += get_bit(&input, x, y, w, h);
     
-    // If sum < 9, output 0; else output 1
+    // If any pixels in neighborhood are set, output a 1.
+    let median_bit = u32(sum > 0u);
     
-    
-    let pixel_idx = y * w + x;
-    output[pixel_idx] = median_bit;
+    if (median_bit == 1u) {
+        let pixel_idx = y * w + x;
+        let word_idx = pixel_idx / 32u;
+        let bit_idx = pixel_idx % 32u;
+        atomicOr(&output[word_idx], 1u << bit_idx);
+    }
 }
-`;
-
-// Step 3: Connectivity-preserving thinning
-// Only removes pixels that are proven to be redundant for connectivity
+`;// Step 2: Pure Zhang-Suen skeletonization algorithm
+// Input/output: 1 = line (signal), 0 = background
 const skeletonizeShader = `
 @group(0) @binding(0) var<storage, read> input: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<atomic<u32>>;
 @group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(3) var<storage, read_write> change_counter: array<atomic<u32>>;
 
 struct Params {
     width: u32,
@@ -111,28 +88,12 @@ struct Params {
 
 fn get_bit(data: ptr<storage, array<u32>, read>, x: i32, y: i32, w: u32, h: u32) -> u32 {
     if (x < 0 || y < 0 || x >= i32(w) || y >= i32(h)) {
-        return 1u; // Background outside bounds
+        return 0u; // Background outside bounds
     }
     let pixel_idx = u32(y) * w + u32(x);
-    return (*data)[pixel_idx];
-}
-
-fn is_line(val: u32) -> bool {
-    return val == 0u;
-}
-
-// Count the number of connected components in the 8-neighborhood
-// This helps us determine if removing the center pixel would break connectivity
-fn count_connectivity(nw: u32, n: u32, ne: u32, w_: u32, e: u32, sw: u32, s: u32, se: u32) -> u32 {
-    // Count transitions from background to line in circular order
-    var transitions = 0u;
-    let seq = array<u32, 8>(n, ne, e, se, s, sw, w_, nw);
-    for (var i = 0u; i < 8u; i++) {
-        if (seq[i] == 1u && seq[(i + 1u) % 8u] == 0u) {
-            transitions += 1u;
-        }
-    }
-    return transitions;
+    let word_idx = pixel_idx / 32u;
+    let bit_idx = pixel_idx % 32u;
+    return (input[word_idx] >> bit_idx) & 1u;
 }
 
 @compute @workgroup_size(8, 8)
@@ -147,95 +108,94 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let w = params.width;
     let h = params.height;
     
-    // Get center pixel (0 = line, 1 = background)
-    let center = get_bit(&input, x, y, w, h);
+    // Get center pixel (1 = line, 0 = background)
+    let p1 = get_bit(&input, x, y, w, h);
     
     // Only process line pixels
-    if (center == 1u) {
+    if (p1 == 0u) {
+        return;
+    }
+    
+    // Get 8-neighborhood in Zhang-Suen order (P2-P9):
+    // P9 P2 P3
+    // P8 P1 P4
+    // P7 P6 P5
+    let p2 = get_bit(&input, x,     y - 1, w, h);  // N
+    let p3 = get_bit(&input, x + 1, y - 1, w, h);  // NE
+    let p4 = get_bit(&input, x + 1, y,     w, h);  // E
+    let p5 = get_bit(&input, x + 1, y + 1, w, h);  // SE
+    let p6 = get_bit(&input, x,     y + 1, w, h);  // S
+    let p7 = get_bit(&input, x - 1, y + 1, w, h);  // SW
+    let p8 = get_bit(&input, x - 1, y,     w, h);  // W
+    let p9 = get_bit(&input, x - 1, y - 1, w, h);  // NW
+    
+    // Condition 1: 2 <= B(P1) <= 6
+    // B(P1) = number of line neighbors
+    let b = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+    if (b < 2u || b > 6u) {
+        // Keep pixel
         let pixel_idx = u32(y) * w + u32(x);
-        output[pixel_idx] = 1u;
+        let word_idx = pixel_idx / 32u;
+        let bit_idx = pixel_idx % 32u;
+        atomicOr(&output[word_idx], 1u << bit_idx);
         return;
     }
     
-    // Get 8-neighborhood
-    // NW  N  NE
-    // W   C  E
-    // SW  S  SE
-    let nw = get_bit(&input, x - 1, y - 1, w, h);
-    let n  = get_bit(&input, x,     y - 1, w, h);
-    let ne = get_bit(&input, x + 1, y - 1, w, h);
-    let w_ = get_bit(&input, x - 1, y,     w, h);
-    let e  = get_bit(&input, x + 1, y,     w, h);
-    let sw = get_bit(&input, x - 1, y + 1, w, h);
-    let s  = get_bit(&input, x,     y + 1, w, h);
-    let se = get_bit(&input, x + 1, y + 1, w, h);
+    // Condition 2: A(P1) = 1
+    // A(P1) = number of 0->1 transitions in ordered sequence P2,P3,...,P9,P2
+    var a = 0u;
+    if (p2 == 0u && p3 == 1u) { a += 1u; }
+    if (p3 == 0u && p4 == 1u) { a += 1u; }
+    if (p4 == 0u && p5 == 1u) { a += 1u; }
+    if (p5 == 0u && p6 == 1u) { a += 1u; }
+    if (p6 == 0u && p7 == 1u) { a += 1u; }
+    if (p7 == 0u && p8 == 1u) { a += 1u; }
+    if (p8 == 0u && p9 == 1u) { a += 1u; }
+    if (p9 == 0u && p2 == 1u) { a += 1u; }
     
-    // Count line neighbors
-    let line_n = u32(is_line(n));
-    let line_s = u32(is_line(s));
-    let line_e = u32(is_line(e));
-    let line_w = u32(is_line(w_));
-    let line_ne = u32(is_line(ne));
-    let line_nw = u32(is_line(nw));
-    let line_se = u32(is_line(se));
-    let line_sw = u32(is_line(sw));
-    
-    let total_neighbors = line_n + line_s + line_e + line_w + line_ne + line_nw + line_se + line_sw;
-    
-    // NEVER remove endpoints (1 neighbor) or isolated pixels (0 neighbors)
-    if (total_neighbors <= 1u) {
-        output[u32(y) * w + u32(x)] = 0u;
+    if (a != 1u) {
+        // Keep pixel
+        let pixel_idx = u32(y) * w + u32(x);
+        let word_idx = pixel_idx / 32u;
+        let bit_idx = pixel_idx % 32u;
+        atomicOr(&output[word_idx], 1u << bit_idx);
         return;
     }
     
-    // Count connectivity: number of separate line components in neighborhood
-    let connectivity = count_connectivity(nw, n, ne, w_, e, sw, s, se);
-    
-    // NEVER remove if connectivity != 1 (we're a junction or critical connection point)
-    if (connectivity != 1u) {
-        output[u32(y) * w + u32(x)] = 0u;
-        return;
-    }
-    
-    // At this point: we have 2+ neighbors and exactly 1 connected component
-    // We're part of a simple curve - can potentially be removed
-    
+    // Conditions 3 & 4 depend on iteration (step 1 vs step 2)
+    // BOTH conditions must be satisfied (both products = 0) to delete
     var should_delete = false;
     
-    // Two-pass thinning to remove redundant pixels while preserving structure
     if (params.iteration == 0u) {
-        // Pass 0: Remove north and east boundary pixels
-        
-        // Condition 1: Has 2-6 neighbors (not endpoint, not too complex)
-        if (total_neighbors >= 2u && total_neighbors <= 6u) {
-            // Condition 2: At least one of {N, E, S} is background OR at least one of {E, S, W} is background
-            let cond_a = (n == 1u || e == 1u || s == 1u);
-            let cond_b = (e == 1u || s == 1u || w_ == 1u);
-            
-            if (cond_a && cond_b) {
-                should_delete = true;
-            }
+        // Step 1:
+        // Condition 3: P2 * P4 * P6 = 0 (at least one of N, E, S is background)
+        // Condition 4: P4 * P6 * P8 = 0 (at least one of E, S, W is background)
+        if ((p2 * p4 * p6) == 0u && (p4 * p6 * p8) == 0u) {
+            should_delete = true;
         }
     } else {
-        // Pass 1: Remove south and west boundary pixels
-        
-        if (total_neighbors >= 2u && total_neighbors <= 6u) {
-            // At least one of {N, E, W} is background OR at least one of {N, S, W} is background
-            let cond_a = (n == 1u || e == 1u || w_ == 1u);
-            let cond_b = (n == 1u || s == 1u || w_ == 1u);
-            
-            if (cond_a && cond_b) {
-                should_delete = true;
-            }
+        // Step 2:
+        // Condition 3: P2 * P4 * P8 = 0 (at least one of N, E, W is background)
+        // Condition 4: P2 * P6 * P8 = 0 (at least one of N, S, W is background)
+        if ((p2 * p4 * p8) == 0u && (p2 * p6 * p8) == 0u) {
+            should_delete = true;
         }
     }
     
-    let output_bit = select(0u, 1u, should_delete);
-    output[u32(y) * w + u32(x)] = output_bit;
+    if (!should_delete) {
+        let pixel_idx = u32(y) * w + u32(x);
+        let word_idx = pixel_idx / 32u;
+        let bit_idx = pixel_idx % 32u;
+        atomicOr(&output[word_idx], 1u << bit_idx);
+    } else {
+        // Pixel was deleted - increment change counter
+        atomicAdd(&change_counter[0], 1u);
+    }
 }
 `;
 
-// Helper: Convert binary back to grayscale RGBA for visualization
+// Helper: Convert packed binary to grayscale RGBA for visualization
+// Input: 1 = line (black), 0 = background (white)
 const binaryToRGBAShader = `
 @group(0) @binding(0) var<storage, read> binary_in: array<u32>;
 @group(0) @binding(1) var<storage, read_write> rgba_out: array<u32>;
@@ -256,8 +216,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     
     let pixel_idx = y * params.width + x;
-    let bit = binary_in[pixel_idx]; // Unpacked: 0 or 1
-    let gray = bit * 255u; // 1 = white (255), 0 = black (0)
+    let word_idx = pixel_idx / 32u;
+    let bit_idx = pixel_idx % 32u;
+    let bit = (binary_in[word_idx] >> bit_idx) & 1u;
+    
+    // 1 = line (black), 0 = background (white)
+    let gray = (1u - bit) * 255u;
     
     rgba_out[pixel_idx] = gray | (gray << 8u) | (gray << 16u) | (255u << 24u);
 }
@@ -281,7 +245,8 @@ export async function processValueChannel(
     const { device } = await getGPUContext();
     
     const pixelCount = width * height;
-    const binaryByteSize = pixelCount * 4;  // u32 per pixel (unpacked)
+    const binaryWordCount = Math.ceil(pixelCount / 32);  // Pack 32 pixels per u32
+    const binaryByteSize = binaryWordCount * 4;
     const rgbaByteSize = pixelCount * 4;
     
     console.log(`Value processing: ${width}x${height}`);
@@ -296,10 +261,16 @@ export async function processValueChannel(
     
     const binaryBuffer3 = device.createBuffer({
         size: binaryByteSize,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
     
     const binaryBuffer4 = device.createBuffer({
+        size: binaryByteSize,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    });
+    
+    // Create temporary buffer for intermediate pass results
+    const binaryBufferTemp = device.createBuffer({
         size: binaryByteSize,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
@@ -329,6 +300,18 @@ export async function processValueChannel(
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     
+    // Create change counter buffer for convergence detection
+    const changeCounterBuffer = device.createBuffer({
+        size: 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    });
+    
+    // Create staging buffer for reading back the change counter
+    const stagingBuffer = device.createBuffer({
+        size: 4,
+        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+    });
+    
     // Create shader modules
     const medianModule = device.createShaderModule({ code: weightedMedianShader });
     const skeletonModule = device.createShaderModule({ code: skeletonizeShader });
@@ -351,10 +334,10 @@ export async function processValueChannel(
     const workgroupsX = Math.ceil(width / 8);
     const workgroupsY = Math.ceil(height / 8);
     
-    // Clear binary buffers
-    device.queue.writeBuffer(binaryBuffer2, 0, new Uint32Array(pixelCount));
-    device.queue.writeBuffer(binaryBuffer3, 0, new Uint32Array(pixelCount));
-    device.queue.writeBuffer(binaryBuffer4, 0, new Uint32Array(pixelCount));
+    // Clear binary buffers (atomic operations require starting at 0)
+    device.queue.writeBuffer(binaryBuffer2, 0, new Uint32Array(binaryWordCount));
+    device.queue.writeBuffer(binaryBuffer3, 0, new Uint32Array(binaryWordCount));
+    device.queue.writeBuffer(binaryBuffer4, 0, new Uint32Array(binaryWordCount));
     
     // Pass 1: Weighted median filter (input is valueBuffer - already binary)
     {
@@ -389,15 +372,18 @@ export async function processValueChannel(
         await device.queue.onSubmittedWorkDone();
     }
     
-    // Run 8 iterations (more aggressive thinning for thick lines)
-    for (let iter = 0; iter < 8; iter++) {
+    // Run up to 20 iterations, but exit early if converged
+    let convergedIter = -1;
+    for (let iter = 0; iter < 20; iter++) {
         const inputBuffer = (iter % 2 == 0) ? binaryBuffer3 : binaryBuffer4;
         const outputBuffer = (iter % 2 == 0) ? binaryBuffer4 : binaryBuffer3;
         
-        // Clear output buffer
-        device.queue.writeBuffer(outputBuffer, 0, new Uint32Array(pixelCount));
+        // Clear temp buffer and output buffer, reset change counter
+        device.queue.writeBuffer(binaryBufferTemp, 0, new Uint32Array(binaryWordCount));
+        device.queue.writeBuffer(outputBuffer, 0, new Uint32Array(binaryWordCount));
+        device.queue.writeBuffer(changeCounterBuffer, 0, new Uint32Array(1));
         
-        // Iteration 0 (even)
+        // Pass 0 - first pass of Zhang-Suen: input → temp
         {
             const skeletonParams = new Uint32Array([width, height, 0, 0]);
             device.queue.writeBuffer(skeletonParamsBuffer, 0, skeletonParams);
@@ -406,8 +392,9 @@ export async function processValueChannel(
                 layout: skeletonPipeline.getBindGroupLayout(0),
                 entries: [
                     { binding: 0, resource: { buffer: inputBuffer } },
-                    { binding: 1, resource: { buffer: outputBuffer } },
+                    { binding: 1, resource: { buffer: binaryBufferTemp } },
                     { binding: 2, resource: { buffer: skeletonParamsBuffer } },
+                    { binding: 3, resource: { buffer: changeCounterBuffer } },
                 ],
             });
             
@@ -421,11 +408,7 @@ export async function processValueChannel(
             await device.queue.onSubmittedWorkDone();
         }
         
-        // Clear temp buffer for next iteration's second pass
-        const nextTempBuffer = (iter % 2 == 0) ? binaryBuffer3 : binaryBuffer4;
-        device.queue.writeBuffer(nextTempBuffer, 0, new Uint32Array(pixelCount));
-        
-        // Iteration 1 (odd)
+        // Pass 1 - second pass of Zhang-Suen: temp → output
         {
             const skeletonParams = new Uint32Array([width, height, 1, 0]);
             device.queue.writeBuffer(skeletonParamsBuffer, 0, skeletonParams);
@@ -433,9 +416,10 @@ export async function processValueChannel(
             const bindGroup = device.createBindGroup({
                 layout: skeletonPipeline.getBindGroupLayout(0),
                 entries: [
-                    { binding: 0, resource: { buffer: outputBuffer } },
-                    { binding: 1, resource: { buffer: nextTempBuffer } },
+                    { binding: 0, resource: { buffer: binaryBufferTemp } },
+                    { binding: 1, resource: { buffer: outputBuffer } },
                     { binding: 2, resource: { buffer: skeletonParamsBuffer } },
+                    { binding: 3, resource: { buffer: changeCounterBuffer } },
                 ],
             });
             
@@ -448,10 +432,36 @@ export async function processValueChannel(
             device.queue.submit([encoder.finish()]);
             await device.queue.onSubmittedWorkDone();
         }
+        
+        // Check for convergence by reading the change counter
+        {
+            const encoder = device.createCommandEncoder();
+            encoder.copyBufferToBuffer(changeCounterBuffer, 0, stagingBuffer, 0, 4);
+            device.queue.submit([encoder.finish()]);
+            await device.queue.onSubmittedWorkDone();
+            
+            await stagingBuffer.mapAsync(GPUMapMode.READ);
+            const counterData = new Uint32Array(stagingBuffer.getMappedRange());
+            const changeCount = counterData[0];
+            stagingBuffer.unmap();
+            
+            if (changeCount === 0) {
+                convergedIter = iter;
+                console.log(`Zhang-Suen converged after ${iter + 1} iteration(s) (${(iter + 1) * 2} passes)`);
+                break;
+            }
+        }
     }
     
-    // After 4 iterations with ping-pong: iter 0->buf4, iter 1->buf3, iter 2->buf4, iter 3->buf3
-    const finalSkeletonBuffer = binaryBuffer3;
+    if (convergedIter === -1) {
+        console.log(`Zhang-Suen completed maximum 20 iterations (40 passes) without full convergence`);
+    }
+    
+    // After iterations, result is in outputBuffer from the last iteration
+    // Iter 0: input=buf3, output=buf4
+    // Iter 1: input=buf4, output=buf3
+    const finalIterCount = convergedIter === -1 ? 19 : convergedIter;
+    const finalSkeletonBuffer = finalIterCount % 2 == 0 ? binaryBuffer4 : binaryBuffer3;
     
     // Convert binary stages to RGBA for visualization
     // Median stage (binaryBuffer2 preserved from Pass 1)

@@ -73,10 +73,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 `;
 
-// Step 2: Threshold value channel to binary (u32)
+// Step 2: Threshold value channel to packed binary format
+// Output: 1 = line (signal), 0 = background
 const thresholdShader = `
 @group(0) @binding(0) var<storage, read> value_in: array<f32>;
-@group(0) @binding(1) var<storage, read_write> value_out: array<u32>;
+@group(0) @binding(1) var<storage, read_write> value_out: array<atomic<u32>>;
 @group(0) @binding(2) var<uniform> params: Params;
 
 struct Params {
@@ -98,8 +99,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let pixel_idx = y * params.width + x;
     let value = value_in[pixel_idx];
     
-    // Binary threshold: 1 = background (white), 0 = line (black)
-    value_out[pixel_idx] = u32(value >= params.threshold);
+    // Binary threshold: 1 = line (dark), 0 = background (light)
+    // Inverted from original: value < threshold means it's dark (a line)
+    if (value < params.threshold) {
+        let word_idx = pixel_idx / 32u;
+        let bit_idx = pixel_idx % 32u;
+        atomicOr(&value_out[word_idx], 1u << bit_idx);
+    }
 }
 `;
 
@@ -165,6 +171,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 `;
 
 // Step 4: Recombine channels into RGB
+// Value input is packed binary: 1 = line, 0 = background
 const recombineShader = `
 @group(0) @binding(0) var<storage, read> value_in: array<u32>;
 @group(0) @binding(1) var<storage, read> saturation_in: array<f32>;
@@ -213,14 +220,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     let pixel_idx = y * params.width + x;
     
-    let value = value_in[pixel_idx]; // Binary: 0 = line, 1 = background
+    // Read packed binary value: 1 = line, 0 = background
+    let word_idx = pixel_idx / 32u;
+    let bit_idx = pixel_idx % 32u;
+    let value_bit = (value_in[word_idx] >> bit_idx) & 1u;
+    
     let saturation = saturation_in[pixel_idx]; // Cleaned saturation
     let hue = hue_in[pixel_idx]; // Cleaned hue
     
-    // For background pixels (value = 1), output white
-    // For line pixels (value = 0), reconstruct color from cleaned hue and saturation
+    // For background pixels (value_bit = 0), output white
+    // For line pixels (value_bit = 1), reconstruct color from cleaned hue and saturation
     var rgb: vec3<f32>;
-    if (value == 1u) {
+    if (value_bit == 0u) {
         // Background - output white
         rgb = vec3<f32>(1.0, 1.0, 1.0);
     } else {
@@ -293,9 +304,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     
     let pixel_idx = y * params.width + x;
-    let bit = input[pixel_idx];
+    let word_idx = pixel_idx / 32u;
+    let bit_idx = pixel_idx % 32u;
+    let bit = (input[word_idx] >> bit_idx) & 1u;
     
-    let gray = bit * 255u;  // 0=black, 1=white (255)
+    // 1 = line (black), 0 = background (white)
+    let gray = (1u - bit) * 255u;
     output[pixel_idx] = gray | (gray << 8u) | (gray << 16u) | (255u << 24u);
 }
 `;
@@ -383,6 +397,8 @@ export async function cleanupGPU(image: RGBAImage): Promise<CleanupResults> {
     const pixelCount = width * height;
     const byteSize = pixelCount * 4;
     const floatByteSize = pixelCount * 4; // f32 arrays
+    const binaryWordCount = Math.ceil(pixelCount / 32);  // Pack 32 pixels per u32
+    const binaryByteSize = binaryWordCount * 4;
     
     console.log(`Cleanup: ${width}x${height}, ${pixelCount} pixels, data.length=${data.length}, expected=${byteSize}`);
     
@@ -401,8 +417,8 @@ export async function cleanupGPU(image: RGBAImage): Promise<CleanupResults> {
     });
     
     const valueBuffer2 = device.createBuffer({
-        size: byteSize,  // u32 - binary format
-        usage: GPUBufferUsage.STORAGE,
+        size: binaryByteSize,  // Packed binary format
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     
     const saturationBuffer1 = device.createBuffer({
@@ -511,6 +527,9 @@ export async function cleanupGPU(image: RGBAImage): Promise<CleanupResults> {
         device.queue.submit([encoder.finish()]);
         await device.queue.onSubmittedWorkDone();
     }
+    
+    // Clear valueBuffer2 before threshold pass (atomic operations require starting at 0)
+    device.queue.writeBuffer(valueBuffer2, 0, new Uint32Array(binaryWordCount));
     
     // Pass 2: Threshold value channel
     {
