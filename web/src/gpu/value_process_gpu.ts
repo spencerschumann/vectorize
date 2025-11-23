@@ -69,37 +69,34 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let w = params.width;
     let h = params.height;
     
-    // Gather 3x3 neighborhood with cardinal directions weighted 2x
+    // Gather 3x3 neighborhood
     var sum = 0u;
     
-    // Corners (1x each) = 4 samples
+    // Corners = 4 samples
     sum += get_bit(&input, max(x, 1u) - 1u, max(y, 1u) - 1u, w, h);
     sum += get_bit(&input, min(x + 1u, w - 1u), max(y, 1u) - 1u, w, h);
     sum += get_bit(&input, max(x, 1u) - 1u, min(y + 1u, h - 1u), w, h);
     sum += get_bit(&input, min(x + 1u, w - 1u), min(y + 1u, h - 1u), w, h);
     
-    // Cardinals (2x each) = 8 samples
-    let north = get_bit(&input, x, max(y, 1u) - 1u, w, h);
-    let south = get_bit(&input, x, min(y + 1u, h - 1u), w, h);
-    let west = get_bit(&input, max(x, 1u) - 1u, y, w, h);
-    let east = get_bit(&input, min(x + 1u, w - 1u), y, w, h);
-    sum += north * 2u;
-    sum += south * 2u;
-    sum += west * 2u;
-    sum += east * 2u;
+    // Cardinals = 4 samples
+    sum += get_bit(&input, x, max(y, 1u) - 1u, w, h);
+    sum += get_bit(&input, x, min(y + 1u, h - 1u), w, h);
+    sum += get_bit(&input, max(x, 1u) - 1u, y, w, h);
+    sum += get_bit(&input, min(x + 1u, w - 1u), y, w, h);
     
-    // Center = 0 samples (not included in median calculation)
+    // Center = 1 sample
+    sum += get_bit(&input, x, y, w, h);
     
-    // Total: 12 samples, median is at position 6 (>= 6 means set to 1)
-    let median_bit = u32(sum >= 6u);
+    // If sum < 9, output 0; else output 1
+    
     
     let pixel_idx = y * w + x;
     output[pixel_idx] = median_bit;
 }
 `;
 
-// Step 3: Zhang-Suen skeletonization (one iteration)
-// This is a thinning algorithm that preserves connectivity
+// Step 3: Connectivity-preserving thinning
+// Only removes pixels that are proven to be redundant for connectivity
 const skeletonizeShader = `
 @group(0) @binding(0) var<storage, read> input: array<u32>;
 @group(0) @binding(1) var<storage, read_write> output: array<u32>;
@@ -120,6 +117,24 @@ fn get_bit(data: ptr<storage, array<u32>, read>, x: i32, y: i32, w: u32, h: u32)
     return (*data)[pixel_idx];
 }
 
+fn is_line(val: u32) -> bool {
+    return val == 0u;
+}
+
+// Count the number of connected components in the 8-neighborhood
+// This helps us determine if removing the center pixel would break connectivity
+fn count_connectivity(nw: u32, n: u32, ne: u32, w_: u32, e: u32, sw: u32, s: u32, se: u32) -> u32 {
+    // Count transitions from background to line in circular order
+    var transitions = 0u;
+    let seq = array<u32, 8>(n, ne, e, se, s, sw, w_, nw);
+    for (var i = 0u; i < 8u; i++) {
+        if (seq[i] == 1u && seq[(i + 1u) % 8u] == 0u) {
+            transitions += 1u;
+        }
+    }
+    return transitions;
+}
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = i32(global_id.x);
@@ -137,62 +152,86 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     // Only process line pixels
     if (center == 1u) {
-        // Keep background as-is
         let pixel_idx = u32(y) * w + u32(x);
         output[pixel_idx] = 1u;
         return;
     }
     
-    // Get 8-neighborhood (using standard labeling)
-    // P9 P2 P3
-    // P8 P1 P4
-    // P7 P6 P5
-    let p2 = get_bit(&input, x,     y - 1, w, h);
-    let p3 = get_bit(&input, x + 1, y - 1, w, h);
-    let p4 = get_bit(&input, x + 1, y,     w, h);
-    let p5 = get_bit(&input, x + 1, y + 1, w, h);
-    let p6 = get_bit(&input, x,     y + 1, w, h);
-    let p7 = get_bit(&input, x - 1, y + 1, w, h);
-    let p8 = get_bit(&input, x - 1, y,     w, h);
-    let p9 = get_bit(&input, x - 1, y - 1, w, h);
+    // Get 8-neighborhood
+    // NW  N  NE
+    // W   C  E
+    // SW  S  SE
+    let nw = get_bit(&input, x - 1, y - 1, w, h);
+    let n  = get_bit(&input, x,     y - 1, w, h);
+    let ne = get_bit(&input, x + 1, y - 1, w, h);
+    let w_ = get_bit(&input, x - 1, y,     w, h);
+    let e  = get_bit(&input, x + 1, y,     w, h);
+    let sw = get_bit(&input, x - 1, y + 1, w, h);
+    let s  = get_bit(&input, x,     y + 1, w, h);
+    let se = get_bit(&input, x + 1, y + 1, w, h);
     
-    // Count black neighbors (0 = line)
-    let black_neighbors = (1u - p2) + (1u - p3) + (1u - p4) + (1u - p5) + 
-                          (1u - p6) + (1u - p7) + (1u - p8) + (1u - p9);
+    // Count line neighbors
+    let line_n = u32(is_line(n));
+    let line_s = u32(is_line(s));
+    let line_e = u32(is_line(e));
+    let line_w = u32(is_line(w_));
+    let line_ne = u32(is_line(ne));
+    let line_nw = u32(is_line(nw));
+    let line_se = u32(is_line(se));
+    let line_sw = u32(is_line(sw));
     
-    // Count transitions from white to black (0->1 in circular order)
-    var transitions = 0u;
-    if (p2 == 1u && p3 == 0u) { transitions += 1u; }
-    if (p3 == 1u && p4 == 0u) { transitions += 1u; }
-    if (p4 == 1u && p5 == 0u) { transitions += 1u; }
-    if (p5 == 1u && p6 == 0u) { transitions += 1u; }
-    if (p6 == 1u && p7 == 0u) { transitions += 1u; }
-    if (p7 == 1u && p8 == 0u) { transitions += 1u; }
-    if (p8 == 1u && p9 == 0u) { transitions += 1u; }
-    if (p9 == 1u && p2 == 0u) { transitions += 1u; }
+    let total_neighbors = line_n + line_s + line_e + line_w + line_ne + line_nw + line_se + line_sw;
     
-    // Zhang-Suen conditions
+    // NEVER remove endpoints (1 neighbor) or isolated pixels (0 neighbors)
+    if (total_neighbors <= 1u) {
+        output[u32(y) * w + u32(x)] = 0u;
+        return;
+    }
+    
+    // Count connectivity: number of separate line components in neighborhood
+    let connectivity = count_connectivity(nw, n, ne, w_, e, sw, s, se);
+    
+    // NEVER remove if connectivity != 1 (we're a junction or critical connection point)
+    if (connectivity != 1u) {
+        output[u32(y) * w + u32(x)] = 0u;
+        return;
+    }
+    
+    // At this point: we have 2+ neighbors and exactly 1 connected component
+    // We're part of a simple curve - can potentially be removed
+    
     var should_delete = false;
     
-    // Common conditions for both iterations
-    if (black_neighbors >= 2u && black_neighbors <= 6u && transitions == 1u) {
-        if (params.iteration == 0u) {
-            // Iteration 1: Check P2 * P4 * P6 = 0 and P4 * P6 * P8 = 0
-            if ((p2 * p4 * p6) == 0u && (p4 * p6 * p8) == 0u) {
+    // Two-pass thinning to remove redundant pixels while preserving structure
+    if (params.iteration == 0u) {
+        // Pass 0: Remove north and east boundary pixels
+        
+        // Condition 1: Has 2-6 neighbors (not endpoint, not too complex)
+        if (total_neighbors >= 2u && total_neighbors <= 6u) {
+            // Condition 2: At least one of {N, E, S} is background OR at least one of {E, S, W} is background
+            let cond_a = (n == 1u || e == 1u || s == 1u);
+            let cond_b = (e == 1u || s == 1u || w_ == 1u);
+            
+            if (cond_a && cond_b) {
                 should_delete = true;
             }
-        } else {
-            // Iteration 2: Check P2 * P4 * P8 = 0 and P2 * P6 * P8 = 0
-            if ((p2 * p4 * p8) == 0u && (p2 * p6 * p8) == 0u) {
+        }
+    } else {
+        // Pass 1: Remove south and west boundary pixels
+        
+        if (total_neighbors >= 2u && total_neighbors <= 6u) {
+            // At least one of {N, E, W} is background OR at least one of {N, S, W} is background
+            let cond_a = (n == 1u || e == 1u || w_ == 1u);
+            let cond_b = (n == 1u || s == 1u || w_ == 1u);
+            
+            if (cond_a && cond_b) {
                 should_delete = true;
             }
         }
     }
     
-    let output_bit = select(0u, 1u, should_delete); // Delete = set to white (1)
-    
-    let pixel_idx = u32(y) * w + u32(x);
-    output[pixel_idx] = output_bit;
+    let output_bit = select(0u, 1u, should_delete);
+    output[u32(y) * w + u32(x)] = output_bit;
 }
 `;
 
@@ -350,7 +389,8 @@ export async function processValueChannel(
         await device.queue.onSubmittedWorkDone();
     }
     
-    for (let iter = 0; iter < 4; iter++) {
+    // Run 8 iterations (more aggressive thinning for thick lines)
+    for (let iter = 0; iter < 8; iter++) {
         const inputBuffer = (iter % 2 == 0) ? binaryBuffer3 : binaryBuffer4;
         const outputBuffer = (iter % 2 == 0) ? binaryBuffer4 : binaryBuffer3;
         
