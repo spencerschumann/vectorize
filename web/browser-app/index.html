@@ -1009,8 +1009,8 @@
 
         .palette-display {
             display: flex;
-            flex-wrap: wrap;
-            gap: 0.5rem;
+            flex-direction: column;
+            gap: 0;
             padding: 0.5rem 0;
         }
 
@@ -1382,9 +1382,6 @@
             <div class="nav-step" id="navStepConfigure" data-step="configure">
                 <span class="step-number">3</span>
                 <span class="step-label">Configure</span>
-                <div class="nav-palette-preview" id="navPalettePreview">
-                    <!-- Mini swatches will appear here -->
-                </div>
             </div>
         </div>
         <button id="toggleToolbarBtn" class="toggle-toolbar-btn" title="Toggle sidebar">☰</button>
@@ -1453,8 +1450,16 @@
 
                 <div class="toolbar-section palette-section">
                     <div class="toolbar-section-title">Palette</div>
-                    <button id="addPaletteColorBtn" class="icon-btn" title="Add color">+</button>
-                    <button id="resetPaletteBtn" class="icon-btn" title="Reset to default palette">↻</button>
+                    <div style="display: flex; gap: 0.25rem; margin-bottom: 0.5rem;">
+                        <input type="text" id="paletteName" placeholder="Palette name" style="flex: 1; padding: 0.25rem 0.5rem; background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 4px; color: #fff; font-size: 0.85rem;" />
+                        <button id="savePaletteBtn" class="icon-btn" title="Save palette">💾</button>
+                        <button id="loadPaletteBtn" class="icon-btn" title="Load palette">📂</button>
+                    </div>
+                    <div style="display: flex; gap: 0.25rem; margin-bottom: 0.5rem;">
+                        <button id="addPaletteColorBtn" class="icon-btn" title="Add color">+</button>
+                        <button id="resetPaletteBtn" class="icon-btn" title="Reset to default palette">↻</button>
+                        <button id="setDefaultPaletteBtn" class="icon-btn" title="Set as default palette">⭐</button>
+                    </div>
                     
                     <!-- Compact palette display -->
                     <div class="palette-display" id="paletteDisplay">

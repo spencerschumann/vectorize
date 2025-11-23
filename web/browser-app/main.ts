@@ -98,6 +98,10 @@ const userPalette: PaletteColor[] = Array.from(DEFAULT_PALETTE).map(color => ({
   mapToBg: false,
 }));
 
+// Palette storage variables
+let currentPaletteName = "";
+let defaultPaletteName = "";
+
 // Canvas/Viewport State
 let zoom = 1.0;
 let panX = 0;
@@ -154,16 +158,19 @@ const resultsContainer = document.getElementById("resultsContainer") as HTMLDivE
 const navStepFile = document.getElementById("navStepFile") as HTMLDivElement;
 const navStepPage = document.getElementById("navStepPage") as HTMLDivElement;
 const navStepConfigure = document.getElementById("navStepConfigure") as HTMLDivElement;
-const navPalettePreview = document.getElementById("navPalettePreview") as HTMLDivElement;
 const toggleToolbarBtn = document.getElementById("toggleToolbarBtn") as HTMLButtonElement;
 const cropSidebar = document.getElementById("cropSidebar") as HTMLDivElement;
 const processSidebar = document.getElementById("processSidebar") as HTMLDivElement;
 
 // Palette editor elements (removed const paletteList - now defined in renderPaletteUI)
+const paletteName = document.getElementById("paletteName") as HTMLInputElement;
 const addPaletteColorBtn = document.getElementById("addPaletteColorBtn") as HTMLButtonElement;
 const resetPaletteBtn = document.getElementById("resetPaletteBtn") as HTMLButtonElement;
+const savePaletteBtn = document.getElementById("savePaletteBtn") as HTMLButtonElement;
+const loadPaletteBtn = document.getElementById("loadPaletteBtn") as HTMLButtonElement;
+const setDefaultPaletteBtn = document.getElementById("setDefaultPaletteBtn") as HTMLButtonElement;
 
-console.log("Palette buttons:", { addPaletteColorBtn, resetPaletteBtn });
+console.log("Palette buttons:", { addPaletteColorBtn, resetPaletteBtn, savePaletteBtn, loadPaletteBtn, setDefaultPaletteBtn });
 
 const processingScreen = document.getElementById("processingScreen") as HTMLDivElement;
 const processCanvasContainer = document.getElementById("processCanvasContainer") as HTMLDivElement;
@@ -601,6 +608,125 @@ function showStatus(message: string, isError = false) {
   }
   console.log(message);
 }
+
+// Palette Storage Functions (IndexedDB)
+async function initPaletteDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("VectorizerPalettes", 1);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      if (!db.objectStoreNames.contains("palettes")) {
+        db.createObjectStore("palettes", { keyPath: "name" });
+      }
+      if (!db.objectStoreNames.contains("settings")) {
+        db.createObjectStore("settings", { keyPath: "key" });
+      }
+    };
+  });
+}
+
+async function savePalette(name: string) {
+  if (!name.trim()) {
+    showStatus("Please enter a palette name", true);
+    return;
+  }
+  
+  const db = await initPaletteDB();
+  const transaction = db.transaction(["palettes"], "readwrite");
+  const store = transaction.objectStore("palettes");
+  
+  const paletteData = {
+    name: name.trim(),
+    colors: userPalette.map(c => ({ ...c })),
+    timestamp: Date.now()
+  };
+  
+  await store.put(paletteData);
+  currentPaletteName = name.trim();
+  showStatus(`Palette "${name}" saved`);
+}
+
+async function loadPalette(name?: string) {
+  const db = await initPaletteDB();
+  
+  if (!name) {
+    // Show palette picker
+    const transaction = db.transaction(["palettes"], "readonly");
+    const store = transaction.objectStore("palettes");
+    const request = store.getAllKeys();
+    
+    request.onsuccess = () => {
+      const names = request.result as string[];
+      if (names.length === 0) {
+        showStatus("No saved palettes found", true);
+        return;
+      }
+      
+      const selected = prompt(`Select palette:\n${names.join("\n")}`);
+      if (selected && names.includes(selected)) {
+        loadPalette(selected);
+      }
+    };
+    return;
+  }
+  
+  const transaction = db.transaction(["palettes"], "readonly");
+  const store = transaction.objectStore("palettes");
+  const request = store.get(name);
+  
+  request.onsuccess = () => {
+    const data = request.result;
+    if (data) {
+      userPalette.length = 0;
+      data.colors.forEach((c: PaletteColor) => userPalette.push({ ...c }));
+      currentPaletteName = name;
+      renderPaletteUI();
+      showStatus(`Palette "${name}" loaded`);
+      
+      // Update palette name input
+      const paletteNameInput = document.getElementById("paletteName") as HTMLInputElement;
+      if (paletteNameInput) paletteNameInput.value = name;
+    } else {
+      showStatus(`Palette "${name}" not found`, true);
+    }
+  };
+}
+
+async function setDefaultPalette() {
+  if (!currentPaletteName) {
+    showStatus("Please save the palette first", true);
+    return;
+  }
+  
+  const db = await initPaletteDB();
+  const transaction = db.transaction(["settings"], "readwrite");
+  const store = transaction.objectStore("settings");
+  
+  await store.put({ key: "defaultPalette", value: currentPaletteName });
+  defaultPaletteName = currentPaletteName;
+  showStatus(`"${currentPaletteName}" set as default palette`);
+}
+
+async function loadDefaultPalette() {
+  const db = await initPaletteDB();
+  const transaction = db.transaction(["settings"], "readonly");
+  const store = transaction.objectStore("settings");
+  const request = store.get("defaultPalette");
+  
+  request.onsuccess = () => {
+    const data = request.result;
+    if (data && data.value) {
+      defaultPaletteName = data.value;
+      loadPalette(data.value);
+    }
+  };
+}
+
+// Initialize default palette on load
+initPaletteDB().then(() => loadDefaultPalette());
+
 
 async function handleFileUpload(file: File) {
   try {
@@ -1330,8 +1456,37 @@ async function startProcessing() {
     
     showStatus("Palettizing...");
     const t3 = performance.now();
-    const customPalette = buildPaletteRGBA();
-    const palettized = await palettizeGPU(cleanupFinal, customPalette);
+    const inputPalette = buildPaletteRGBA(); // Input colors for matching
+    const palettized = await palettizeGPU(cleanupFinal, inputPalette);
+    
+    // Replace palette with output colors (after matching is done)
+    const outputPalette = new Uint8ClampedArray(16 * 4);
+    for (let i = 0; i < userPalette.length && i < 16; i++) {
+      const color = userPalette[i];
+      // Use output color, or background if marked for removal
+      const useColor = color.mapToBg ? userPalette[0].outputColor : color.outputColor;
+      const [r, g, b, a] = hexToRGBA(useColor);
+      outputPalette[i * 4] = r;
+      outputPalette[i * 4 + 1] = g;
+      outputPalette[i * 4 + 2] = b;
+      outputPalette[i * 4 + 3] = a;
+    }
+    for (let i = userPalette.length; i < 16; i++) {
+      const [r, g, b, a] = hexToRGBA(userPalette[0].outputColor);
+      outputPalette[i * 4] = r;
+      outputPalette[i * 4 + 1] = g;
+      outputPalette[i * 4 + 2] = b;
+      outputPalette[i * 4 + 3] = a;
+    }
+    
+    // Convert to Uint32Array for palette storage
+    const outputPaletteU32 = new Uint32Array(16);
+    const outputView = new DataView(outputPalette.buffer, outputPalette.byteOffset, outputPalette.byteLength);
+    for (let i = 0; i < 16; i++) {
+      outputPaletteU32[i] = outputView.getUint32(i * 4, true); // little-endian
+    }
+    palettized.palette = outputPaletteU32;
+    
     const t4 = performance.now();
     showStatus(`Palettize: ${(t4 - t3).toFixed(1)}ms`);
     processedImages.set("palettized", palettized);
@@ -1409,14 +1564,15 @@ function displayProcessingStage(stage: ProcessingStage) {
         ? (image.data[byteIndex] >> 4) & 0x0f
         : image.data[byteIndex] & 0x0f;
       
-      // Look up RGBA color in palette (stored as Uint8ClampedArray, 4 bytes per color)
-      const paletteOffset = colorIndex * 4;
+      // Look up RGBA color in palette (stored as Uint32Array - need to unpack)
       const pixelOffset = pixelIndex * 4;
+      const packedColor = image.palette[colorIndex];
       
-      rgbaData[pixelOffset] = image.palette[paletteOffset];       // R
-      rgbaData[pixelOffset + 1] = image.palette[paletteOffset + 1]; // G
-      rgbaData[pixelOffset + 2] = image.palette[paletteOffset + 2]; // B
-      rgbaData[pixelOffset + 3] = image.palette[paletteOffset + 3]; // A
+      // Unpack RGBA from 32-bit value (little-endian: ABGR)
+      rgbaData[pixelOffset] = packedColor & 0xff;           // R
+      rgbaData[pixelOffset + 1] = (packedColor >> 8) & 0xff;  // G
+      rgbaData[pixelOffset + 2] = (packedColor >> 16) & 0xff; // B
+      rgbaData[pixelOffset + 3] = (packedColor >> 24) & 0xff; // A
     }
   } else if (image.data instanceof Uint8Array && image.data.length === image.width * image.height) {
     // BinaryImage - convert 1-bit to RGBA (0=white, 1=black)
@@ -1689,69 +1845,50 @@ function renderPaletteUI() {
   
   userPalette.forEach((color, index) => {
     const item = document.createElement("div");
-    item.style.cssText = "display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem; border-bottom: 1px solid #3a3a3a; cursor: pointer; transition: background 0.2s;";
+    item.style.cssText = "display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem; border-bottom: 1px solid #3a3a3a; cursor: pointer; transition: background 0.2s;";
     item.onmouseover = () => item.style.background = "#333";
     item.onmouseout = () => item.style.background = "transparent";
     item.onclick = () => openColorEditor(index);
     
-    // Color visualization
-    const colorViz = document.createElement("div");
-    colorViz.style.cssText = "display: flex; align-items: center; gap: 4px;";
-    
+    // Input color swatch
     const inputSwatch = document.createElement("div");
-    inputSwatch.style.cssText = `width: 28px; height: 28px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.inputColor}; flex-shrink: 0;`;
-    colorViz.appendChild(inputSwatch);
+    inputSwatch.style.cssText = `width: 24px; height: 24px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.inputColor}; flex-shrink: 0;`;
+    item.appendChild(inputSwatch);
     
-    // Show arrow if colors differ or (Remove) if mapped to background
+    // Status indicator and output
     if (color.mapToBg) {
-      const removeLabel = document.createElement("span");
-      removeLabel.textContent = "(Remove)";
-      removeLabel.style.cssText = "color: #ef4444; font-size: 0.85rem; font-weight: 500; white-space: nowrap;";
-      colorViz.appendChild(removeLabel);
+      const statusIcon = document.createElement("span");
+      statusIcon.textContent = "✕";
+      statusIcon.style.cssText = "font-size: 0.9rem; color: #ef4444; flex-shrink: 0; width: 16px; text-align: center;";
+      statusIcon.title = "Remove";
+      item.appendChild(statusIcon);
     } else if (color.inputColor.toLowerCase() !== color.outputColor.toLowerCase()) {
       const arrow = document.createElement("span");
       arrow.textContent = "→";
-      arrow.style.cssText = "color: #999; font-size: 1rem; flex-shrink: 0;";
-      colorViz.appendChild(arrow);
+      arrow.style.cssText = "font-size: 0.9rem; color: #999; flex-shrink: 0;";
+      item.appendChild(arrow);
       
       const outputSwatch = document.createElement("div");
-      outputSwatch.style.cssText = `width: 28px; height: 28px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.outputColor}; flex-shrink: 0;`;
-      colorViz.appendChild(outputSwatch);
+      outputSwatch.style.cssText = `width: 24px; height: 24px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.outputColor}; flex-shrink: 0;`;
+      item.appendChild(outputSwatch);
     }
     
-    item.appendChild(colorViz);
-    
-    // Hex value(s)
+    // Hex value
     const hexLabel = document.createElement("div");
     hexLabel.style.cssText = "font-family: 'Courier New', monospace; font-size: 0.8rem; color: #aaa; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;";
-    if (color.mapToBg) {
-      hexLabel.textContent = color.inputColor.toUpperCase();
-    } else if (color.inputColor.toLowerCase() !== color.outputColor.toLowerCase()) {
-      hexLabel.textContent = `${color.inputColor.toUpperCase()} → ${color.outputColor.toUpperCase()}`;
-    } else {
-      hexLabel.textContent = color.inputColor.toUpperCase();
-    }
-    hexLabel.title = hexLabel.textContent; // Tooltip for long values
+    hexLabel.textContent = color.inputColor.toUpperCase();
+    hexLabel.title = color.inputColor.toUpperCase();
     item.appendChild(hexLabel);
     
     // Index indicator
     if (index === 0) {
       const bgLabel = document.createElement("span");
       bgLabel.textContent = "BG";
-      bgLabel.style.cssText = "font-size: 0.75rem; color: #4f46e5; font-weight: 600; flex-shrink: 0;";
+      bgLabel.style.cssText = "font-size: 0.7rem; color: #4f46e5; font-weight: 600; flex-shrink: 0; padding: 0.1rem 0.3rem; background: rgba(79, 70, 229, 0.2); border-radius: 3px;";
       item.appendChild(bgLabel);
     }
     
     paletteDisplay.appendChild(item);
-  });
-  
-  // Render mini swatches in navigation bar
-  navPalettePreview.innerHTML = "";
-  userPalette.slice(0, 8).forEach((color) => {
-    const miniSwatch = document.createElement("div");
-    miniSwatch.className = "mini-swatch";
-    miniSwatch.style.backgroundColor = color.outputColor;
-    navPalettePreview.appendChild(miniSwatch);
   });
 }
 
@@ -2047,8 +2184,9 @@ function buildPaletteRGBA(): Uint8ClampedArray {
   
   for (let i = 0; i < userPalette.length && i < 16; i++) {
     const color = userPalette[i];
-    const useColor = color.mapToBg ? userPalette[0].outputColor : color.inputColor;
-    const [r, g, b, a] = hexToRGBA(useColor);
+    // Use INPUT color for matching - GPU will find nearest input color
+    // The palette stored with the result contains OUTPUT colors for display
+    const [r, g, b, a] = hexToRGBA(color.inputColor);
     
     palette[i * 4] = r;
     palette[i * 4 + 1] = g;
@@ -2058,7 +2196,7 @@ function buildPaletteRGBA(): Uint8ClampedArray {
   
   // Fill remaining slots with background color
   for (let i = userPalette.length; i < 16; i++) {
-    const [r, g, b, a] = hexToRGBA(userPalette[0].outputColor);
+    const [r, g, b, a] = hexToRGBA(userPalette[0].inputColor);
     palette[i * 4] = r;
     palette[i * 4 + 1] = g;
     palette[i * 4 + 2] = b;
@@ -2086,6 +2224,25 @@ if (resetPaletteBtn) {
   });
 } else {
   console.error("resetPaletteBtn not found!");
+}
+
+if (savePaletteBtn) {
+  savePaletteBtn.addEventListener("click", () => {
+    const name = paletteName.value;
+    savePalette(name);
+  });
+}
+
+if (loadPaletteBtn) {
+  loadPaletteBtn.addEventListener("click", () => {
+    loadPalette();
+  });
+}
+
+if (setDefaultPaletteBtn) {
+  setDefaultPaletteBtn.addEventListener("click", () => {
+    setDefaultPalette();
+  });
 }
 
 // Canvas click handler for eyedropper

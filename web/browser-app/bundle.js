@@ -1864,6 +1864,8 @@ var userPalette = Array.from(DEFAULT_PALETTE).map((color) => ({
   outputColor: u32ToHex(color),
   mapToBg: false
 }));
+var currentPaletteName = "";
+var defaultPaletteName = "";
 var zoom = 1;
 var panX = 0;
 var panY = 0;
@@ -1909,13 +1911,16 @@ var resultsContainer = document.getElementById("resultsContainer");
 var navStepFile = document.getElementById("navStepFile");
 var navStepPage = document.getElementById("navStepPage");
 var navStepConfigure = document.getElementById("navStepConfigure");
-var navPalettePreview = document.getElementById("navPalettePreview");
 var toggleToolbarBtn = document.getElementById("toggleToolbarBtn");
 var cropSidebar = document.getElementById("cropSidebar");
 var processSidebar = document.getElementById("processSidebar");
+var paletteName = document.getElementById("paletteName");
 var addPaletteColorBtn = document.getElementById("addPaletteColorBtn");
 var resetPaletteBtn = document.getElementById("resetPaletteBtn");
-console.log("Palette buttons:", { addPaletteColorBtn, resetPaletteBtn });
+var savePaletteBtn = document.getElementById("savePaletteBtn");
+var loadPaletteBtn = document.getElementById("loadPaletteBtn");
+var setDefaultPaletteBtn = document.getElementById("setDefaultPaletteBtn");
+console.log("Palette buttons:", { addPaletteColorBtn, resetPaletteBtn, savePaletteBtn, loadPaletteBtn, setDefaultPaletteBtn });
 var processingScreen = document.getElementById("processingScreen");
 var processCanvasContainer = document.getElementById("processCanvasContainer");
 var processCanvas = document.getElementById("processCanvas");
@@ -2262,6 +2267,103 @@ function showStatus(message, isError = false) {
   }
   console.log(message);
 }
+async function initPaletteDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("VectorizerPalettes", 1);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = (event) => {
+      const db2 = event.target.result;
+      if (!db2.objectStoreNames.contains("palettes")) {
+        db2.createObjectStore("palettes", { keyPath: "name" });
+      }
+      if (!db2.objectStoreNames.contains("settings")) {
+        db2.createObjectStore("settings", { keyPath: "key" });
+      }
+    };
+  });
+}
+async function savePalette(name) {
+  if (!name.trim()) {
+    showStatus("Please enter a palette name", true);
+    return;
+  }
+  const db2 = await initPaletteDB();
+  const transaction = db2.transaction(["palettes"], "readwrite");
+  const store = transaction.objectStore("palettes");
+  const paletteData = {
+    name: name.trim(),
+    colors: userPalette.map((c) => ({ ...c })),
+    timestamp: Date.now()
+  };
+  await store.put(paletteData);
+  currentPaletteName = name.trim();
+  showStatus(`Palette "${name}" saved`);
+}
+async function loadPalette(name) {
+  const db2 = await initPaletteDB();
+  if (!name) {
+    const transaction2 = db2.transaction(["palettes"], "readonly");
+    const store2 = transaction2.objectStore("palettes");
+    const request2 = store2.getAllKeys();
+    request2.onsuccess = () => {
+      const names = request2.result;
+      if (names.length === 0) {
+        showStatus("No saved palettes found", true);
+        return;
+      }
+      const selected = prompt(`Select palette:
+${names.join("\n")}`);
+      if (selected && names.includes(selected)) {
+        loadPalette(selected);
+      }
+    };
+    return;
+  }
+  const transaction = db2.transaction(["palettes"], "readonly");
+  const store = transaction.objectStore("palettes");
+  const request = store.get(name);
+  request.onsuccess = () => {
+    const data = request.result;
+    if (data) {
+      userPalette.length = 0;
+      data.colors.forEach((c) => userPalette.push({ ...c }));
+      currentPaletteName = name;
+      renderPaletteUI();
+      showStatus(`Palette "${name}" loaded`);
+      const paletteNameInput = document.getElementById("paletteName");
+      if (paletteNameInput) paletteNameInput.value = name;
+    } else {
+      showStatus(`Palette "${name}" not found`, true);
+    }
+  };
+}
+async function setDefaultPalette() {
+  if (!currentPaletteName) {
+    showStatus("Please save the palette first", true);
+    return;
+  }
+  const db2 = await initPaletteDB();
+  const transaction = db2.transaction(["settings"], "readwrite");
+  const store = transaction.objectStore("settings");
+  await store.put({ key: "defaultPalette", value: currentPaletteName });
+  defaultPaletteName = currentPaletteName;
+  showStatus(`"${currentPaletteName}" set as default palette`);
+}
+async function loadDefaultPalette() {
+  const db2 = await initPaletteDB();
+  const transaction = db2.transaction(["settings"], "readonly");
+  const store = transaction.objectStore("settings");
+  const request = store.get("defaultPalette");
+  request.onsuccess = () => {
+    const data = request.result;
+    if (data && data.value) {
+      defaultPaletteName = data.value;
+      loadPalette(data.value);
+    }
+  };
+}
+initPaletteDB().then(() => loadDefaultPalette());
 async function handleFileUpload(file) {
   try {
     currentFile = file;
@@ -2831,8 +2933,31 @@ async function startProcessing() {
     valueResults.skeletonBuffer.destroy();
     showStatus("Palettizing...");
     const t3 = performance.now();
-    const customPalette = buildPaletteRGBA();
-    const palettized = await palettizeGPU(cleanupFinal, customPalette);
+    const inputPalette = buildPaletteRGBA();
+    const palettized = await palettizeGPU(cleanupFinal, inputPalette);
+    const outputPalette = new Uint8ClampedArray(16 * 4);
+    for (let i = 0; i < userPalette.length && i < 16; i++) {
+      const color = userPalette[i];
+      const useColor = color.mapToBg ? userPalette[0].outputColor : color.outputColor;
+      const [r, g, b, a] = hexToRGBA(useColor);
+      outputPalette[i * 4] = r;
+      outputPalette[i * 4 + 1] = g;
+      outputPalette[i * 4 + 2] = b;
+      outputPalette[i * 4 + 3] = a;
+    }
+    for (let i = userPalette.length; i < 16; i++) {
+      const [r, g, b, a] = hexToRGBA(userPalette[0].outputColor);
+      outputPalette[i * 4] = r;
+      outputPalette[i * 4 + 1] = g;
+      outputPalette[i * 4 + 2] = b;
+      outputPalette[i * 4 + 3] = a;
+    }
+    const outputPaletteU32 = new Uint32Array(16);
+    const outputView = new DataView(outputPalette.buffer, outputPalette.byteOffset, outputPalette.byteLength);
+    for (let i = 0; i < 16; i++) {
+      outputPaletteU32[i] = outputView.getUint32(i * 4, true);
+    }
+    palettized.palette = outputPaletteU32;
     const t4 = performance.now();
     showStatus(`Palettize: ${(t4 - t3).toFixed(1)}ms`);
     processedImages.set("palettized", palettized);
@@ -2891,12 +3016,12 @@ function displayProcessingStage(stage) {
       const byteIndex = Math.floor(pixelIndex / 2);
       const isHighNibble = pixelIndex % 2 === 0;
       const colorIndex = isHighNibble ? image.data[byteIndex] >> 4 & 15 : image.data[byteIndex] & 15;
-      const paletteOffset = colorIndex * 4;
       const pixelOffset = pixelIndex * 4;
-      rgbaData[pixelOffset] = image.palette[paletteOffset];
-      rgbaData[pixelOffset + 1] = image.palette[paletteOffset + 1];
-      rgbaData[pixelOffset + 2] = image.palette[paletteOffset + 2];
-      rgbaData[pixelOffset + 3] = image.palette[paletteOffset + 3];
+      const packedColor = image.palette[colorIndex];
+      rgbaData[pixelOffset] = packedColor & 255;
+      rgbaData[pixelOffset + 1] = packedColor >> 8 & 255;
+      rgbaData[pixelOffset + 2] = packedColor >> 16 & 255;
+      rgbaData[pixelOffset + 3] = packedColor >> 24 & 255;
     }
   } else if (image.data instanceof Uint8Array && image.data.length === image.width * image.height) {
     rgbaData = new Uint8ClampedArray(image.width * image.height * 4);
@@ -3089,55 +3214,40 @@ function renderPaletteUI() {
   paletteDisplay.innerHTML = "";
   userPalette.forEach((color, index) => {
     const item = document.createElement("div");
-    item.style.cssText = "display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem; border-bottom: 1px solid #3a3a3a; cursor: pointer; transition: background 0.2s;";
+    item.style.cssText = "display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem; border-bottom: 1px solid #3a3a3a; cursor: pointer; transition: background 0.2s;";
     item.onmouseover = () => item.style.background = "#333";
     item.onmouseout = () => item.style.background = "transparent";
     item.onclick = () => openColorEditor(index);
-    const colorViz = document.createElement("div");
-    colorViz.style.cssText = "display: flex; align-items: center; gap: 4px;";
     const inputSwatch = document.createElement("div");
-    inputSwatch.style.cssText = `width: 28px; height: 28px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.inputColor}; flex-shrink: 0;`;
-    colorViz.appendChild(inputSwatch);
+    inputSwatch.style.cssText = `width: 24px; height: 24px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.inputColor}; flex-shrink: 0;`;
+    item.appendChild(inputSwatch);
     if (color.mapToBg) {
-      const removeLabel = document.createElement("span");
-      removeLabel.textContent = "(Remove)";
-      removeLabel.style.cssText = "color: #ef4444; font-size: 0.85rem; font-weight: 500; white-space: nowrap;";
-      colorViz.appendChild(removeLabel);
+      const statusIcon = document.createElement("span");
+      statusIcon.textContent = "\u2715";
+      statusIcon.style.cssText = "font-size: 0.9rem; color: #ef4444; flex-shrink: 0; width: 16px; text-align: center;";
+      statusIcon.title = "Remove";
+      item.appendChild(statusIcon);
     } else if (color.inputColor.toLowerCase() !== color.outputColor.toLowerCase()) {
       const arrow = document.createElement("span");
       arrow.textContent = "\u2192";
-      arrow.style.cssText = "color: #999; font-size: 1rem; flex-shrink: 0;";
-      colorViz.appendChild(arrow);
+      arrow.style.cssText = "font-size: 0.9rem; color: #999; flex-shrink: 0;";
+      item.appendChild(arrow);
       const outputSwatch = document.createElement("div");
-      outputSwatch.style.cssText = `width: 28px; height: 28px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.outputColor}; flex-shrink: 0;`;
-      colorViz.appendChild(outputSwatch);
+      outputSwatch.style.cssText = `width: 24px; height: 24px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.outputColor}; flex-shrink: 0;`;
+      item.appendChild(outputSwatch);
     }
-    item.appendChild(colorViz);
     const hexLabel = document.createElement("div");
     hexLabel.style.cssText = "font-family: 'Courier New', monospace; font-size: 0.8rem; color: #aaa; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;";
-    if (color.mapToBg) {
-      hexLabel.textContent = color.inputColor.toUpperCase();
-    } else if (color.inputColor.toLowerCase() !== color.outputColor.toLowerCase()) {
-      hexLabel.textContent = `${color.inputColor.toUpperCase()} \u2192 ${color.outputColor.toUpperCase()}`;
-    } else {
-      hexLabel.textContent = color.inputColor.toUpperCase();
-    }
-    hexLabel.title = hexLabel.textContent;
+    hexLabel.textContent = color.inputColor.toUpperCase();
+    hexLabel.title = color.inputColor.toUpperCase();
     item.appendChild(hexLabel);
     if (index === 0) {
       const bgLabel = document.createElement("span");
       bgLabel.textContent = "BG";
-      bgLabel.style.cssText = "font-size: 0.75rem; color: #4f46e5; font-weight: 600; flex-shrink: 0;";
+      bgLabel.style.cssText = "font-size: 0.7rem; color: #4f46e5; font-weight: 600; flex-shrink: 0; padding: 0.1rem 0.3rem; background: rgba(79, 70, 229, 0.2); border-radius: 3px;";
       item.appendChild(bgLabel);
     }
     paletteDisplay.appendChild(item);
-  });
-  navPalettePreview.innerHTML = "";
-  userPalette.slice(0, 8).forEach((color) => {
-    const miniSwatch = document.createElement("div");
-    miniSwatch.className = "mini-swatch";
-    miniSwatch.style.backgroundColor = color.outputColor;
-    navPalettePreview.appendChild(miniSwatch);
   });
 }
 var colorEditorIndex = null;
@@ -3376,15 +3486,14 @@ function buildPaletteRGBA() {
   const palette = new Uint8ClampedArray(16 * 4);
   for (let i = 0; i < userPalette.length && i < 16; i++) {
     const color = userPalette[i];
-    const useColor = color.mapToBg ? userPalette[0].outputColor : color.inputColor;
-    const [r, g, b, a] = hexToRGBA(useColor);
+    const [r, g, b, a] = hexToRGBA(color.inputColor);
     palette[i * 4] = r;
     palette[i * 4 + 1] = g;
     palette[i * 4 + 2] = b;
     palette[i * 4 + 3] = a;
   }
   for (let i = userPalette.length; i < 16; i++) {
-    const [r, g, b, a] = hexToRGBA(userPalette[0].outputColor);
+    const [r, g, b, a] = hexToRGBA(userPalette[0].inputColor);
     palette[i * 4] = r;
     palette[i * 4 + 1] = g;
     palette[i * 4 + 2] = b;
@@ -3408,6 +3517,22 @@ if (resetPaletteBtn) {
   });
 } else {
   console.error("resetPaletteBtn not found!");
+}
+if (savePaletteBtn) {
+  savePaletteBtn.addEventListener("click", () => {
+    const name = paletteName.value;
+    savePalette(name);
+  });
+}
+if (loadPaletteBtn) {
+  loadPaletteBtn.addEventListener("click", () => {
+    loadPalette();
+  });
+}
+if (setDefaultPaletteBtn) {
+  setDefaultPaletteBtn.addEventListener("click", () => {
+    setDefaultPalette();
+  });
 }
 mainCanvas.addEventListener("click", (e) => {
   if (eyedropperActive) {
