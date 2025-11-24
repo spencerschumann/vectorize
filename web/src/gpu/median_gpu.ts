@@ -19,29 +19,61 @@ struct Params {
 
 fn get_pixel(data: ptr<storage, array<u32>>, x: u32, y: u32, w: u32) -> u32 {
     let idx = y * w + x;
-    let packed = (*data)[idx / 2u];
-    
-    // Extract 4-bit value
-    if (idx % 2u == 0u) {
-        return (packed >> 4u) & 0xFu;
-    } else {
-        return packed & 0xFu;
-    }
+    return (*data)[idx] & 0xFu;
 }
 
-fn median9(values: array<u32, 9>) -> u32 {
-    // Simple bubble sort for 9 values
-    var sorted = values;
+fn mode_nonzero(values: array<u32, 9>, center: u32) -> u32 {
+    // Count occurrences of each color
+    var counts: array<u32, 16>;
+    for (var i = 0u; i < 16u; i++) {
+        counts[i] = 0u;
+    }
+    
     for (var i = 0u; i < 9u; i++) {
-        for (var j = 0u; j < 8u - i; j++) {
-            if (sorted[j] > sorted[j + 1u]) {
-                let tmp = sorted[j];
-                sorted[j] = sorted[j + 1u];
-                sorted[j + 1u] = tmp;
-            }
+        let val = values[i];
+        counts[val] = counts[val] + 1u;
+    }
+    
+    // Strategy: Only change center pixel if it's clearly an outlier
+    // Look at the 8 neighbors (excluding center)
+    var neighbor_counts: array<u32, 16>;
+    for (var i = 0u; i < 16u; i++) {
+        neighbor_counts[i] = 0u;
+    }
+    
+    // Count only the 8 neighbors (skip center at index 4)
+    for (var i = 0u; i < 9u; i++) {
+        if (i != 4u) {
+            let val = values[i];
+            neighbor_counts[val] = neighbor_counts[val] + 1u;
         }
     }
-    return sorted[4]; // Middle value
+    
+    // Find the most common neighbor color
+    var max_neighbor_count = 0u;
+    var dominant_neighbor = 0u;
+    for (var color = 0u; color < 16u; color++) {
+        if (neighbor_counts[color] > max_neighbor_count) {
+            max_neighbor_count = neighbor_counts[color];
+            dominant_neighbor = color;
+        }
+    }
+    
+    // Decision logic:
+    // 1. If center is different from all 8 neighbors, it's a single-pixel island - replace it
+    // 2. If 6+ neighbors agree on a color different from center, center is likely a cavity/barnacle - replace it
+    // 3. Otherwise, keep center as-is to preserve edges
+    
+    if (neighbor_counts[center] == 0u) {
+        // Center is completely isolated from all 8 neighbors - definitely noise
+        return dominant_neighbor;
+    } else if (max_neighbor_count >= 6u && dominant_neighbor != center) {
+        // Strong majority of neighbors agree on a different color - likely cavity or barnacle
+        return dominant_neighbor;
+    }
+    
+    // Keep center pixel - it's part of a legitimate feature
+    return center;
 }
 
 @compute @workgroup_size(8, 8)
@@ -71,11 +103,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     values[7] = get_pixel(&input, x,      y_next, params.width);
     values[8] = get_pixel(&input, x_next, y_next, params.width);
     
-    let median_val = median9(values);
+    let center = values[4];
+    let result = mode_nonzero(values, center);
     
     // Store result (unpacked, one u32 per pixel for now)
     let idx = y * params.width + x;
-    output[idx] = median_val;
+    output[idx] = result;
 }
 `;
 
@@ -177,6 +210,6 @@ export async function median3x3GPU(
         width,
         height,
         data: packed,
-        palette: new Uint8ClampedArray(palette),
+        palette: palette ? new Uint32Array(palette) : undefined,
     };
 }

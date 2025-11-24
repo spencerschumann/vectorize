@@ -1526,6 +1526,19 @@ async function startProcessing() {
     processedImages.set("palettized", palettized);
     displayProcessingStage("palettized");
     
+    // Apply median filter right after palettization (3 passes for aggressive cleaning)
+    showStatus("Applying median filter (pass 1/3)...");
+    const t4b = performance.now();
+    let median = await median3x3GPU(palettized);
+    showStatus("Applying median filter (pass 2/3)...");
+    median = await median3x3GPU(median);
+    showStatus("Applying median filter (pass 3/3)...");
+    median = await median3x3GPU(median);
+    const t4c = performance.now();
+    showStatus(`Median filter (3 passes): ${(t4c - t4b).toFixed(1)}ms`);
+    processedImages.set("median", median);
+    displayProcessingStage("median");
+    
     // Process each non-background, non-removed color separately
     showStatus("Processing individual colors...");
     const t5 = performance.now();
@@ -1535,8 +1548,8 @@ async function startProcessing() {
       
       showStatus(`Processing color ${i}...`);
       
-      // Extract this color as binary
-      const colorBinary = extractColorFromPalettized(palettized, i);
+      // Extract this color as binary from median-filtered image
+      const colorBinary = extractColorFromPalettized(median, i);
       processedImages.set(`color_${i}`, colorBinary);
       
       // Convert to GPU buffer and run skeletonization
@@ -1560,23 +1573,15 @@ async function startProcessing() {
     // Add dynamic stage buttons for each color
     addColorStageButtons();
     
-    showStatus("Applying median filter...");
-    const t7 = performance.now();
-    const median = await median3x3GPU(palettized);
-    const t8 = performance.now();
-    showStatus(`Median filter: ${(t8 - t7).toFixed(1)}ms`);
-    processedImages.set("median", median);
-    displayProcessingStage("median");
-    
     showStatus("Extracting black...");
-    const t9 = performance.now();
+    const t7 = performance.now();
     const binary = extractBlack(median);
-    const t10 = performance.now();
-    showStatus(`Extract black: ${(t10 - t9).toFixed(1)}ms`);
+    const t8 = performance.now();
+    showStatus(`Extract black: ${(t8 - t7).toFixed(1)}ms`);
     processedImages.set("binary", binary);
     displayProcessingStage("binary");
     
-    const totalTime = t10 - t1;
+    const totalTime = t8 - t1;
     showStatus(`✓ Pipeline complete! Total: ${totalTime.toFixed(1)}ms`);
   } catch (error) {
     showStatus(`Error: ${(error as Error).message}`, true);
