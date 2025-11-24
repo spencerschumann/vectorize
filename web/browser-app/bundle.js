@@ -1932,8 +1932,6 @@ var processFitToScreenBtn = document.getElementById("processFitToScreenBtn");
 var processStatusText = document.getElementById("processStatusText");
 var stageCroppedBtn = document.getElementById("stageCroppedBtn");
 var stageValueBtn = document.getElementById("stageValueBtn");
-var stageValueMedianBtn = document.getElementById("stageValueMedianBtn");
-var stageValueSkeletonBtn = document.getElementById("stageValueSkeletonBtn");
 var stageSaturationBtn = document.getElementById("stageSaturationBtn");
 var stageSaturationMedianBtn = document.getElementById("stageSaturationMedianBtn");
 var stageHueBtn = document.getElementById("stageHueBtn");
@@ -1942,10 +1940,9 @@ var stageCleanupBtn = document.getElementById("stageCleanupBtn");
 var stagePalettizedBtn = document.getElementById("stagePalettizedBtn");
 var stageMedianBtn = document.getElementById("stageMedianBtn");
 var stageBinaryBtn = document.getElementById("stageBinaryBtn");
+var colorStagesContainer = document.getElementById("colorStagesContainer");
 stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
 stageValueBtn.addEventListener("click", () => displayProcessingStage("value"));
-stageValueMedianBtn.addEventListener("click", () => displayProcessingStage("value_median"));
-stageValueSkeletonBtn.addEventListener("click", () => displayProcessingStage("value_skeleton"));
 stageSaturationBtn.addEventListener("click", () => displayProcessingStage("saturation"));
 stageSaturationMedianBtn.addEventListener("click", () => displayProcessingStage("saturation_median"));
 stageHueBtn.addEventListener("click", () => displayProcessingStage("hue"));
@@ -2880,6 +2877,38 @@ function drawCropOverlay() {
     cropCtx.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
   }
 }
+function extractColorFromPalettized(palettized, colorIndex) {
+  const { width, height, data } = palettized;
+  const numPixels = width * height;
+  const binaryData = new Uint8Array(numPixels);
+  for (let pixelIndex = 0; pixelIndex < numPixels; pixelIndex++) {
+    const byteIndex = Math.floor(pixelIndex / 2);
+    const isHighNibble = pixelIndex % 2 === 0;
+    const paletteIndex = isHighNibble ? data[byteIndex] >> 4 & 15 : data[byteIndex] & 15;
+    binaryData[pixelIndex] = paletteIndex === colorIndex ? 1 : 0;
+  }
+  return { width, height, data: binaryData };
+}
+async function binaryToGPUBuffer(binary) {
+  const { device } = await getGPUContext();
+  const { width, height, data } = binary;
+  const numPixels = width * height;
+  const numWords = Math.ceil(numPixels / 32);
+  const packed = new Uint32Array(numWords);
+  for (let i = 0; i < numPixels; i++) {
+    if (data[i]) {
+      const wordIdx = Math.floor(i / 32);
+      const bitIdx = i % 32;
+      packed[wordIdx] |= 1 << bitIdx;
+    }
+  }
+  const buffer = createGPUBuffer(
+    device,
+    packed,
+    GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+  );
+  return buffer;
+}
 async function startProcessing() {
   if (!currentImage) return;
   try {
@@ -2903,21 +2932,10 @@ async function startProcessing() {
     processedImages.set("saturation_median", cleanupResults.saturationMedian);
     processedImages.set("hue", cleanupResults.hue);
     processedImages.set("hue_median", cleanupResults.hueMedian);
-    showStatus("Processing value channel (median, skeleton)...");
-    const t2b = performance.now();
-    const valueResults = await processValueChannel(
-      cleanupResults.valueBuffer,
-      cleanupResults.width,
-      cleanupResults.height
-    );
-    const t2c = performance.now();
-    showStatus(`Value processing: ${(t2c - t2b).toFixed(1)}ms`);
-    processedImages.set("value_median", valueResults.median);
-    processedImages.set("value_skeleton", valueResults.skeleton);
-    showStatus("Recombining with skeletonized value...");
+    showStatus("Recombining channels...");
     const t2d = performance.now();
     const cleanupFinal = await recombineWithValue(
-      valueResults.skeletonBuffer,
+      cleanupResults.valueBuffer,
       cleanupResults.saturationBuffer,
       cleanupResults.hueBuffer,
       cleanupResults.width,
@@ -2930,7 +2948,6 @@ async function startProcessing() {
     cleanupResults.valueBuffer.destroy();
     cleanupResults.saturationBuffer.destroy();
     cleanupResults.hueBuffer.destroy();
-    valueResults.skeletonBuffer.destroy();
     showStatus("Palettizing...");
     const t3 = performance.now();
     const inputPalette = buildPaletteRGBA();
@@ -2962,25 +2979,68 @@ async function startProcessing() {
     showStatus(`Palettize: ${(t4 - t3).toFixed(1)}ms`);
     processedImages.set("palettized", palettized);
     displayProcessingStage("palettized");
-    showStatus("Applying median filter...");
+    showStatus("Processing individual colors...");
     const t5 = performance.now();
-    const median = await median3x3GPU(palettized);
+    for (let i = 1; i < userPalette.length && i < 16; i++) {
+      const color = userPalette[i];
+      if (color.mapToBg) continue;
+      showStatus(`Processing color ${i}...`);
+      const colorBinary = extractColorFromPalettized(palettized, i);
+      processedImages.set(`color_${i}`, colorBinary);
+      const colorBuffer = await binaryToGPUBuffer(colorBinary);
+      const skelResults = await processValueChannel(
+        colorBuffer,
+        colorBinary.width,
+        colorBinary.height
+      );
+      processedImages.set(`color_${i}_skel`, skelResults.skeleton);
+      colorBuffer.destroy();
+      skelResults.skeletonBuffer.destroy();
+    }
     const t6 = performance.now();
-    showStatus(`Median filter: ${(t6 - t5).toFixed(1)}ms`);
+    showStatus(`Per-color processing: ${(t6 - t5).toFixed(1)}ms`);
+    addColorStageButtons();
+    showStatus("Applying median filter...");
+    const t7 = performance.now();
+    const median = await median3x3GPU(palettized);
+    const t8 = performance.now();
+    showStatus(`Median filter: ${(t8 - t7).toFixed(1)}ms`);
     processedImages.set("median", median);
     displayProcessingStage("median");
     showStatus("Extracting black...");
-    const t7 = performance.now();
+    const t9 = performance.now();
     const binary = extractBlack(median);
-    const t8 = performance.now();
-    showStatus(`Extract black: ${(t8 - t7).toFixed(1)}ms`);
+    const t10 = performance.now();
+    showStatus(`Extract black: ${(t10 - t9).toFixed(1)}ms`);
     processedImages.set("binary", binary);
     displayProcessingStage("binary");
-    const totalTime = t8 - t1;
+    const totalTime = t10 - t1;
     showStatus(`\u2713 Pipeline complete! Total: ${totalTime.toFixed(1)}ms`);
   } catch (error) {
     showStatus(`Error: ${error.message}`, true);
     console.error(error);
+  }
+}
+function addColorStageButtons() {
+  colorStagesContainer.innerHTML = "";
+  for (let i = 1; i < userPalette.length && i < 16; i++) {
+    const color = userPalette[i];
+    if (color.mapToBg) continue;
+    if (!processedImages.has(`color_${i}`)) continue;
+    const colorBtn = document.createElement("button");
+    colorBtn.className = "stage-btn";
+    colorBtn.textContent = `Color ${i}`;
+    colorBtn.style.borderLeft = `4px solid ${color.outputColor}`;
+    colorBtn.addEventListener("click", () => displayProcessingStage(`color_${i}`));
+    colorStagesContainer.appendChild(colorBtn);
+    if (processedImages.has(`color_${i}_skel`)) {
+      const skelBtn = document.createElement("button");
+      skelBtn.className = "stage-btn";
+      skelBtn.textContent = `Color ${i} Skel`;
+      skelBtn.style.borderLeft = `4px solid ${color.outputColor}`;
+      skelBtn.addEventListener("click", () => displayProcessingStage(`color_${i}_skel`));
+      colorStagesContainer.appendChild(skelBtn);
+    }
   }
 }
 function displayProcessingStage(stage) {
@@ -2991,21 +3051,27 @@ function displayProcessingStage(stage) {
   }
   currentStage = stage;
   document.querySelectorAll(".stage-btn").forEach((btn) => btn.classList.remove("active"));
-  const stageButtons = {
-    cropped: stageCroppedBtn,
-    value: stageValueBtn,
-    saturation: stageSaturationBtn,
-    saturation_median: stageSaturationMedianBtn,
-    hue: stageHueBtn,
-    hue_median: stageHueMedianBtn,
-    cleanup: stageCleanupBtn,
-    value_median: document.getElementById("stageValueMedianBtn"),
-    value_skeleton: document.getElementById("stageValueSkeletonBtn"),
-    palettized: stagePalettizedBtn,
-    median: stageMedianBtn,
-    binary: stageBinaryBtn
-  };
-  stageButtons[stage]?.classList.add("active");
+  if (typeof stage === "string" && stage.startsWith("color_")) {
+    const btn = Array.from(document.querySelectorAll(".stage-btn")).find(
+      (b) => b.textContent?.toLowerCase().replace(" ", "_").includes(stage)
+    );
+    btn?.classList.add("active");
+  } else {
+    const stageButtons = {
+      cropped: stageCroppedBtn,
+      value: stageValueBtn,
+      saturation: stageSaturationBtn,
+      saturation_median: stageSaturationMedianBtn,
+      hue: stageHueBtn,
+      hue_median: stageHueMedianBtn,
+      cleanup: stageCleanupBtn,
+      palettized: stagePalettizedBtn,
+      median: stageMedianBtn,
+      binary: stageBinaryBtn
+    };
+    const baseStage = stage;
+    stageButtons[baseStage]?.classList.add("active");
+  }
   processCanvas.width = image.width;
   processCanvas.height = image.height;
   let rgbaData;

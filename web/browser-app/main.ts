@@ -7,6 +7,7 @@ import { processValueChannel, type ValueProcessResults } from "../src/gpu/value_
 import { palettizeGPU } from "../src/gpu/palettize_gpu.ts";
 import { median3x3GPU } from "../src/gpu/median_gpu.ts";
 import { extractBlack } from "../src/raster/threshold.ts";
+import { getGPUContext, createGPUBuffer, readGPUBuffer } from "../src/gpu/gpu_context.ts";
 import type { RGBAImage } from "../src/formats/rgba_image.ts";
 import type { PalettizedImage } from "../src/formats/palettized.ts";
 import type { BinaryImage } from "../src/formats/binary.ts";
@@ -52,7 +53,8 @@ let pdfPageCount = 0;
 let cancelThumbnailLoading = false;
 
 // Processing state
-type ProcessingStage = 
+// Base processing stages
+type BaseProcessingStage = 
   | "cropped" 
   | "value" 
   | "saturation" 
@@ -60,11 +62,13 @@ type ProcessingStage =
   | "hue" 
   | "hue_median" 
   | "cleanup" 
-  | "value_median"
-  | "value_skeleton"
   | "palettized" 
   | "median" 
   | "binary";
+
+// Dynamic stages: color_0, color_0_skel, color_1, color_1_skel, etc.
+type ProcessingStage = BaseProcessingStage | string;
+
 let currentStage: ProcessingStage = "cropped";
 const processedImages: Map<ProcessingStage, RGBAImage | PalettizedImage | BinaryImage> = new Map();
 
@@ -184,8 +188,6 @@ const processStatusText = document.getElementById("processStatusText") as HTMLDi
 
 const stageCroppedBtn = document.getElementById("stageCroppedBtn") as HTMLButtonElement;
 const stageValueBtn = document.getElementById("stageValueBtn") as HTMLButtonElement;
-const stageValueMedianBtn = document.getElementById("stageValueMedianBtn") as HTMLButtonElement;
-const stageValueSkeletonBtn = document.getElementById("stageValueSkeletonBtn") as HTMLButtonElement;
 const stageSaturationBtn = document.getElementById("stageSaturationBtn") as HTMLButtonElement;
 const stageSaturationMedianBtn = document.getElementById("stageSaturationMedianBtn") as HTMLButtonElement;
 const stageHueBtn = document.getElementById("stageHueBtn") as HTMLButtonElement;
@@ -194,12 +196,11 @@ const stageCleanupBtn = document.getElementById("stageCleanupBtn") as HTMLButton
 const stagePalettizedBtn = document.getElementById("stagePalettizedBtn") as HTMLButtonElement;
 const stageMedianBtn = document.getElementById("stageMedianBtn") as HTMLButtonElement;
 const stageBinaryBtn = document.getElementById("stageBinaryBtn") as HTMLButtonElement;
+const colorStagesContainer = document.getElementById("colorStagesContainer") as HTMLDivElement;
 
 // Processing screen event handlers
 stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
 stageValueBtn.addEventListener("click", () => displayProcessingStage("value"));
-stageValueMedianBtn.addEventListener("click", () => displayProcessingStage("value_median"));
-stageValueSkeletonBtn.addEventListener("click", () => displayProcessingStage("value_skeleton"));
 stageSaturationBtn.addEventListener("click", () => displayProcessingStage("saturation"));
 stageSaturationMedianBtn.addEventListener("click", () => displayProcessingStage("saturation_median"));
 stageHueBtn.addEventListener("click", () => displayProcessingStage("hue"));
@@ -1383,6 +1384,56 @@ function drawCropOverlay() {
   }
 }
 
+// Helper: Extract a single color from palettized image to binary format
+function extractColorFromPalettized(palettized: PalettizedImage, colorIndex: number): BinaryImage {
+  const { width, height, data } = palettized;
+  const numPixels = width * height;
+  const binaryData = new Uint8Array(numPixels);
+  
+  for (let pixelIndex = 0; pixelIndex < numPixels; pixelIndex++) {
+    const byteIndex = Math.floor(pixelIndex / 2);
+    const isHighNibble = pixelIndex % 2 === 0;
+    
+    // Extract 4-bit color index from nibble
+    const paletteIndex = isHighNibble 
+      ? (data[byteIndex] >> 4) & 0x0f
+      : data[byteIndex] & 0x0f;
+    
+    // Set to 1 if this pixel matches the color we're extracting
+    binaryData[pixelIndex] = paletteIndex === colorIndex ? 1 : 0;
+  }
+  
+  return { width, height, data: binaryData };
+}
+
+// Helper: Convert Binary image to GPU buffer for processing
+async function binaryToGPUBuffer(binary: BinaryImage): Promise<GPUBuffer> {
+  const { device } = await getGPUContext();
+  const { width, height, data } = binary;
+  const numPixels = width * height;
+  
+  // Convert to packed binary format for GPU (32 pixels per u32)
+  const numWords = Math.ceil(numPixels / 32);
+  const packed = new Uint32Array(numWords);
+  
+  for (let i = 0; i < numPixels; i++) {
+    if (data[i]) {
+      const wordIdx = Math.floor(i / 32);
+      const bitIdx = i % 32;
+      packed[wordIdx] |= 1 << bitIdx;
+    }
+  }
+  
+  // Create and fill GPU buffer
+  const buffer = createGPUBuffer(
+    device,
+    packed,
+    GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+  );
+  
+  return buffer;
+}
+
 // Processing mode functions
 async function startProcessing() {
   if (!currentImage) return;
@@ -1416,28 +1467,12 @@ async function startProcessing() {
     processedImages.set("saturation_median", cleanupResults.saturationMedian);
     processedImages.set("hue", cleanupResults.hue);
     processedImages.set("hue_median", cleanupResults.hueMedian);
-    // Don't set "cleanup" yet - we'll recombine with skeleton value
     
-    // Process value channel: weighted median, skeletonization
-    showStatus("Processing value channel (median, skeleton)...");
-    const t2b = performance.now();
-    const valueResults = await processValueChannel(
-        cleanupResults.valueBuffer,
-        cleanupResults.width,
-        cleanupResults.height
-    );
-    const t2c = performance.now();
-    showStatus(`Value processing: ${(t2c - t2b).toFixed(1)}ms`);
-    
-    // Store value processing stages
-    processedImages.set("value_median", valueResults.median);
-    processedImages.set("value_skeleton", valueResults.skeleton);
-    
-    // Now recombine with skeleton value instead of thresholded value
-    showStatus("Recombining with skeletonized value...");
+    // Recombine with thresholded value (no skeletonization yet)
+    showStatus("Recombining channels...");
     const t2d = performance.now();
     const cleanupFinal = await recombineWithValue(
-        valueResults.skeletonBuffer,
+        cleanupResults.valueBuffer,
         cleanupResults.saturationBuffer,
         cleanupResults.hueBuffer,
         cleanupResults.width,
@@ -1452,7 +1487,6 @@ async function startProcessing() {
     cleanupResults.valueBuffer.destroy();
     cleanupResults.saturationBuffer.destroy();
     cleanupResults.hueBuffer.destroy();
-    valueResults.skeletonBuffer.destroy();
     
     showStatus("Palettizing...");
     const t3 = performance.now();
@@ -1492,27 +1526,94 @@ async function startProcessing() {
     processedImages.set("palettized", palettized);
     displayProcessingStage("palettized");
     
-    showStatus("Applying median filter...");
+    // Process each non-background, non-removed color separately
+    showStatus("Processing individual colors...");
     const t5 = performance.now();
-    const median = await median3x3GPU(palettized);
+    for (let i = 1; i < userPalette.length && i < 16; i++) {
+      const color = userPalette[i];
+      if (color.mapToBg) continue; // Skip removed colors
+      
+      showStatus(`Processing color ${i}...`);
+      
+      // Extract this color as binary
+      const colorBinary = extractColorFromPalettized(palettized, i);
+      processedImages.set(`color_${i}`, colorBinary);
+      
+      // Convert to GPU buffer and run skeletonization
+      const colorBuffer = await binaryToGPUBuffer(colorBinary);
+      const skelResults = await processValueChannel(
+        colorBuffer,
+        colorBinary.width,
+        colorBinary.height
+      );
+      
+      // Store skeletonized result
+      processedImages.set(`color_${i}_skel`, skelResults.skeleton);
+      
+      // Clean up
+      colorBuffer.destroy();
+      skelResults.skeletonBuffer.destroy();
+    }
     const t6 = performance.now();
-    showStatus(`Median filter: ${(t6 - t5).toFixed(1)}ms`);
+    showStatus(`Per-color processing: ${(t6 - t5).toFixed(1)}ms`);
+    
+    // Add dynamic stage buttons for each color
+    addColorStageButtons();
+    
+    showStatus("Applying median filter...");
+    const t7 = performance.now();
+    const median = await median3x3GPU(palettized);
+    const t8 = performance.now();
+    showStatus(`Median filter: ${(t8 - t7).toFixed(1)}ms`);
     processedImages.set("median", median);
     displayProcessingStage("median");
     
     showStatus("Extracting black...");
-    const t7 = performance.now();
+    const t9 = performance.now();
     const binary = extractBlack(median);
-    const t8 = performance.now();
-    showStatus(`Extract black: ${(t8 - t7).toFixed(1)}ms`);
+    const t10 = performance.now();
+    showStatus(`Extract black: ${(t10 - t9).toFixed(1)}ms`);
     processedImages.set("binary", binary);
     displayProcessingStage("binary");
     
-    const totalTime = t8 - t1;
+    const totalTime = t10 - t1;
     showStatus(`✓ Pipeline complete! Total: ${totalTime.toFixed(1)}ms`);
   } catch (error) {
     showStatus(`Error: ${(error as Error).message}`, true);
     console.error(error);
+  }
+}
+
+// Add dynamic color stage buttons after processing
+function addColorStageButtons() {
+  // Clear existing color buttons
+  colorStagesContainer.innerHTML = "";
+  
+  // Add a button for each non-background, non-removed color
+  for (let i = 1; i < userPalette.length && i < 16; i++) {
+    const color = userPalette[i];
+    if (color.mapToBg) continue; // Skip removed colors
+    
+    // Check if this color stage exists
+    if (!processedImages.has(`color_${i}`)) continue;
+    
+    // Color button
+    const colorBtn = document.createElement("button");
+    colorBtn.className = "stage-btn";
+    colorBtn.textContent = `Color ${i}`;
+    colorBtn.style.borderLeft = `4px solid ${color.outputColor}`;
+    colorBtn.addEventListener("click", () => displayProcessingStage(`color_${i}`));
+    colorStagesContainer.appendChild(colorBtn);
+    
+    // Skeleton button (if it exists)
+    if (processedImages.has(`color_${i}_skel`)) {
+      const skelBtn = document.createElement("button");
+      skelBtn.className = "stage-btn";
+      skelBtn.textContent = `Color ${i} Skel`;
+      skelBtn.style.borderLeft = `4px solid ${color.outputColor}`;
+      skelBtn.addEventListener("click", () => displayProcessingStage(`color_${i}_skel`));
+      colorStagesContainer.appendChild(skelBtn);
+    }
   }
 }
 
@@ -1527,21 +1628,30 @@ function displayProcessingStage(stage: ProcessingStage) {
   
   // Update stage button states
   document.querySelectorAll(".stage-btn").forEach(btn => btn.classList.remove("active"));
-  const stageButtons: Record<ProcessingStage, HTMLButtonElement> = {
-    cropped: stageCroppedBtn,
-    value: stageValueBtn,
-    saturation: stageSaturationBtn,
-    saturation_median: stageSaturationMedianBtn,
-    hue: stageHueBtn,
-    hue_median: stageHueMedianBtn,
-    cleanup: stageCleanupBtn,
-    value_median: document.getElementById("stageValueMedianBtn") as HTMLButtonElement,
-    value_skeleton: document.getElementById("stageValueSkeletonBtn") as HTMLButtonElement,
-    palettized: stagePalettizedBtn,
-    median: stageMedianBtn,
-    binary: stageBinaryBtn,
-  };
-  stageButtons[stage]?.classList.add("active");
+  
+  // Handle dynamic color stage buttons
+  if (typeof stage === "string" && (stage.startsWith("color_"))) {
+    const btn = Array.from(document.querySelectorAll(".stage-btn")).find(
+      b => (b as HTMLElement).textContent?.toLowerCase().replace(" ", "_").includes(stage)
+    );
+    btn?.classList.add("active");
+  } else {
+    // Static stage buttons
+    const stageButtons: Partial<Record<BaseProcessingStage, HTMLButtonElement>> = {
+      cropped: stageCroppedBtn,
+      value: stageValueBtn,
+      saturation: stageSaturationBtn,
+      saturation_median: stageSaturationMedianBtn,
+      hue: stageHueBtn,
+      hue_median: stageHueMedianBtn,
+      cleanup: stageCleanupBtn,
+      palettized: stagePalettizedBtn,
+      median: stageMedianBtn,
+      binary: stageBinaryBtn,
+    };
+    const baseStage = stage as BaseProcessingStage;
+    stageButtons[baseStage]?.classList.add("active");
+  }
   
   // Set up canvas
   processCanvas.width = image.width;
