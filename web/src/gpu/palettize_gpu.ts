@@ -24,6 +24,10 @@ fn color_distance(c1: vec3<f32>, c2: vec3<f32>) -> f32 {
     return dot(diff, diff);
 }
 
+fn luminosity(color: vec3<f32>) -> f32 {
+    return 0.299 * color.r + 0.587 * color.g + 0.114 * color.b;
+}
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
@@ -42,11 +46,36 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let b = f32((pixel >> 16u) & 0xFFu) / 255.0;
     let color = vec3<f32>(r, g, b);
     
-    // Find nearest palette color
+    // If input pixel is black (luminosity < threshold), force to white (palette index 0)
+    const threshold = 0.10;
+    let lum = luminosity(color);
+    if (lum < threshold) {
+        output[idx] = 0u;
+        return;
+    }
+    
+    // Pre-compute which palette indices are black (luminosity < 20%)
+    var is_black: array<bool, 16>;
+    for (var i = 0u; i < params.palette_size; i++) {
+        let pal_pixel = palette[i];
+        let pr = f32(pal_pixel & 0xFFu) / 255.0;
+        let pg = f32((pal_pixel >> 8u) & 0xFFu) / 255.0;
+        let pb = f32((pal_pixel >> 16u) & 0xFFu) / 255.0;
+        let pal_color = vec3<f32>(pr, pg, pb);
+        let pal_lum = luminosity(pal_color);
+        is_black[i] = pal_lum < threshold;
+    }
+    
+    // Find nearest palette color, skipping black palette entries
     var best_idx: u32 = 0u;
     var best_dist = 999999.0;
     
     for (var i = 0u; i < params.palette_size; i++) {
+        // Skip black palette colors
+        if (is_black[i]) {
+            continue;
+        }
+        
         let pal_pixel = palette[i];
         let pr = f32(pal_pixel & 0xFFu) / 255.0;
         let pg = f32((pal_pixel >> 8u) & 0xFFu) / 255.0;

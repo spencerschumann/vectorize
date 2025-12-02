@@ -3,10 +3,13 @@ import { loadImageFromFile } from "../src/pdf/image_load.ts";
 import { renderPdfPage } from "../src/pdf/pdf_render.ts";
 import type { CanvasBackend } from "../src/pdf/pdf_render.ts";
 import { cleanupGPU, recombineWithValue, type CleanupResults } from "../src/gpu/cleanup_gpu.ts";
-import { processValueChannel, type ValueProcessResults } from "../src/gpu/value_process_gpu.ts";
+import { processValueChannel } from "../src/gpu/value_process_gpu.ts";
 import { palettizeGPU } from "../src/gpu/palettize_gpu.ts";
 import { median3x3GPU } from "../src/gpu/median_gpu.ts";
 import { extractBlack } from "../src/raster/threshold.ts";
+import { extractBlackGPU } from "../src/gpu/extract_black_gpu.ts";
+import { bloomFilter3x3GPU } from "../src/gpu/bloom_gpu.ts";
+import { subtractBlackGPU } from "../src/gpu/subtract_black_gpu.ts";
 import { getGPUContext, createGPUBuffer, readGPUBuffer } from "../src/gpu/gpu_context.ts";
 import type { RGBAImage } from "../src/formats/rgba_image.ts";
 import type { PalettizedImage } from "../src/formats/palettized.ts";
@@ -56,6 +59,8 @@ let cancelThumbnailLoading = false;
 // Base processing stages
 type BaseProcessingStage = 
   | "cropped" 
+  | "extract_black"
+  | "subtract_black"
   | "value" 
   | "saturation" 
   | "saturation_median" 
@@ -187,6 +192,8 @@ const processFitToScreenBtn = document.getElementById("processFitToScreenBtn") a
 const processStatusText = document.getElementById("processStatusText") as HTMLDivElement;
 
 const stageCroppedBtn = document.getElementById("stageCroppedBtn") as HTMLButtonElement;
+const stageExtractBlackBtn = document.getElementById("stageExtractBlackBtn") as HTMLButtonElement;
+const stageSubtractBlackBtn = document.getElementById("stageSubtractBlackBtn") as HTMLButtonElement;
 const stageValueBtn = document.getElementById("stageValueBtn") as HTMLButtonElement;
 const stageSaturationBtn = document.getElementById("stageSaturationBtn") as HTMLButtonElement;
 const stageSaturationMedianBtn = document.getElementById("stageSaturationMedianBtn") as HTMLButtonElement;
@@ -200,6 +207,8 @@ const colorStagesContainer = document.getElementById("colorStagesContainer") as 
 
 // Processing screen event handlers
 stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
+stageExtractBlackBtn.addEventListener("click", () => displayProcessingStage("extract_black"));
+stageSubtractBlackBtn.addEventListener("click", () => displayProcessingStage("subtract_black"));
 stageValueBtn.addEventListener("click", () => displayProcessingStage("value"));
 stageSaturationBtn.addEventListener("click", () => displayProcessingStage("saturation"));
 stageSaturationMedianBtn.addEventListener("click", () => displayProcessingStage("saturation_median"));
@@ -1388,7 +1397,10 @@ function drawCropOverlay() {
 function extractColorFromPalettized(palettized: PalettizedImage, colorIndex: number): BinaryImage {
   const { width, height, data } = palettized;
   const numPixels = width * height;
-  const binaryData = new Uint8Array(numPixels);
+  
+  // Create properly bit-packed binary image
+  const byteCount = Math.ceil(numPixels / 8);
+  const binaryData = new Uint8Array(byteCount);
   
   for (let pixelIndex = 0; pixelIndex < numPixels; pixelIndex++) {
     const byteIndex = Math.floor(pixelIndex / 2);
@@ -1399,8 +1411,12 @@ function extractColorFromPalettized(palettized: PalettizedImage, colorIndex: num
       ? (data[byteIndex] >> 4) & 0x0f
       : data[byteIndex] & 0x0f;
     
-    // Set to 1 if this pixel matches the color we're extracting
-    binaryData[pixelIndex] = paletteIndex === colorIndex ? 1 : 0;
+    // Set bit to 1 if this pixel matches the color we're extracting
+    if (paletteIndex === colorIndex) {
+      const bitByteIndex = Math.floor(pixelIndex / 8);
+      const bitIndex = 7 - (pixelIndex % 8); // MSB-first
+      binaryData[bitByteIndex] |= (1 << bitIndex);
+    }
   }
   
   return { width, height, data: binaryData };
@@ -1412,15 +1428,21 @@ async function binaryToGPUBuffer(binary: BinaryImage): Promise<GPUBuffer> {
   const { width, height, data } = binary;
   const numPixels = width * height;
   
+  // Binary data is already bit-packed (8 pixels per byte, MSB-first)
   // Convert to packed binary format for GPU (32 pixels per u32)
   const numWords = Math.ceil(numPixels / 32);
   const packed = new Uint32Array(numWords);
   
   for (let i = 0; i < numPixels; i++) {
-    if (data[i]) {
+    // Read bit from bit-packed data
+    const byteIdx = Math.floor(i / 8);
+    const bitIdx = 7 - (i % 8); // MSB-first
+    const bit = (data[byteIdx] >> bitIdx) & 1;
+    
+    if (bit) {
       const wordIdx = Math.floor(i / 32);
-      const bitIdx = i % 32;
-      packed[wordIdx] |= 1 << bitIdx;
+      const bitInWord = i % 32;
+      packed[wordIdx] |= 1 << bitInWord;
     }
   }
   
@@ -1453,6 +1475,37 @@ async function startProcessing() {
     // Store and display cropped image
     processedImages.set("cropped", processImage);
     displayProcessingStage("cropped");
+    
+    // Extract black from cropped image
+    showStatus("Extracting black...");
+    const extractBlackStart = performance.now();
+    const extractedBlack = await extractBlackGPU(processImage, 0.20);
+    const extractBlackEnd = performance.now();
+    showStatus(`Extract black: ${(extractBlackEnd - extractBlackStart).toFixed(1)}ms`);
+    
+    // Store extracted black as "color_1" for skeletonization
+    processedImages.set("color_1", extractedBlack);
+    processedImages.set("extract_black", extractedBlack);
+    displayProcessingStage("extract_black");
+    
+    // Apply bloom filter to extracted black
+    showStatus("Applying bloom filter...");
+    const bloomStart = performance.now();
+    const bloomFiltered = await bloomFilter3x3GPU(extractedBlack);
+    const bloomEnd = performance.now();
+    showStatus(`Bloom filter: ${(bloomEnd - bloomStart).toFixed(1)}ms`);
+    
+    // Subtract black from cropped image
+    showStatus("Subtracting black...");
+    const subtractStart = performance.now();
+    const subtractedImage = await subtractBlackGPU(processImage, bloomFiltered);
+    const subtractEnd = performance.now();
+    showStatus(`Subtract black: ${(subtractEnd - subtractStart).toFixed(1)}ms`);
+    processedImages.set("subtract_black", subtractedImage);
+    displayProcessingStage("subtract_black");
+    
+    // Use subtracted image for further processing
+    processImage = subtractedImage;
     
     // Run GPU pipeline with auto-advance after each stage
     showStatus("Running cleanup (extracting channels)...");
@@ -1644,6 +1697,8 @@ function displayProcessingStage(stage: ProcessingStage) {
     // Static stage buttons
     const stageButtons: Partial<Record<BaseProcessingStage, HTMLButtonElement>> = {
       cropped: stageCroppedBtn,
+      extract_black: stageExtractBlackBtn,
+      subtract_black: stageSubtractBlackBtn,
       value: stageValueBtn,
       saturation: stageSaturationBtn,
       saturation_median: stageSaturationMedianBtn,
@@ -1689,16 +1744,22 @@ function displayProcessingStage(stage: ProcessingStage) {
       rgbaData[pixelOffset + 2] = (packedColor >> 16) & 0xff; // B
       rgbaData[pixelOffset + 3] = (packedColor >> 24) & 0xff; // A
     }
-  } else if (image.data instanceof Uint8Array && image.data.length === image.width * image.height) {
-    // BinaryImage - convert 1-bit to RGBA (0=white, 1=black)
+  } else if (image.data instanceof Uint8Array && image.data.length === Math.ceil(image.width * image.height / 8)) {
+    // BinaryImage - convert bit-packed 1-bit to RGBA (0=white, 1=black)
     rgbaData = new Uint8ClampedArray(image.width * image.height * 4);
-    for (let i = 0; i < image.data.length; i++) {
-      const value = image.data[i] ? 0 : 255;
-      const offset = i * 4;
-      rgbaData[offset] = value;
-      rgbaData[offset + 1] = value;
-      rgbaData[offset + 2] = value;
-      rgbaData[offset + 3] = 255;
+    for (let y = 0; y < image.height; y++) {
+      for (let x = 0; x < image.width; x++) {
+        const pixelIndex = y * image.width + x;
+        const byteIndex = Math.floor(pixelIndex / 8);
+        const bitIndex = 7 - (pixelIndex % 8); // MSB-first
+        const bitValue = (image.data[byteIndex] >> bitIndex) & 1;
+        const value = bitValue ? 0 : 255; // 1=black, 0=white
+        const offset = pixelIndex * 4;
+        rgbaData[offset] = value;
+        rgbaData[offset + 1] = value;
+        rgbaData[offset + 2] = value;
+        rgbaData[offset + 3] = 255;
+      }
     }
   } else {
     // RGBAImage - use directly

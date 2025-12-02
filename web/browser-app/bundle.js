@@ -1363,6 +1363,10 @@ fn color_distance(c1: vec3<f32>, c2: vec3<f32>) -> f32 {
     return dot(diff, diff);
 }
 
+fn luminosity(color: vec3<f32>) -> f32 {
+    return 0.299 * color.r + 0.587 * color.g + 0.114 * color.b;
+}
+
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
@@ -1381,11 +1385,36 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let b = f32((pixel >> 16u) & 0xFFu) / 255.0;
     let color = vec3<f32>(r, g, b);
     
-    // Find nearest palette color
+    // If input pixel is black (luminosity < threshold), force to white (palette index 0)
+    const threshold = 0.10;
+    let lum = luminosity(color);
+    if (lum < threshold) {
+        output[idx] = 0u;
+        return;
+    }
+    
+    // Pre-compute which palette indices are black (luminosity < 20%)
+    var is_black: array<bool, 16>;
+    for (var i = 0u; i < params.palette_size; i++) {
+        let pal_pixel = palette[i];
+        let pr = f32(pal_pixel & 0xFFu) / 255.0;
+        let pg = f32((pal_pixel >> 8u) & 0xFFu) / 255.0;
+        let pb = f32((pal_pixel >> 16u) & 0xFFu) / 255.0;
+        let pal_color = vec3<f32>(pr, pg, pb);
+        let pal_lum = luminosity(pal_color);
+        is_black[i] = pal_lum < threshold;
+    }
+    
+    // Find nearest palette color, skipping black palette entries
     var best_idx: u32 = 0u;
     var best_dist = 999999.0;
     
     for (var i = 0u; i < params.palette_size; i++) {
+        // Skip black palette colors
+        if (is_black[i]) {
+            continue;
+        }
+        
         let pal_pixel = palette[i];
         let pr = f32(pal_pixel & 0xFFu) / 255.0;
         let pg = f32((pal_pixel >> 8u) & 0xFFu) / 255.0;
@@ -1758,6 +1787,431 @@ function extractBlack(img, options = {}) {
   return binary;
 }
 
+// src/gpu/extract_black_gpu.ts
+var shaderCode3 = `
+@group(0) @binding(0) var<storage, read> input_rgba: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<atomic<u32>>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+struct Params {
+    width: u32,
+    height: u32,
+    threshold: f32,
+}
+
+// Set a bit in the bit-packed array using atomics
+fn set_pixel_bit(x: u32, y: u32, w: u32, value: u32) {
+    let pixel_idx = y * w + x;
+    let byte_idx = pixel_idx / 8u;
+    let bit_idx = 7u - (pixel_idx % 8u); // MSB-first within byte
+    
+    // u32s contain 4 bytes in little-endian order
+    let u32_idx = byte_idx / 4u;
+    let byte_in_u32 = byte_idx % 4u;
+    let byte_shift = byte_in_u32 * 8u;
+    let bit_position = byte_shift + bit_idx;
+    
+    let bit_mask = 1u << bit_position;
+    
+    if (value == 1u) {
+        atomicOr(&output[u32_idx], bit_mask);
+    }
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+    
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    
+    let idx = y * params.width + x;
+    let pixel = input_rgba[idx];
+    
+    // Unpack RGBA (little-endian: RGBA in memory = ABGR in u32)
+    let r = f32(pixel & 0xFFu) / 255.0;
+    let g = f32((pixel >> 8u) & 0xFFu) / 255.0;
+    let b = f32((pixel >> 16u) & 0xFFu) / 255.0;
+    
+    // Calculate luminosity
+    let luminosity = 0.299 * r + 0.587 * g + 0.114 * b;
+    
+    // If below threshold, mark as black (1)
+    if (luminosity < params.threshold) {
+        set_pixel_bit(x, y, params.width, 1u);
+    }
+}
+`;
+async function extractBlackGPU(image, luminosityThreshold = 0.2) {
+  const { device } = await getGPUContext();
+  const { width, height, data } = image;
+  const pixelCount = width * height;
+  const inputU32 = new Uint32Array(pixelCount);
+  const dataView = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  for (let i = 0; i < pixelCount; i++) {
+    inputU32[i] = dataView.getUint32(i * 4, true);
+  }
+  const byteCount = Math.ceil(pixelCount / 8);
+  const u32Count = Math.ceil(byteCount / 4);
+  const inputBuffer = createGPUBuffer(
+    device,
+    new Uint8Array(inputU32.buffer, inputU32.byteOffset, inputU32.byteLength),
+    GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+  );
+  const outputBuffer = device.createBuffer({
+    size: u32Count * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+  });
+  const paramsArray = new ArrayBuffer(16);
+  const paramsU32 = new Uint32Array(paramsArray);
+  const paramsF32 = new Float32Array(paramsArray);
+  paramsU32[0] = width;
+  paramsU32[1] = height;
+  paramsF32[2] = luminosityThreshold;
+  const paramsBuffer = createGPUBuffer(
+    device,
+    new Uint8Array(paramsArray),
+    GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  );
+  const shaderModule = device.createShaderModule({ code: shaderCode3 });
+  const pipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: {
+      module: shaderModule,
+      entryPoint: "main"
+    }
+  });
+  const bindGroup = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: inputBuffer } },
+      { binding: 1, resource: { buffer: outputBuffer } },
+      { binding: 2, resource: { buffer: paramsBuffer } }
+    ]
+  });
+  const commandEncoder = device.createCommandEncoder();
+  const passEncoder = commandEncoder.beginComputePass();
+  passEncoder.setPipeline(pipeline);
+  passEncoder.setBindGroup(0, bindGroup);
+  passEncoder.dispatchWorkgroups(
+    Math.ceil(width / 8),
+    Math.ceil(height / 8)
+  );
+  passEncoder.end();
+  device.queue.submit([commandEncoder.finish()]);
+  const resultU32 = await readGPUBuffer(device, outputBuffer, u32Count * 4);
+  const resultU32Array = new Uint32Array(resultU32.buffer);
+  const resultData = new Uint8Array(byteCount);
+  for (let i = 0; i < byteCount; i++) {
+    const u32Idx = Math.floor(i / 4);
+    const byteInU32 = i % 4;
+    const shift = byteInU32 * 8;
+    resultData[i] = resultU32Array[u32Idx] >> shift & 255;
+  }
+  inputBuffer.destroy();
+  outputBuffer.destroy();
+  paramsBuffer.destroy();
+  return {
+    width,
+    height,
+    data: resultData
+  };
+}
+
+// src/gpu/bloom_gpu.ts
+var shaderCode4 = `
+@group(0) @binding(0) var<storage, read> input: array<u32>;
+@group(0) @binding(1) var<storage, read_write> output: array<atomic<u32>>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+struct Params {
+    width: u32,
+    height: u32,
+}
+
+// Get a bit from the bit-packed array
+// Data format: 8 pixels per byte, MSB first, bytes packed into u32s (little-endian)
+fn get_pixel_bit(x: u32, y: u32, w: u32, h: u32) -> u32 {
+    if (x >= w || y >= h) {
+        return 0u;
+    }
+    let pixel_idx = y * w + x;
+    let byte_idx = pixel_idx / 8u;
+    let bit_idx = 7u - (pixel_idx % 8u); // MSB-first within byte
+    
+    // u32s contain 4 bytes in little-endian order
+    let u32_idx = byte_idx / 4u;
+    let byte_in_u32 = byte_idx % 4u;
+    let byte_shift = byte_in_u32 * 8u;
+    
+    let u32_val = input[u32_idx];
+    let byte_val = (u32_val >> byte_shift) & 0xFFu;
+    let bit_val = (byte_val >> bit_idx) & 1u;
+    return bit_val;
+}
+
+// Set a bit in the bit-packed array using atomics
+fn set_pixel_bit(x: u32, y: u32, w: u32, value: u32) {
+    let pixel_idx = y * w + x;
+    let byte_idx = pixel_idx / 8u;
+    let bit_idx = 7u - (pixel_idx % 8u); // MSB-first within byte
+    
+    // u32s contain 4 bytes in little-endian order
+    let u32_idx = byte_idx / 4u;
+    let byte_in_u32 = byte_idx % 4u;
+    let byte_shift = byte_in_u32 * 8u;
+    let bit_position = byte_shift + bit_idx;
+    
+    let bit_mask = 1u << bit_position;
+    
+    if (value == 1u) {
+        atomicOr(&output[u32_idx], bit_mask);
+    } else {
+        atomicAnd(&output[u32_idx], ~bit_mask);
+    }
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+    
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    
+    // Check 3x3 neighborhood for any black pixels (value == 1)
+    var has_black = false;
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let nx = i32(x) + dx;
+            let ny = i32(y) + dy;
+            
+            if (nx >= 0 && ny >= 0 && nx < i32(params.width) && ny < i32(params.height)) {
+                let bit = get_pixel_bit(u32(nx), u32(ny), params.width, params.height);
+                if (bit == 1u) {
+                    has_black = true;
+                }
+            }
+        }
+    }
+    
+    // Set output pixel
+    set_pixel_bit(x, y, params.width, select(0u, 1u, has_black));
+}
+`;
+async function bloomFilter3x3GPU(image) {
+  const { device } = await getGPUContext();
+  const { width, height, data } = image;
+  const pixelCount = width * height;
+  const byteCount = Math.ceil(pixelCount / 8);
+  const u32Count = Math.ceil(byteCount / 4);
+  const inputU32 = new Uint32Array(u32Count);
+  const dataView = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  for (let i = 0; i < byteCount; i++) {
+    const u32Idx = Math.floor(i / 4);
+    const byteInU32 = i % 4;
+    const shift = byteInU32 * 8;
+    inputU32[u32Idx] |= data[i] << shift;
+  }
+  const inputBuffer = createGPUBuffer(
+    device,
+    new Uint8Array(inputU32.buffer, inputU32.byteOffset, inputU32.byteLength),
+    GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+  );
+  const outputBuffer = device.createBuffer({
+    size: u32Count * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+  });
+  const paramsData = new Uint32Array([width, height]);
+  const paramsBuffer = createGPUBuffer(
+    device,
+    paramsData,
+    GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  );
+  const shaderModule = device.createShaderModule({ code: shaderCode4 });
+  const pipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: {
+      module: shaderModule,
+      entryPoint: "main"
+    }
+  });
+  const bindGroup = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: inputBuffer } },
+      { binding: 1, resource: { buffer: outputBuffer } },
+      { binding: 2, resource: { buffer: paramsBuffer } }
+    ]
+  });
+  const commandEncoder = device.createCommandEncoder();
+  const passEncoder = commandEncoder.beginComputePass();
+  passEncoder.setPipeline(pipeline);
+  passEncoder.setBindGroup(0, bindGroup);
+  passEncoder.dispatchWorkgroups(
+    Math.ceil(width / 8),
+    Math.ceil(height / 8)
+  );
+  passEncoder.end();
+  device.queue.submit([commandEncoder.finish()]);
+  const resultU32 = await readGPUBuffer(device, outputBuffer, u32Count * 4);
+  const resultU32Array = new Uint32Array(resultU32.buffer);
+  const resultData = new Uint8Array(byteCount);
+  for (let i = 0; i < byteCount; i++) {
+    const u32Idx = Math.floor(i / 4);
+    const byteInU32 = i % 4;
+    const shift = byteInU32 * 8;
+    resultData[i] = resultU32Array[u32Idx] >> shift & 255;
+  }
+  inputBuffer.destroy();
+  outputBuffer.destroy();
+  paramsBuffer.destroy();
+  return {
+    width,
+    height,
+    data: resultData
+  };
+}
+
+// src/gpu/subtract_black_gpu.ts
+var shaderCode5 = `
+@group(0) @binding(0) var<storage, read> input_rgba: array<u32>;
+@group(0) @binding(1) var<storage, read> bloom_mask: array<u32>;
+@group(0) @binding(2) var<storage, read_write> output: array<u32>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+struct Params {
+    width: u32,
+    height: u32,
+}
+
+// Get a bit from the bit-packed binary image
+// Data format: 8 pixels per byte, MSB first, bytes packed into u32s (little-endian)
+fn get_pixel_bit(x: u32, y: u32, w: u32, h: u32) -> u32 {
+    if (x >= w || y >= h) {
+        return 0u;
+    }
+    let pixel_idx = y * w + x;
+    let byte_idx = pixel_idx / 8u;
+    let bit_idx = 7u - (pixel_idx % 8u); // MSB-first within byte
+    
+    // u32s contain 4 bytes in little-endian order
+    let u32_idx = byte_idx / 4u;
+    let byte_in_u32 = byte_idx % 4u;
+    let byte_shift = byte_in_u32 * 8u;
+    
+    let u32_val = bloom_mask[u32_idx];
+    let byte_val = (u32_val >> byte_shift) & 0xFFu;
+    let bit_val = (byte_val >> bit_idx) & 1u;
+    return bit_val;
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x = global_id.x;
+    let y = global_id.y;
+    
+    if (x >= params.width || y >= params.height) {
+        return;
+    }
+    
+    let idx = y * params.width + x;
+    let is_black = get_pixel_bit(x, y, params.width, params.height);
+    
+    if (is_black == 1u) {
+        // Set to white: RGBA = (255, 255, 255, 255)
+        // In little-endian u32: 0xFFFFFFFF
+        output[idx] = 0xFFFFFFFFu;
+    } else {
+        // Copy original pixel
+        output[idx] = input_rgba[idx];
+    }
+}
+`;
+async function subtractBlackGPU(image, bloomFiltered) {
+  if (image.width !== bloomFiltered.width || image.height !== bloomFiltered.height) {
+    throw new Error("Image dimensions must match");
+  }
+  const { device } = await getGPUContext();
+  const { width, height, data } = image;
+  const pixelCount = width * height;
+  const inputU32 = new Uint32Array(pixelCount);
+  const dataView = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  for (let i = 0; i < pixelCount; i++) {
+    inputU32[i] = dataView.getUint32(i * 4, true);
+  }
+  const byteCount = bloomFiltered.data.length;
+  const u32Count = Math.ceil(byteCount / 4);
+  const maskU32 = new Uint32Array(u32Count);
+  for (let i = 0; i < byteCount; i++) {
+    const u32Idx = Math.floor(i / 4);
+    const byteInU32 = i % 4;
+    const shift = byteInU32 * 8;
+    maskU32[u32Idx] |= bloomFiltered.data[i] << shift;
+  }
+  const inputBuffer = createGPUBuffer(
+    device,
+    new Uint8Array(inputU32.buffer, inputU32.byteOffset, inputU32.byteLength),
+    GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+  );
+  const maskBuffer = createGPUBuffer(
+    device,
+    new Uint8Array(maskU32.buffer, maskU32.byteOffset, maskU32.byteLength),
+    GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+  );
+  const outputBuffer = device.createBuffer({
+    size: pixelCount * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+  });
+  const paramsData = new Uint32Array([width, height]);
+  const paramsBuffer = createGPUBuffer(
+    device,
+    paramsData,
+    GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  );
+  const shaderModule = device.createShaderModule({ code: shaderCode5 });
+  const pipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: {
+      module: shaderModule,
+      entryPoint: "main"
+    }
+  });
+  const bindGroup = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: inputBuffer } },
+      { binding: 1, resource: { buffer: maskBuffer } },
+      { binding: 2, resource: { buffer: outputBuffer } },
+      { binding: 3, resource: { buffer: paramsBuffer } }
+    ]
+  });
+  const commandEncoder = device.createCommandEncoder();
+  const passEncoder = commandEncoder.beginComputePass();
+  passEncoder.setPipeline(pipeline);
+  passEncoder.setBindGroup(0, bindGroup);
+  passEncoder.dispatchWorkgroups(
+    Math.ceil(width / 8),
+    Math.ceil(height / 8)
+  );
+  passEncoder.end();
+  device.queue.submit([commandEncoder.finish()]);
+  const resultBytes = await readGPUBuffer(device, outputBuffer, pixelCount * 4);
+  const resultData = new Uint8ClampedArray(resultBytes);
+  inputBuffer.destroy();
+  maskBuffer.destroy();
+  outputBuffer.destroy();
+  paramsBuffer.destroy();
+  return {
+    width,
+    height,
+    data: resultData
+  };
+}
+
 // browser-app/storage.ts
 var DB_NAME = "CleanPlansDB";
 var DB_VERSION = 1;
@@ -1964,6 +2418,8 @@ var processZoomLevel = document.getElementById("processZoomLevel");
 var processFitToScreenBtn = document.getElementById("processFitToScreenBtn");
 var processStatusText = document.getElementById("processStatusText");
 var stageCroppedBtn = document.getElementById("stageCroppedBtn");
+var stageExtractBlackBtn = document.getElementById("stageExtractBlackBtn");
+var stageSubtractBlackBtn = document.getElementById("stageSubtractBlackBtn");
 var stageValueBtn = document.getElementById("stageValueBtn");
 var stageSaturationBtn = document.getElementById("stageSaturationBtn");
 var stageSaturationMedianBtn = document.getElementById("stageSaturationMedianBtn");
@@ -1975,6 +2431,8 @@ var stageMedianBtn = document.getElementById("stageMedianBtn");
 var stageBinaryBtn = document.getElementById("stageBinaryBtn");
 var colorStagesContainer = document.getElementById("colorStagesContainer");
 stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
+stageExtractBlackBtn.addEventListener("click", () => displayProcessingStage("extract_black"));
+stageSubtractBlackBtn.addEventListener("click", () => displayProcessingStage("subtract_black"));
 stageValueBtn.addEventListener("click", () => displayProcessingStage("value"));
 stageSaturationBtn.addEventListener("click", () => displayProcessingStage("saturation"));
 stageSaturationMedianBtn.addEventListener("click", () => displayProcessingStage("saturation_median"));
@@ -2913,12 +3371,17 @@ function drawCropOverlay() {
 function extractColorFromPalettized(palettized, colorIndex) {
   const { width, height, data } = palettized;
   const numPixels = width * height;
-  const binaryData = new Uint8Array(numPixels);
+  const byteCount = Math.ceil(numPixels / 8);
+  const binaryData = new Uint8Array(byteCount);
   for (let pixelIndex = 0; pixelIndex < numPixels; pixelIndex++) {
     const byteIndex = Math.floor(pixelIndex / 2);
     const isHighNibble = pixelIndex % 2 === 0;
     const paletteIndex = isHighNibble ? data[byteIndex] >> 4 & 15 : data[byteIndex] & 15;
-    binaryData[pixelIndex] = paletteIndex === colorIndex ? 1 : 0;
+    if (paletteIndex === colorIndex) {
+      const bitByteIndex = Math.floor(pixelIndex / 8);
+      const bitIndex = 7 - pixelIndex % 8;
+      binaryData[bitByteIndex] |= 1 << bitIndex;
+    }
   }
   return { width, height, data: binaryData };
 }
@@ -2929,10 +3392,13 @@ async function binaryToGPUBuffer(binary) {
   const numWords = Math.ceil(numPixels / 32);
   const packed = new Uint32Array(numWords);
   for (let i = 0; i < numPixels; i++) {
-    if (data[i]) {
+    const byteIdx = Math.floor(i / 8);
+    const bitIdx = 7 - i % 8;
+    const bit = data[byteIdx] >> bitIdx & 1;
+    if (bit) {
       const wordIdx = Math.floor(i / 32);
-      const bitIdx = i % 32;
-      packed[wordIdx] |= 1 << bitIdx;
+      const bitInWord = i % 32;
+      packed[wordIdx] |= 1 << bitInWord;
     }
   }
   const buffer = createGPUBuffer(
@@ -2955,6 +3421,27 @@ async function startProcessing() {
     }
     processedImages.set("cropped", processImage);
     displayProcessingStage("cropped");
+    showStatus("Extracting black...");
+    const extractBlackStart = performance.now();
+    const extractedBlack = await extractBlackGPU(processImage, 0.2);
+    const extractBlackEnd = performance.now();
+    showStatus(`Extract black: ${(extractBlackEnd - extractBlackStart).toFixed(1)}ms`);
+    processedImages.set("color_1", extractedBlack);
+    processedImages.set("extract_black", extractedBlack);
+    displayProcessingStage("extract_black");
+    showStatus("Applying bloom filter...");
+    const bloomStart = performance.now();
+    const bloomFiltered = await bloomFilter3x3GPU(extractedBlack);
+    const bloomEnd = performance.now();
+    showStatus(`Bloom filter: ${(bloomEnd - bloomStart).toFixed(1)}ms`);
+    showStatus("Subtracting black...");
+    const subtractStart = performance.now();
+    const subtractedImage = await subtractBlackGPU(processImage, bloomFiltered);
+    const subtractEnd = performance.now();
+    showStatus(`Subtract black: ${(subtractEnd - subtractStart).toFixed(1)}ms`);
+    processedImages.set("subtract_black", subtractedImage);
+    displayProcessingStage("subtract_black");
+    processImage = subtractedImage;
     showStatus("Running cleanup (extracting channels)...");
     const t1 = performance.now();
     const cleanupResults = await cleanupGPU(processImage);
@@ -3096,6 +3583,8 @@ function displayProcessingStage(stage) {
   } else {
     const stageButtons = {
       cropped: stageCroppedBtn,
+      extract_black: stageExtractBlackBtn,
+      subtract_black: stageSubtractBlackBtn,
       value: stageValueBtn,
       saturation: stageSaturationBtn,
       saturation_median: stageSaturationMedianBtn,
@@ -3126,15 +3615,21 @@ function displayProcessingStage(stage) {
       rgbaData[pixelOffset + 2] = packedColor >> 16 & 255;
       rgbaData[pixelOffset + 3] = packedColor >> 24 & 255;
     }
-  } else if (image.data instanceof Uint8Array && image.data.length === image.width * image.height) {
+  } else if (image.data instanceof Uint8Array && image.data.length === Math.ceil(image.width * image.height / 8)) {
     rgbaData = new Uint8ClampedArray(image.width * image.height * 4);
-    for (let i = 0; i < image.data.length; i++) {
-      const value = image.data[i] ? 0 : 255;
-      const offset = i * 4;
-      rgbaData[offset] = value;
-      rgbaData[offset + 1] = value;
-      rgbaData[offset + 2] = value;
-      rgbaData[offset + 3] = 255;
+    for (let y = 0; y < image.height; y++) {
+      for (let x = 0; x < image.width; x++) {
+        const pixelIndex = y * image.width + x;
+        const byteIndex = Math.floor(pixelIndex / 8);
+        const bitIndex = 7 - pixelIndex % 8;
+        const bitValue = image.data[byteIndex] >> bitIndex & 1;
+        const value = bitValue ? 0 : 255;
+        const offset = pixelIndex * 4;
+        rgbaData[offset] = value;
+        rgbaData[offset + 1] = value;
+        rgbaData[offset + 2] = value;
+        rgbaData[offset + 3] = 255;
+      }
     }
   } else {
     rgbaData = new Uint8ClampedArray(image.data);
