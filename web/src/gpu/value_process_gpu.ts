@@ -46,23 +46,28 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Gather 3x3 neighborhood
     var sum = 0u;
     
-    // Corners = 4 samples
-    //sum += get_bit(&input, max(x, 1u) - 1u, max(y, 1u) - 1u, w, h);
-    //sum += get_bit(&input, min(x + 1u, w - 1u), max(y, 1u) - 1u, w, h);
-    //sum += get_bit(&input, max(x, 1u) - 1u, min(y + 1u, h - 1u), w, h);
-    //sum += get_bit(&input, min(x + 1u, w - 1u), min(y + 1u, h - 1u), w, h);
+    // Corners = 4 samples (1x each)
+    sum += get_bit(&input, max(x, 1u) - 1u, max(y, 1u) - 1u, w, h);
+    sum += get_bit(&input, min(x + 1u, w - 1u), max(y, 1u) - 1u, w, h);
+    sum += get_bit(&input, max(x, 1u) - 1u, min(y + 1u, h - 1u), w, h);
+    sum += get_bit(&input, min(x + 1u, w - 1u), min(y + 1u, h - 1u), w, h);
     
-    // Cardinals = 4 samples
-    //sum += get_bit(&input, x, max(y, 1u) - 1u, w, h);
-    //sum += get_bit(&input, x, min(y + 1u, h - 1u), w, h);
-    //sum += get_bit(&input, max(x, 1u) - 1u, y, w, h);
-    //sum += get_bit(&input, min(x + 1u, w - 1u), y, w, h);
+    // Cardinals = 8 samples (2x each for weighting)
+    sum += get_bit(&input, x, max(y, 1u) - 1u, w, h);
+    sum += get_bit(&input, x, max(y, 1u) - 1u, w, h);
+    sum += get_bit(&input, x, min(y + 1u, h - 1u), w, h);
+    sum += get_bit(&input, x, min(y + 1u, h - 1u), w, h);
+    sum += get_bit(&input, max(x, 1u) - 1u, y, w, h);
+    sum += get_bit(&input, max(x, 1u) - 1u, y, w, h);
+    sum += get_bit(&input, min(x + 1u, w - 1u), y, w, h);
+    sum += get_bit(&input, min(x + 1u, w - 1u), y, w, h);
     
     // Center = 1 sample
     sum += get_bit(&input, x, y, w, h);
     
-    // If any pixels in neighborhood are set, output a 1.
-    let median_bit = u32(sum > 0u);
+    // Total: 4 corners + 8 cardinals + 1 center = 13 samples
+    // Median threshold: keep if >= 7 samples are set
+    let median_bit = u32(sum >= 7u);
     
     if (median_bit == 1u) {
         let pixel_idx = y * w + x;

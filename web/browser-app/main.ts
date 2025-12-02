@@ -1479,19 +1479,21 @@ async function startProcessing() {
     const extractBlackEnd = performance.now();
     showStatus(`Extract black: ${(extractBlackEnd - extractBlackStart).toFixed(1)}ms`);
     
-    // Store extracted black as "color_1" for skeletonization
-    processedImages.set("color_1", extractedBlack);
     processedImages.set("extract_black", extractedBlack);
     displayProcessingStage("extract_black");
     
-    // Skeletonize color_1 (includes median filtering internally)
+    // Process color_1: median filter and skeletonize
     const color1Buffer = await binaryToGPUBuffer(extractedBlack);
     const color1SkelResults = await processValueChannel(
       color1Buffer,
       extractedBlack.width,
       extractedBlack.height
     );
+    
+    // Store median-filtered version as color_1, skeletonized as color_1_skel
+    processedImages.set("color_1", color1SkelResults.median);
     processedImages.set("color_1_skel", color1SkelResults.skeleton);
+    
     color1Buffer.destroy();
     color1SkelResults.skeletonBuffer.destroy();
     

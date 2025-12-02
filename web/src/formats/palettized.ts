@@ -74,7 +74,7 @@ export function setPixelPal(
  * Convert palettized image back to RGBA for export
  */
 export function palettizedToRGBA(img: PalettizedImage): { width: number; height: number; data: Uint8ClampedArray } {
-    const palette = img.palette || DEFAULT_PALETTE_16;
+    const palette = img.palette || DEFAULT_PALETTE;
     const rgbaData = new Uint8ClampedArray(img.width * img.height * 4);
     
     for (let y = 0; y < img.height; y++) {
