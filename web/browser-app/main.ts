@@ -6,7 +6,6 @@ import { cleanupGPU, recombineWithValue, type CleanupResults } from "../src/gpu/
 import { processValueChannel } from "../src/gpu/value_process_gpu.ts";
 import { palettizeGPU } from "../src/gpu/palettize_gpu.ts";
 import { median3x3GPU } from "../src/gpu/median_gpu.ts";
-import { extractBlack } from "../src/raster/threshold.ts";
 import { extractBlackGPU } from "../src/gpu/extract_black_gpu.ts";
 import { bloomFilter3x3GPU } from "../src/gpu/bloom_gpu.ts";
 import { subtractBlackGPU } from "../src/gpu/subtract_black_gpu.ts";
@@ -68,8 +67,7 @@ type BaseProcessingStage =
   | "hue_median" 
   | "cleanup" 
   | "palettized" 
-  | "median" 
-  | "binary";
+  | "median";
 
 // Dynamic stages: color_0, color_0_skel, color_1, color_1_skel, etc.
 type ProcessingStage = BaseProcessingStage | string;
@@ -202,7 +200,6 @@ const stageHueMedianBtn = document.getElementById("stageHueMedianBtn") as HTMLBu
 const stageCleanupBtn = document.getElementById("stageCleanupBtn") as HTMLButtonElement;
 const stagePalettizedBtn = document.getElementById("stagePalettizedBtn") as HTMLButtonElement;
 const stageMedianBtn = document.getElementById("stageMedianBtn") as HTMLButtonElement;
-const stageBinaryBtn = document.getElementById("stageBinaryBtn") as HTMLButtonElement;
 const colorStagesContainer = document.getElementById("colorStagesContainer") as HTMLDivElement;
 
 // Processing screen event handlers
@@ -217,7 +214,6 @@ stageHueMedianBtn.addEventListener("click", () => displayProcessingStage("hue_me
 stageCleanupBtn.addEventListener("click", () => displayProcessingStage("cleanup"));
 stagePalettizedBtn.addEventListener("click", () => displayProcessingStage("palettized"));
 stageMedianBtn.addEventListener("click", () => displayProcessingStage("median"));
-stageBinaryBtn.addEventListener("click", () => displayProcessingStage("binary"));
 
 processZoomInBtn.addEventListener("click", () => {
   processZoom = Math.min(10, processZoom * 1.2);
@@ -1488,6 +1484,17 @@ async function startProcessing() {
     processedImages.set("extract_black", extractedBlack);
     displayProcessingStage("extract_black");
     
+    // Skeletonize color_1 (includes median filtering internally)
+    const color1Buffer = await binaryToGPUBuffer(extractedBlack);
+    const color1SkelResults = await processValueChannel(
+      color1Buffer,
+      extractedBlack.width,
+      extractedBlack.height
+    );
+    processedImages.set("color_1_skel", color1SkelResults.skeleton);
+    color1Buffer.destroy();
+    color1SkelResults.skeletonBuffer.destroy();
+    
     // Apply bloom filter to extracted black
     showStatus("Applying bloom filter...");
     const bloomStart = performance.now();
@@ -1598,6 +1605,7 @@ async function startProcessing() {
     for (let i = 1; i < userPalette.length && i < 16; i++) {
       const color = userPalette[i];
       if (color.mapToBg) continue; // Skip removed colors
+      if (i === 1) continue; // Skip color_1 - already processed as extracted black
       
       showStatus(`Processing color ${i}...`);
       
@@ -1626,15 +1634,7 @@ async function startProcessing() {
     // Add dynamic stage buttons for each color
     addColorStageButtons();
     
-    showStatus("Extracting black...");
-    const t7 = performance.now();
-    const binary = extractBlack(median);
-    const t8 = performance.now();
-    showStatus(`Extract black: ${(t8 - t7).toFixed(1)}ms`);
-    processedImages.set("binary", binary);
-    displayProcessingStage("binary");
-    
-    const totalTime = t8 - t1;
+    const totalTime = t6 - t1;
     showStatus(`✓ Pipeline complete! Total: ${totalTime.toFixed(1)}ms`);
   } catch (error) {
     showStatus(`Error: ${(error as Error).message}`, true);
@@ -1707,7 +1707,6 @@ function displayProcessingStage(stage: ProcessingStage) {
       cleanup: stageCleanupBtn,
       palettized: stagePalettizedBtn,
       median: stageMedianBtn,
-      binary: stageBinaryBtn,
     };
     const baseStage = stage as BaseProcessingStage;
     stageButtons[baseStage]?.classList.add("active");

@@ -1736,57 +1736,6 @@ async function median3x3GPU(image) {
   };
 }
 
-// src/formats/binary.ts
-function createBinaryImage(width, height) {
-  const size = Math.ceil(width * height / 8);
-  return {
-    width,
-    height,
-    data: new Uint8Array(size)
-  };
-}
-function setPixelBin(img, x, y, value) {
-  const pixelIndex = y * img.width + x;
-  const byteIndex = Math.floor(pixelIndex / 8);
-  const bitIndex = 7 - pixelIndex % 8;
-  if (value === 1) {
-    img.data[byteIndex] |= 1 << bitIndex;
-  } else {
-    img.data[byteIndex] &= ~(1 << bitIndex);
-  }
-}
-
-// src/raster/threshold.ts
-function extractBlack(img, options = {}) {
-  const { whiteThreshold = 0.1, blackThreshold = 0.05 } = options;
-  const binary = createBinaryImage(img.width, img.height);
-  if (!img.palette) {
-    throw new Error("Palettized image must have palette");
-  }
-  for (let y = 0; y < img.height; y++) {
-    for (let x = 0; x < img.width; x++) {
-      const paletteIndex = getPixelPal(img, x, y);
-      const color = img.palette[paletteIndex];
-      const r = color >> 24 & 255;
-      const g = color >> 16 & 255;
-      const b = color >> 8 & 255;
-      const gray = 0.299 * r + 0.587 * g + 0.114 * b;
-      const normalized = gray / 255;
-      let isBlack = false;
-      if (normalized > whiteThreshold) {
-        isBlack = false;
-      } else if (normalized < blackThreshold) {
-        isBlack = true;
-      } else {
-        const midpoint = (whiteThreshold + blackThreshold) / 2;
-        isBlack = normalized < midpoint;
-      }
-      setPixelBin(binary, x, y, isBlack ? 1 : 0);
-    }
-  }
-  return binary;
-}
-
 // src/gpu/extract_black_gpu.ts
 var shaderCode3 = `
 @group(0) @binding(0) var<storage, read> input_rgba: array<u32>;
@@ -2428,7 +2377,6 @@ var stageHueMedianBtn = document.getElementById("stageHueMedianBtn");
 var stageCleanupBtn = document.getElementById("stageCleanupBtn");
 var stagePalettizedBtn = document.getElementById("stagePalettizedBtn");
 var stageMedianBtn = document.getElementById("stageMedianBtn");
-var stageBinaryBtn = document.getElementById("stageBinaryBtn");
 var colorStagesContainer = document.getElementById("colorStagesContainer");
 stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
 stageExtractBlackBtn.addEventListener("click", () => displayProcessingStage("extract_black"));
@@ -2441,7 +2389,6 @@ stageHueMedianBtn.addEventListener("click", () => displayProcessingStage("hue_me
 stageCleanupBtn.addEventListener("click", () => displayProcessingStage("cleanup"));
 stagePalettizedBtn.addEventListener("click", () => displayProcessingStage("palettized"));
 stageMedianBtn.addEventListener("click", () => displayProcessingStage("median"));
-stageBinaryBtn.addEventListener("click", () => displayProcessingStage("binary"));
 processZoomInBtn.addEventListener("click", () => {
   processZoom = Math.min(10, processZoom * 1.2);
   updateProcessZoom();
@@ -3429,6 +3376,15 @@ async function startProcessing() {
     processedImages.set("color_1", extractedBlack);
     processedImages.set("extract_black", extractedBlack);
     displayProcessingStage("extract_black");
+    const color1Buffer = await binaryToGPUBuffer(extractedBlack);
+    const color1SkelResults = await processValueChannel(
+      color1Buffer,
+      extractedBlack.width,
+      extractedBlack.height
+    );
+    processedImages.set("color_1_skel", color1SkelResults.skeleton);
+    color1Buffer.destroy();
+    color1SkelResults.skeletonBuffer.destroy();
     showStatus("Applying bloom filter...");
     const bloomStart = performance.now();
     const bloomFiltered = await bloomFilter3x3GPU(extractedBlack);
@@ -3515,6 +3471,7 @@ async function startProcessing() {
     for (let i = 1; i < userPalette.length && i < 16; i++) {
       const color = userPalette[i];
       if (color.mapToBg) continue;
+      if (i === 1) continue;
       showStatus(`Processing color ${i}...`);
       const colorBinary = extractColorFromPalettized(median, i);
       processedImages.set(`color_${i}`, colorBinary);
@@ -3531,14 +3488,7 @@ async function startProcessing() {
     const t6 = performance.now();
     showStatus(`Per-color processing: ${(t6 - t5).toFixed(1)}ms`);
     addColorStageButtons();
-    showStatus("Extracting black...");
-    const t7 = performance.now();
-    const binary = extractBlack(median);
-    const t8 = performance.now();
-    showStatus(`Extract black: ${(t8 - t7).toFixed(1)}ms`);
-    processedImages.set("binary", binary);
-    displayProcessingStage("binary");
-    const totalTime = t8 - t1;
+    const totalTime = t6 - t1;
     showStatus(`\u2713 Pipeline complete! Total: ${totalTime.toFixed(1)}ms`);
   } catch (error) {
     showStatus(`Error: ${error.message}`, true);
@@ -3592,8 +3542,7 @@ function displayProcessingStage(stage) {
       hue_median: stageHueMedianBtn,
       cleanup: stageCleanupBtn,
       palettized: stagePalettizedBtn,
-      median: stageMedianBtn,
-      binary: stageBinaryBtn
+      median: stageMedianBtn
     };
     const baseStage = stage;
     stageButtons[baseStage]?.classList.add("active");
