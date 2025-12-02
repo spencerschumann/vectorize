@@ -2,32 +2,19 @@
 import { loadImageFromFile } from "../src/pdf/image_load.ts";
 import { renderPdfPage } from "../src/pdf/pdf_render.ts";
 import type { CanvasBackend } from "../src/pdf/pdf_render.ts";
-import { cleanupGPU, recombineWithValue, type CleanupResults } from "../src/gpu/cleanup_gpu.ts";
+import { cleanupGPU, recombineWithValue } from "../src/gpu/cleanup_gpu.ts";
 import { processValueChannel } from "../src/gpu/value_process_gpu.ts";
 import { palettizeGPU } from "../src/gpu/palettize_gpu.ts";
 import { median3x3GPU } from "../src/gpu/median_gpu.ts";
 import { extractBlackGPU } from "../src/gpu/extract_black_gpu.ts";
 import { bloomFilter3x3GPU } from "../src/gpu/bloom_gpu.ts";
 import { subtractBlackGPU } from "../src/gpu/subtract_black_gpu.ts";
-import { getGPUContext, createGPUBuffer, readGPUBuffer } from "../src/gpu/gpu_context.ts";
+import { getGPUContext, createGPUBuffer } from "../src/gpu/gpu_context.ts";
 import type { RGBAImage } from "../src/formats/rgba_image.ts";
 import type { PalettizedImage } from "../src/formats/palettized.ts";
 import type { BinaryImage } from "../src/formats/binary.ts";
 import { DEFAULT_PALETTE } from "../src/formats/palettized.ts";
 import { saveFile, getFile, listFiles, deleteFile, clearAllFiles, updateFile } from "./storage.ts";
-
-// Convert u32 palette to Uint8ClampedArray RGBA format
-function paletteToRGBA(palette: Uint32Array): Uint8ClampedArray {
-  const rgba = new Uint8ClampedArray(palette.length * 4);
-  for (let i = 0; i < palette.length; i++) {
-    const color = palette[i];
-    rgba[i * 4] = (color >> 24) & 0xff;
-    rgba[i * 4 + 1] = (color >> 16) & 0xff;
-    rgba[i * 4 + 2] = (color >> 8) & 0xff;
-    rgba[i * 4 + 3] = color & 0xff;
-  }
-  return rgba;
-}
 
 // Browser canvas backend for PDF rendering
 const browserCanvasBackend: CanvasBackend = {
@@ -45,9 +32,7 @@ declare const pdfjsLib: any;
 
 // UI State
 type AppMode = "upload" | "pageSelection" | "crop" | "processing";
-let currentMode: AppMode = "upload";
 let currentFileId: string | null = null;
-let currentFile: File | null = null;
 let currentPdfData: Uint8Array | null = null;
 let currentImage: RGBAImage | null = null;
 let currentSelectedPage: number | null = null;
@@ -107,7 +92,6 @@ const userPalette: PaletteColor[] = Array.from(DEFAULT_PALETTE).map(color => ({
 
 // Palette storage variables
 let currentPaletteName = "";
-let defaultPaletteName = "";
 
 // Canvas/Viewport State
 let zoom = 1.0;
@@ -158,7 +142,6 @@ const clearCropBtn = document.getElementById("clearCropBtn") as HTMLButtonElemen
 const cropInfo = document.getElementById("cropInfo") as HTMLDivElement;
 const processBtn = document.getElementById("processBtn") as HTMLButtonElement;
 const statusText = document.getElementById("statusText") as HTMLDivElement;
-const resultsPanel = document.getElementById("resultsPanel") as HTMLDivElement;
 const resultsContainer = document.getElementById("resultsContainer") as HTMLDivElement;
 
 // Top navigation elements
@@ -558,7 +541,6 @@ function updateNavigation(mode: AppMode) {
 
 function setMode(mode: AppMode) {
   console.log("setMode called:", mode);
-  currentMode = mode;
   
   uploadScreen.classList.remove("active");
   pageSelectionScreen.classList.remove("active");
@@ -616,7 +598,7 @@ function showStatus(message: string, isError = false) {
 }
 
 // Palette Storage Functions (IndexedDB)
-async function initPaletteDB(): Promise<IDBDatabase> {
+function initPaletteDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open("VectorizerPalettes", 1);
     request.onerror = () => reject(request.error);
@@ -711,7 +693,6 @@ async function setDefaultPalette() {
   const store = transaction.objectStore("settings");
   
   await store.put({ key: "defaultPalette", value: currentPaletteName });
-  defaultPaletteName = currentPaletteName;
   showStatus(`"${currentPaletteName}" set as default palette`);
 }
 
@@ -724,7 +705,6 @@ async function loadDefaultPalette() {
   request.onsuccess = () => {
     const data = request.result;
     if (data && data.value) {
-      defaultPaletteName = data.value;
       loadPalette(data.value);
     }
   };
@@ -736,7 +716,6 @@ initPaletteDB().then(() => loadDefaultPalette());
 
 async function handleFileUpload(file: File) {
   try {
-    currentFile = file;
     showStatus(`Loading: ${file.name}...`);
     
     // Save to storage if not already saved

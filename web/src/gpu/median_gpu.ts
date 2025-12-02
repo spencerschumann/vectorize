@@ -120,7 +120,7 @@ export async function median3x3GPU(
     image: PalettizedImage,
 ): Promise<PalettizedImage> {
     const { device } = await getGPUContext();
-    const { width, height, data, palette } = image;
+    const { width, height, palette } = image;
     
     const pixelCount = width * height;
     

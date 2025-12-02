@@ -18,16 +18,18 @@
     },
     "compilerOptions": {
         "lib": [
-            "deno.window",
+            "deno.ns",
+            "deno.unstable",
             "dom",
             "dom.iterable",
-            "webgpu"
+            "deno.webgpu"
         ],
         "strict": true,
         "noImplicitAny": true,
         "strictNullChecks": true
     },
     "exclude": [
-        "node_modules"
+        "node_modules",
+        "**/@types/node/**"
     ]
 }

@@ -214,6 +214,6 @@ export async function palettizeGPU(
         width,
         height,
         data: packed,
-        palette: new Uint8ClampedArray(palette),
+        palette: new Uint32Array(palette),
     };
 }

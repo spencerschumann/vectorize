@@ -6,7 +6,7 @@
  */
 
 import type { RGBAImage } from "../formats/rgba_image.ts";
-import { getGPUContext, createGPUBuffer, readGPUBuffer } from "./gpu_context.ts";
+import { getGPUContext, readGPUBuffer } from "./gpu_context.ts";
 
 // Step 1: Weighted 3x3 median filter on packed binary data
 // Cardinals (N/E/S/W) counted twice, diagonals once = 12 total samples

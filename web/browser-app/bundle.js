@@ -98,7 +98,7 @@ async function getGPUContext() {
     isInitializing = false;
     return cachedContext;
   })();
-  return initPromise;
+  return await initPromise;
 }
 function createGPUBuffer(device, data, usage) {
   const buffer = device.createBuffer({
@@ -1526,7 +1526,7 @@ async function palettizeGPU(image, palette) {
     width,
     height,
     data: packed,
-    palette: new Uint8ClampedArray(palette)
+    palette: new Uint32Array(palette)
   };
 }
 
@@ -1669,7 +1669,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 `;
 async function median3x3GPU(image) {
   const { device } = await getGPUContext();
-  const { width, height, data, palette } = image;
+  const { width, height, palette } = image;
   const pixelCount = width * height;
   const unpacked = new Uint32Array(pixelCount);
   for (let i = 0; i < pixelCount; i++) {
@@ -1963,7 +1963,6 @@ async function bloomFilter3x3GPU(image) {
   const byteCount = Math.ceil(pixelCount / 8);
   const u32Count = Math.ceil(byteCount / 4);
   const inputU32 = new Uint32Array(u32Count);
-  const dataView = new DataView(data.buffer, data.byteOffset, data.byteLength);
   for (let i = 0; i < byteCount; i++) {
     const u32Idx = Math.floor(i / 4);
     const byteInU32 = i % 4;
@@ -2278,9 +2277,7 @@ var browserCanvasBackend = {
     return canvas;
   }
 };
-var currentMode = "upload";
 var currentFileId = null;
-var currentFile = null;
 var currentPdfData = null;
 var currentImage = null;
 var currentSelectedPage = null;
@@ -2306,7 +2303,6 @@ var userPalette = Array.from(DEFAULT_PALETTE).map((color) => ({
   mapToBg: false
 }));
 var currentPaletteName = "";
-var defaultPaletteName = "";
 var zoom = 1;
 var panX = 0;
 var panY = 0;
@@ -2347,7 +2343,6 @@ var clearCropBtn = document.getElementById("clearCropBtn");
 var cropInfo = document.getElementById("cropInfo");
 var processBtn = document.getElementById("processBtn");
 var statusText = document.getElementById("statusText");
-var resultsPanel = document.getElementById("resultsPanel");
 var resultsContainer = document.getElementById("resultsContainer");
 var navStepFile = document.getElementById("navStepFile");
 var navStepPage = document.getElementById("navStepPage");
@@ -2661,7 +2656,6 @@ function updateNavigation(mode) {
 }
 function setMode(mode) {
   console.log("setMode called:", mode);
-  currentMode = mode;
   uploadScreen.classList.remove("active");
   pageSelectionScreen.classList.remove("active");
   cropScreen.classList.remove("active");
@@ -2707,7 +2701,7 @@ function showStatus(message, isError = false) {
   }
   console.log(message);
 }
-async function initPaletteDB() {
+function initPaletteDB() {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open("VectorizerPalettes", 1);
     request.onerror = () => reject(request.error);
@@ -2787,7 +2781,6 @@ async function setDefaultPalette() {
   const transaction = db2.transaction(["settings"], "readwrite");
   const store = transaction.objectStore("settings");
   await store.put({ key: "defaultPalette", value: currentPaletteName });
-  defaultPaletteName = currentPaletteName;
   showStatus(`"${currentPaletteName}" set as default palette`);
 }
 async function loadDefaultPalette() {
@@ -2798,7 +2791,6 @@ async function loadDefaultPalette() {
   request.onsuccess = () => {
     const data = request.result;
     if (data && data.value) {
-      defaultPaletteName = data.value;
       loadPalette(data.value);
     }
   };
@@ -2806,7 +2798,6 @@ async function loadDefaultPalette() {
 initPaletteDB().then(() => loadDefaultPalette());
 async function handleFileUpload(file) {
   try {
-    currentFile = file;
     showStatus(`Loading: ${file.name}...`);
     if (!currentFileId) {
       try {

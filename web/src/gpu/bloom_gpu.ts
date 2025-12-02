@@ -102,7 +102,6 @@ export async function bloomFilter3x3GPU(image: BinaryImage): Promise<BinaryImage
     // Convert to u32 array for GPU (pad to 4-byte alignment)
     const u32Count = Math.ceil(byteCount / 4);
     const inputU32 = new Uint32Array(u32Count);
-    const dataView = new DataView(data.buffer, data.byteOffset, data.byteLength);
     for (let i = 0; i < byteCount; i++) {
         const u32Idx = Math.floor(i / 4);
         const byteInU32 = i % 4;

@@ -1,6 +1,5 @@
 /// <reference lib="deno.ns" />
 import type { RGBAImage } from "../formats/rgba_image.ts";
-import { createRGBAImage } from "../formats/rgba_image.ts";
 
 /**
  * Deno PDF rendering using external tools (ImageMagick, poppler, etc.)

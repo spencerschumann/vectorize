@@ -22,8 +22,8 @@ export class DenoCanvasBackend implements CanvasBackend {
  *   import canvas from "npm:canvas@^2.11.2";
  *   const backend = await createDenoCanvasBackend(canvas);
  */
-export async function createDenoCanvasBackend(
+export function createDenoCanvasBackend(
     canvasModule: any,
-): Promise<DenoCanvasBackend> {
+): DenoCanvasBackend {
     return new DenoCanvasBackend(canvasModule);
 }

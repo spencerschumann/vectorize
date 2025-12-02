@@ -9,7 +9,6 @@ import { createRGBAImage, setPixelRGBA, getPixelRGBA } from "../formats/rgba_ima
  */
 export function median3x3(img: RGBAImage): RGBAImage {
     const filtered = createRGBAImage(img.width, img.height);
-    const window: number[] = new Array(9);
 
     for (let y = 0; y < img.height; y++) {
         for (let x = 0; x < img.width; x++) {

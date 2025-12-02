@@ -3,6 +3,13 @@
  * Shared between browser and Deno
  */
 
+// Extend Navigator interface for WebGPU support
+declare global {
+    interface Navigator {
+        gpu?: GPU;
+    }
+}
+
 export interface GPUContext {
     device: GPUDevice;
     adapter: GPUAdapter;
@@ -64,7 +71,7 @@ export async function getGPUContext(): Promise<GPUContext> {
         return cachedContext;
     })();
 
-    return initPromise;
+    return await initPromise;
 }
 
 /**
