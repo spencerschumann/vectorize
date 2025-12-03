@@ -18,6 +18,38 @@ import { saveFile, getFile, listFiles, deleteFile, clearAllFiles, updateFile } f
 import type { AppMode, ProcessingStage, BaseProcessingStage, PaletteColor } from "./types.ts";
 import { u32ToHex, hexToRGBA } from "./utils.ts";
 import { state } from "./state.ts";
+import {
+  initCanvasElements,
+  loadImage,
+  fitToScreen,
+  updateZoom,
+  setDefaultCrop,
+  getCropSettings,
+  saveCropSettings,
+  updateCropInfo,
+  getCropHandleAtPoint,
+  updateCursorForHandle,
+  adjustCropRegion,
+  updateTransform,
+  redrawCanvas,
+  drawCropOverlay,
+  cropImage,
+} from "./canvas.ts";
+import {
+  initPaletteModule,
+  initPaletteDB,
+  savePalette,
+  loadPalette,
+  setDefaultPalette,
+  loadDefaultPalette,
+  renderPaletteUI,
+  addPaletteColor,
+  resetPaletteToDefault,
+  pickColorFromCanvas,
+  buildPaletteRGBA,
+  isEyedropperActive,
+  forceDeactivateEyedropper,
+} from "./palette.ts";
 
 // Browser canvas backend for PDF rendering
 const browserCanvasBackend: CanvasBackend = {
@@ -104,6 +136,22 @@ const stageCleanupBtn = document.getElementById("stageCleanupBtn") as HTMLButton
 const stagePalettizedBtn = document.getElementById("stagePalettizedBtn") as HTMLButtonElement;
 const stageMedianBtn = document.getElementById("stageMedianBtn") as HTMLButtonElement;
 const colorStagesContainer = document.getElementById("colorStagesContainer") as HTMLDivElement;
+
+// Initialize canvas and palette modules
+initCanvasElements({
+  canvasContainer,
+  mainCanvas,
+  ctx,
+  cropOverlay,
+  cropCtx,
+  zoomLevel,
+  cropInfo,
+});
+
+initPaletteModule({
+  showStatus,
+  mainCanvas,
+});
 
 // Processing screen event handlers
 stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
@@ -518,117 +566,14 @@ function showStatus(message: string, isError = false) {
 }
 
 // Palette Storage Functions (IndexedDB)
-function initPaletteDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open("VectorizerPalettes", 1);
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
-    request.onupgradeneeded = (event) => {
-      const db = (event.target as IDBOpenDBRequest).result;
-      if (!db.objectStoreNames.contains("palettes")) {
-        db.createObjectStore("palettes", { keyPath: "name" });
-      }
-      if (!db.objectStoreNames.contains("settings")) {
-        db.createObjectStore("settings", { keyPath: "key" });
-      }
-    };
-  });
-}
 
-async function savePalette(name: string) {
-  if (!name.trim()) {
-    showStatus("Please enter a palette name", true);
-    return;
-  }
-  
-  const db = await initPaletteDB();
-  const transaction = db.transaction(["palettes"], "readwrite");
-  const store = transaction.objectStore("palettes");
-  
-  const paletteData = {
-    name: name.trim(),
-    colors: state.userPalette.map(c => ({ ...c })),
-    timestamp: Date.now()
-  };
-  
-  await store.put(paletteData);
-  state.currentPaletteName = name.trim();
-  showStatus(`Palette "${name}" saved`);
-}
 
-async function loadPalette(name?: string) {
-  const db = await initPaletteDB();
-  
-  if (!name) {
-    // Show palette picker
-    const transaction = db.transaction(["palettes"], "readonly");
-    const store = transaction.objectStore("palettes");
-    const request = store.getAllKeys();
-    
-    request.onsuccess = () => {
-      const names = request.result as string[];
-      if (names.length === 0) {
-        showStatus("No saved palettes found", true);
-        return;
-      }
-      
-      const selected = prompt(`Select palette:\n${names.join("\n")}`);
-      if (selected && names.includes(selected)) {
-        loadPalette(selected);
-      }
-    };
-    return;
-  }
-  
-  const transaction = db.transaction(["palettes"], "readonly");
-  const store = transaction.objectStore("palettes");
-  const request = store.get(name);
-  
-  request.onsuccess = () => {
-    const data = request.result;
-    if (data) {
-      state.userPalette.length = 0;
-      data.colors.forEach((c: PaletteColor) => state.userPalette.push({ ...c }));
-      state.currentPaletteName = name;
-      renderPaletteUI();
-      showStatus(`Palette "${name}" loaded`);
-      
-      // Update palette name input
-      const paletteNameInput = document.getElementById("paletteName") as HTMLInputElement;
-      if (paletteNameInput) paletteNameInput.value = name;
-    } else {
-      showStatus(`Palette "${name}" not found`, true);
-    }
-  };
-}
 
-async function setDefaultPalette() {
-  if (!state.currentPaletteName) {
-    showStatus("Please save the palette first", true);
-    return;
-  }
-  
-  const db = await initPaletteDB();
-  const transaction = db.transaction(["settings"], "readwrite");
-  const store = transaction.objectStore("settings");
-  
-  await store.put({ key: "defaultPalette", value: state.currentPaletteName });
-  showStatus(`"${state.currentPaletteName}" set as default palette`);
-}
 
-async function loadDefaultPalette() {
-  const db = await initPaletteDB();
-  const transaction = db.transaction(["settings"], "readonly");
-  const store = transaction.objectStore("settings");
-  const request = store.get("defaultPalette");
-  
-  request.onsuccess = () => {
-    const data = request.result;
-    if (data && data.value) {
-      loadPalette(data.value);
-    }
-  };
-}
+
+
+
+
 
 // Initialize default palette on load
 initPaletteDB().then(() => loadDefaultPalette());
@@ -657,7 +602,7 @@ async function handleFileUpload(file: File) {
     } else {
       console.log("handleFileUpload: Detected image, loading directly");
       const image = await loadImageFromFile(file);
-      await loadImage(image);
+      await loadImage(image, showStatus);
       setMode("crop");
     }
   } catch (error) {
@@ -986,7 +931,7 @@ async function selectPdfPage(pageNum: number) {
     
     clearInterval(progressInterval);
     canvasContainer.style.opacity = "1";
-    await loadImage(image);
+    await loadImage(image, showStatus);
     showStatus(`✓ Page ${pageNum} loaded: ${image.width}×${image.height}`);
     
     // Update thumbnail in storage
@@ -1001,292 +946,25 @@ async function selectPdfPage(pageNum: number) {
   }
 }
 
-function loadImage(image: RGBAImage) {
-  state.currentImage = image;
-  
-  // Set up canvases
-  mainCanvas.width = image.width;
-  mainCanvas.height = image.height;
-  cropOverlay.width = image.width;
-  cropOverlay.height = image.height;
-  
-  // Make sure main canvas is visible (crop overlay shown after drawing)
-  mainCanvas.style.display = "block";
-  canvasContainer.style.opacity = "1";
-  
-  // Load saved crop settings or set default 10% margin
-  const savedCrop = getCropSettings(image.width, image.height);
-  if (savedCrop) {
-    state.cropRegion = savedCrop;
-  } else {
-    setDefaultCrop(image.width, image.height);
-  }
-  
-  // Draw the image first
-  const imageData = new ImageData(
-    new Uint8ClampedArray(image.data),
-    image.width,
-    image.height,
-  );
-  ctx.putImageData(imageData, 0, 0);
-  
-  // Then fit to screen and draw crop
-  fitToScreen();
-  cropOverlay.style.display = "block";
-  drawCropOverlay();
-  
-  showStatus(`✓ Ready: ${image.width}×${image.height} pixels`);
-}
 
-function fitToScreen() {
-  if (!state.currentImage) return;
-  
-  const containerWidth = canvasContainer.clientWidth;
-  const containerHeight = canvasContainer.clientHeight;
-  const imageWidth = state.currentImage.width;
-  const imageHeight = state.currentImage.height;
-  
-  const scaleX = containerWidth / imageWidth;
-  const scaleY = containerHeight / imageHeight;
-  state.zoom = Math.min(scaleX, scaleY) * 0.9; // 90% to add padding
-  
-  state.panX = (containerWidth - imageWidth * state.zoom) / 2;
-  state.panY = (containerHeight - imageHeight * state.zoom) / 2;
-  
-  updateZoom();
-  updateTransform();
-}
 
-function updateZoom() {
-  zoomLevel.textContent = `${Math.round(state.zoom * 100)}%`;
-}
+
+
+
 
 // Crop management functions
-function setDefaultCrop(imageWidth: number, imageHeight: number) {
-  const margin = 0.1; // 10% margin
-  state.cropRegion = {
-    x: imageWidth * margin,
-    y: imageHeight * margin,
-    width: imageWidth * (1 - 2 * margin),
-    height: imageHeight * (1 - 2 * margin),
-  };
-  updateCropInfo();
-}
 
-function getCropSettings(imageWidth: number, imageHeight: number) {
-  const key = `crop_${Math.round(imageWidth)}_${Math.round(imageHeight)}`;
-  const stored = localStorage.getItem(key);
-  if (stored) {
-    try {
-      return JSON.parse(stored) as { x: number; y: number; width: number; height: number };
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
 
-function saveCropSettings(imageWidth: number, imageHeight: number, crop: { x: number; y: number; width: number; height: number }) {
-  const key = `crop_${Math.round(imageWidth)}_${Math.round(imageHeight)}`;
-  localStorage.setItem(key, JSON.stringify(crop));
-}
 
-function updateCropInfo() {
-  if (state.cropRegion) {
-    cropInfo.textContent = `Crop: ${Math.round(state.cropRegion.width)}×${Math.round(state.cropRegion.height)} at (${Math.round(state.cropRegion.x)}, ${Math.round(state.cropRegion.y)})`;
-  }
-}
 
-function getCropHandleAtPoint(x: number, y: number): string | null {
-  if (!state.cropRegion) return null;
-  
-  const handleSize = 15 / state.zoom; // Handle hit area in canvas coordinates
-  const { x: cx, y: cy, width: cw, height: ch } = state.cropRegion;
-  
-  // Check corners first
-  if (Math.abs(x - cx) < handleSize && Math.abs(y - cy) < handleSize) return "tl";
-  if (Math.abs(x - (cx + cw)) < handleSize && Math.abs(y - cy) < handleSize) return "tr";
-  if (Math.abs(x - cx) < handleSize && Math.abs(y - (cy + ch)) < handleSize) return "bl";
-  if (Math.abs(x - (cx + cw)) < handleSize && Math.abs(y - (cy + ch)) < handleSize) return "br";
-  
-  // Check edges
-  if (Math.abs(x - (cx + cw / 2)) < handleSize && Math.abs(y - cy) < handleSize) return "t";
-  if (Math.abs(x - (cx + cw / 2)) < handleSize && Math.abs(y - (cy + ch)) < handleSize) return "b";
-  if (Math.abs(y - (cy + ch / 2)) < handleSize && Math.abs(x - cx) < handleSize) return "l";
-  if (Math.abs(y - (cy + ch / 2)) < handleSize && Math.abs(x - (cx + cw)) < handleSize) return "r";
-  
-  return null;
-}
 
-function updateCursorForHandle(handle: string | null) {
-  if (!handle) {
-    canvasContainer.style.cursor = "default";
-  } else if (handle === "tl" || handle === "br") {
-    canvasContainer.style.cursor = "nwse-resize";
-  } else if (handle === "tr" || handle === "bl") {
-    canvasContainer.style.cursor = "nesw-resize";
-  } else if (handle === "t" || handle === "b") {
-    canvasContainer.style.cursor = "ns-resize";
-  } else if (handle === "l" || handle === "r") {
-    canvasContainer.style.cursor = "ew-resize";
-  }
-}
 
-function adjustCropRegion(handle: string, dx: number, dy: number) {
-  if (!state.cropRegion || !state.currentImage) return;
-  
-  const { x, y, width, height } = state.cropRegion;
-  let newX = x, newY = y, newWidth = width, newHeight = height;
-  
-  switch (handle) {
-    case "tl":
-      newX = x + dx;
-      newY = y + dy;
-      newWidth = width - dx;
-      newHeight = height - dy;
-      break;
-    case "tr":
-      newY = y + dy;
-      newWidth = width + dx;
-      newHeight = height - dy;
-      break;
-    case "bl":
-      newX = x + dx;
-      newWidth = width - dx;
-      newHeight = height + dy;
-      break;
-    case "br":
-      newWidth = width + dx;
-      newHeight = height + dy;
-      break;
-    case "t":
-      newY = y + dy;
-      newHeight = height - dy;
-      break;
-    case "b":
-      newHeight = height + dy;
-      break;
-    case "l":
-      newX = x + dx;
-      newWidth = width - dx;
-      break;
-    case "r":
-      newWidth = width + dx;
-      break;
-  }
-  
-  // Constrain to image bounds
-  newX = Math.max(0, Math.min(newX, state.currentImage.width - 10));
-  newY = Math.max(0, Math.min(newY, state.currentImage.height - 10));
-  newWidth = Math.max(10, Math.min(newWidth, state.currentImage.width - newX));
-  newHeight = Math.max(10, Math.min(newHeight, state.currentImage.height - newY));
-  
-  state.cropRegion.x = newX;
-  state.cropRegion.y = newY;
-  state.cropRegion.width = newWidth;
-  state.cropRegion.height = newHeight;
-  
-  updateCropInfo();
-}
 
-// Fast update - only changes transform (for panning/zooming)
-function updateTransform() {
-  const transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
-  mainCanvas.style.transform = transform;
-  mainCanvas.style.transformOrigin = "0 0";
-  mainCanvas.style.willChange = "transform";
-  
-  cropOverlay.style.transform = transform;
-  cropOverlay.style.transformOrigin = "0 0";
-  cropOverlay.style.willChange = "transform";
-  
-  // Use crisp pixels when zoomed in (>= 1x), filtered when zoomed out (< 1x)
-  if (state.zoom >= 1) {
-    mainCanvas.style.imageRendering = "pixelated";
-  } else {
-    mainCanvas.style.imageRendering = "smooth";
-  }
-  
-  // Redraw crop overlay whenever transform changes
-  drawCropOverlay();
-}
 
-// Full redraw - updates canvas content
-function redrawCanvas() {
-  if (!state.currentImage) return;
-  
-  // Clear and redraw base image
-  ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
-  const imageData = new ImageData(
-    new Uint8ClampedArray(state.currentImage.data),
-    state.currentImage.width,
-    state.currentImage.height,
-  );
-  ctx.putImageData(imageData, 0, 0);
-  
-  drawCropOverlay();
-}
 
-// Draw crop overlay with darkened mask and handles
-function drawCropOverlay() {
-  if (!state.currentImage || !state.cropRegion) {
-    cropCtx.clearRect(0, 0, cropOverlay.width, cropOverlay.height);
-    return;
-  }
-  
-  cropCtx.clearRect(0, 0, cropOverlay.width, cropOverlay.height);
-  
-  // Draw darkened mask over entire image
-  cropCtx.fillStyle = "rgba(0, 0, 0, 0.5)";
-  cropCtx.fillRect(0, 0, state.currentImage.width, state.currentImage.height);
-  
-  // Clear the crop region (composite mode)
-  cropCtx.globalCompositeOperation = "destination-out";
-  cropCtx.fillStyle = "rgba(0, 0, 0, 1)";
-  cropCtx.fillRect(
-    state.cropRegion.x,
-    state.cropRegion.y,
-    state.cropRegion.width,
-    state.cropRegion.height,
-  );
-  cropCtx.globalCompositeOperation = "source-over";
-  
-  // Draw crop rectangle border
-  cropCtx.strokeStyle = "#4f46e5";
-  cropCtx.lineWidth = 3 / state.zoom;
-  cropCtx.strokeRect(
-    state.cropRegion.x,
-    state.cropRegion.y,
-    state.cropRegion.width,
-    state.cropRegion.height,
-  );
-  
-  // Draw handles - 4 corners + 4 edges
-  const handleSize = 10 / state.zoom;
-  cropCtx.fillStyle = "#4f46e5";
-  
-  const cx = state.cropRegion.x;
-  const cy = state.cropRegion.y;
-  const cw = state.cropRegion.width;
-  const ch = state.cropRegion.height;
-  
-  const handles = [
-    // Corners
-    [cx, cy],                     // top-left
-    [cx + cw, cy],                // top-right
-    [cx, cy + ch],                // bottom-left
-    [cx + cw, cy + ch],           // bottom-right
-    // Edges
-    [cx + cw / 2, cy],            // top
-    [cx + cw, cy + ch / 2],       // right
-    [cx + cw / 2, cy + ch],       // bottom
-    [cx, cy + ch / 2],            // left
-  ];
-  
-  for (const [x, y] of handles) {
-    cropCtx.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
-  }
-}
+
+
+
 
 // Helper: Extract a single color from palettized image to binary format
 function extractColorFromPalettized(palettized: PalettizedImage, colorIndex: number): BinaryImage {
@@ -1723,28 +1401,7 @@ function updateProcessTransform() {
   }
 }
 
-function cropImage(
-  image: RGBAImage,
-  region: { x: number; y: number; width: number; height: number },
-): RGBAImage {
-  const x = Math.max(0, Math.floor(region.x));
-  const y = Math.max(0, Math.floor(region.y));
-  const width = Math.min(image.width - x, Math.floor(region.width));
-  const height = Math.min(image.height - y, Math.floor(region.height));
-  
-  const croppedData = new Uint8ClampedArray(width * height * 4);
-  
-  for (let row = 0; row < height; row++) {
-    const srcOffset = ((y + row) * image.width + x) * 4;
-    const dstOffset = row * width * 4;
-    croppedData.set(
-      image.data.subarray(srcOffset, srcOffset + width * 4),
-      dstOffset,
-    );
-  }
-  
-  return { width, height, data: croppedData };
-}
+
 
 function _displayResult(image: RGBAImage, label: string) {
   const item = document.createElement("div");
@@ -1908,379 +1565,24 @@ async function loadStoredFile(id: string) {
 }
 
 // Palette Editor Functions
-function renderPaletteUI() {
-  console.log("renderPaletteUI called, state.userPalette length:", state.userPalette.length);
-  // Render compact display in sidebar with colors and hex values
-  const paletteDisplay = document.getElementById("paletteDisplay") as HTMLDivElement;
-  console.log("paletteDisplay element:", paletteDisplay);
-  if (!paletteDisplay) {
-    console.error("paletteDisplay not found in DOM!");
-    return;
-  }
-  paletteDisplay.innerHTML = "";
-  
-  state.userPalette.forEach((color, index) => {
-    const item = document.createElement("div");
-    item.style.cssText = "display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem; border-bottom: 1px solid #3a3a3a; cursor: pointer; transition: background 0.2s;";
-    item.onmouseover = () => item.style.background = "#333";
-    item.onmouseout = () => item.style.background = "transparent";
-    item.onclick = () => openColorEditor(index);
-    
-    // Input color swatch
-    const inputSwatch = document.createElement("div");
-    inputSwatch.style.cssText = `width: 24px; height: 24px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.inputColor}; flex-shrink: 0;`;
-    item.appendChild(inputSwatch);
-    
-    // Status indicator and output
-    if (color.mapToBg) {
-      const statusIcon = document.createElement("span");
-      statusIcon.textContent = "✕";
-      statusIcon.style.cssText = "font-size: 0.9rem; color: #ef4444; flex-shrink: 0; width: 16px; text-align: center;";
-      statusIcon.title = "Remove";
-      item.appendChild(statusIcon);
-    } else if (color.inputColor.toLowerCase() !== color.outputColor.toLowerCase()) {
-      const arrow = document.createElement("span");
-      arrow.textContent = "→";
-      arrow.style.cssText = "font-size: 0.9rem; color: #999; flex-shrink: 0;";
-      item.appendChild(arrow);
-      
-      const outputSwatch = document.createElement("div");
-      outputSwatch.style.cssText = `width: 24px; height: 24px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.outputColor}; flex-shrink: 0;`;
-      item.appendChild(outputSwatch);
-    }
-    
-    // Hex value
-    const hexLabel = document.createElement("div");
-    hexLabel.style.cssText = "font-family: 'Courier New', monospace; font-size: 0.8rem; color: #aaa; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;";
-    hexLabel.textContent = color.inputColor.toUpperCase();
-    hexLabel.title = color.inputColor.toUpperCase();
-    item.appendChild(hexLabel);
-    
-    // Index indicator
-    if (index === 0) {
-      const bgLabel = document.createElement("span");
-      bgLabel.textContent = "BG";
-      bgLabel.style.cssText = "font-size: 0.7rem; color: #4f46e5; font-weight: 600; flex-shrink: 0; padding: 0.1rem 0.3rem; background: rgba(79, 70, 229, 0.2); border-radius: 3px;";
-      item.appendChild(bgLabel);
-    }
-    
-    paletteDisplay.appendChild(item);
-  });
-}
 
 // Color Editor Panel - opens when clicking a palette color
-let colorEditorIndex: number | null = null;
-let eyedropperMode: 'input' | 'output' | null = null;
 
-function openColorEditor(index: number) {
-  colorEditorIndex = index;
-  const color = state.userPalette[index];
-  
-  // Create or get color editor modal
-  let modal = document.getElementById("colorEditorModal");
-  if (!modal) {
-    modal = document.createElement("div");
-    modal.id = "colorEditorModal";
-    modal.style.cssText = `
-      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(4px);
-      z-index: 3000; display: flex; align-items: center; justify-content: center;
-    `;
-    document.body.appendChild(modal);
-  }
-  
-  modal.innerHTML = `
-    <div style="background: #1a1a1a; border: 2px solid #4f46e5; border-radius: 8px; padding: 1.5rem; min-width: 400px; max-width: 500px;">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
-        <h3 style="margin: 0; color: #fff;">Edit Color ${index}${index === 0 ? ' (Background)' : ''}</h3>
-        <button id="closeColorEditor" style="background: none; border: none; color: #999; font-size: 1.5rem; cursor: pointer; padding: 0; width: 32px; height: 32px;">×</button>
-      </div>
-      
-      <div style="display: flex; flex-direction: column; gap: 1.25rem;">
-        <!-- Input Color -->
-        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-          <label style="color: #aaa; font-size: 0.9rem; font-weight: 500;">Input Color (from document)</label>
-          <div style="display: flex; gap: 0.5rem; align-items: center;">
-            <div style="width: 48px; height: 48px; border-radius: 6px; border: 2px solid #3a3a3a; background: ${color.inputColor}; flex-shrink: 0;"></div>
-            <input type="text" id="inputColorHex" value="${color.inputColor}" maxlength="7" 
-              style="flex: 1; padding: 0.75rem; background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 4px; color: #fff; font-family: 'Courier New', monospace; font-size: 1rem;">
-            <button id="eyedropperInput" style="padding: 0.75rem; background: #4f46e5; border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 1.2rem;" title="Pick from canvas">💧</button>
-          </div>
-        </div>
-        
-        <!-- Output Options -->
-        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-          <label style="color: #aaa; font-size: 0.9rem; font-weight: 500;">Output (in vectorized result)</label>
-          
-          <div style="display: flex; gap: 0.75rem; margin-bottom: 0.5rem;">
-            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #fff;">
-              <input type="radio" name="outputMode" value="same" ${!color.mapToBg && color.inputColor === color.outputColor ? 'checked' : ''} style="cursor: pointer;">
-              <span>Keep same color</span>
-            </label>
-            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #fff;">
-              <input type="radio" name="outputMode" value="different" ${!color.mapToBg && color.inputColor !== color.outputColor ? 'checked' : ''} style="cursor: pointer;">
-              <span>Transform to:</span>
-            </label>
-            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #fff;">
-              <input type="radio" name="outputMode" value="remove" ${color.mapToBg ? 'checked' : ''} style="cursor: pointer;">
-              <span style="color: #ef4444;">Remove</span>
-            </label>
-          </div>
-          
-          <div id="outputColorSection" style="display: flex; gap: 0.5rem; align-items: center; ${color.mapToBg || color.inputColor === color.outputColor ? 'opacity: 0.4; pointer-events: none;' : ''}">
-            <div style="width: 48px; height: 48px; border-radius: 6px; border: 2px solid #3a3a3a; background: ${color.outputColor}; flex-shrink: 0;"></div>
-            <input type="text" id="outputColorHex" value="${color.outputColor}" maxlength="7" 
-              style="flex: 1; padding: 0.75rem; background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 4px; color: #fff; font-family: 'Courier New', monospace; font-size: 1rem;">
-            <button id="eyedropperOutput" style="padding: 0.75rem; background: #4f46e5; border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 1.2rem;" title="Pick from canvas">💧</button>
-          </div>
-        </div>
-        
-        <!-- Action Buttons -->
-        <div style="display: flex; gap: 0.75rem; margin-top: 0.5rem;">
-          <button id="saveColorEdit" style="flex: 1; padding: 0.75rem; background: #4f46e5; border: none; border-radius: 4px; color: white; cursor: pointer; font-weight: 600;">Save</button>
-          ${index !== 0 ? '<button id="deleteColor" style="padding: 0.75rem 1.25rem; background: #ef4444; border: none; border-radius: 4px; color: white; cursor: pointer;">Delete</button>' : ''}
-          <button id="cancelColorEdit" style="padding: 0.75rem 1.25rem; background: #3a3a3a; border: none; border-radius: 4px; color: white; cursor: pointer;">Cancel</button>
-        </div>
-      </div>
-    </div>
-  `;
-  
-  modal.style.display = "flex";
-  
-  // Setup event listeners
-  const inputHexField = document.getElementById("inputColorHex") as HTMLInputElement;
-  const outputHexField = document.getElementById("outputColorHex") as HTMLInputElement;
-  const outputSection = document.getElementById("outputColorSection") as HTMLDivElement;
-  const outputModeRadios = document.getElementsByName("outputMode") as NodeListOf<HTMLInputElement>;
-  
-  // Update output section visibility based on mode
-  outputModeRadios.forEach(radio => {
-    radio.addEventListener("change", () => {
-      if (radio.value === "different") {
-        outputSection.style.opacity = "1";
-        outputSection.style.pointerEvents = "auto";
-      } else {
-        outputSection.style.opacity = "0.4";
-        outputSection.style.pointerEvents = "none";
-      }
-    });
-  });
-  
-  // Eyedropper buttons
-  document.getElementById("eyedropperInput")!.addEventListener("click", () => {
-    eyedropperMode = 'input';
-    activateEyedropper();
-    modal!.style.display = "none";
-  });
-  
-  document.getElementById("eyedropperOutput")!.addEventListener("click", () => {
-    eyedropperMode = 'output';
-    activateEyedropper();
-    modal!.style.display = "none";
-  });
-  
-  // Save button
-  document.getElementById("saveColorEdit")!.addEventListener("click", () => {
-    const inputColor = inputHexField.value;
-    const outputColor = outputHexField.value;
-    const selectedMode = Array.from(outputModeRadios).find(r => r.checked)?.value;
-    
-    if (!/^#[0-9A-Fa-f]{6}$/.test(inputColor)) {
-      alert("Invalid input color format. Use #RRGGBB");
-      return;
-    }
-    
-    if (selectedMode === 'different' && !/^#[0-9A-Fa-f]{6}$/.test(outputColor)) {
-      alert("Invalid output color format. Use #RRGGBB");
-      return;
-    }
-    
-    state.userPalette[index].inputColor = inputColor;
-    
-    if (selectedMode === 'remove') {
-      state.userPalette[index].mapToBg = true;
-      state.userPalette[index].outputColor = inputColor; // Keep it same for display
-    } else if (selectedMode === 'different') {
-      state.userPalette[index].mapToBg = false;
-      state.userPalette[index].outputColor = outputColor;
-    } else { // same
-      state.userPalette[index].mapToBg = false;
-      state.userPalette[index].outputColor = inputColor;
-    }
-    
-    renderPaletteUI();
-    closeColorEditor();
-  });
-  
-  // Delete button
-  const deleteBtn = document.getElementById("deleteColor");
-  if (deleteBtn) {
-    deleteBtn.addEventListener("click", () => {
-      if (index !== 0 && confirm("Delete this color?")) {
-        state.userPalette.splice(index, 1);
-        renderPaletteUI();
-        closeColorEditor();
-      }
-    });
-  }
-  
-  // Cancel/Close buttons
-  document.getElementById("cancelColorEdit")!.addEventListener("click", closeColorEditor);
-  document.getElementById("closeColorEditor")!.addEventListener("click", closeColorEditor);
-  
-  // Click outside to close
-  modal.addEventListener("click", (e) => {
-    if (e.target === modal) closeColorEditor();
-  });
-}
 
-function closeColorEditor() {
-  const modal = document.getElementById("colorEditorModal");
-  if (modal) modal.style.display = "none";
-  colorEditorIndex = null;
-  eyedropperMode = null;
-}
 
-function addPaletteColor() {
-  console.log("Add palette color clicked, current length:", state.userPalette.length);
-  if (state.userPalette.length >= 16) {
-    showStatus("Maximum 16 colors allowed", true);
-    return;
-  }
-  
-  const newIndex = state.userPalette.length;
-  state.userPalette.push({
-    inputColor: "#808080",
-    outputColor: "#808080",
-    mapToBg: false,
-  });
-  
-  renderPaletteUI();
-  
-  // Immediately open editor for the new color
-  openColorEditor(newIndex);
-}
 
-function resetPaletteToDefault() {
-  state.userPalette.length = 0;
-  Array.from(DEFAULT_PALETTE).forEach(color => {
-    state.userPalette.push({
-      inputColor: u32ToHex(color),
-      outputColor: u32ToHex(color),
-      mapToBg: false,
-    });
-  });
-  renderPaletteUI();
-  showStatus("Palette reset to default");
-}
 
-let eyedropperActive = false;
 
-function activateEyedropper() {
-  if (!state.currentImage) {
-    showStatus("No image loaded", true);
-    return;
-  }
-  
-  eyedropperActive = true;
-  document.body.classList.add("eyedropper-active");
-  mainCanvas.style.cursor = "crosshair";
-  showStatus("💧 Click on the image to pick a color (ESC to cancel)");
-}
 
-function deactivateEyedropper() {
-  eyedropperActive = false;
-  document.body.classList.remove("eyedropper-active");
-  mainCanvas.style.cursor = "";
-  showStatus("Eyedropper cancelled");
-}
 
-function pickColorFromCanvas(x: number, y: number) {
-  if (!state.currentImage) return;
-  
-  // Convert canvas coordinates to image coordinates
-  const rect = mainCanvas.getBoundingClientRect();
-  const scaleX = state.currentImage.width / rect.width;
-  const scaleY = state.currentImage.height / rect.height;
-  const imgX = Math.floor((x - rect.left) * scaleX);
-  const imgY = Math.floor((y - rect.top) * scaleY);
-  
-  // Check bounds
-  if (imgX < 0 || imgX >= state.currentImage.width || imgY < 0 || imgY >= state.currentImage.height) {
-    return;
-  }
-  
-  // Get pixel color
-  const pixelIndex = (imgY * state.currentImage.width + imgX) * 4;
-  const r = state.currentImage.data[pixelIndex];
-  const g = state.currentImage.data[pixelIndex + 1];
-  const b = state.currentImage.data[pixelIndex + 2];
-  
-  const hex = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
-  
-  deactivateEyedropper();
-  
-  // If we're in color editor mode, update the color editor
-  if (colorEditorIndex !== null && eyedropperMode) {
-    if (eyedropperMode === 'input') {
-      state.userPalette[colorEditorIndex].inputColor = hex;
-    } else if (eyedropperMode === 'output') {
-      state.userPalette[colorEditorIndex].outputColor = hex;
-      state.userPalette[colorEditorIndex].mapToBg = false; // Ensure it's not set to remove
-    }
-    // Reopen the color editor with updated values
-    openColorEditor(colorEditorIndex);
-    showStatus(`Picked ${hex.toUpperCase()}`);
-  } else {
-    // Old behavior: add to palette
-    addColorToPalette(hex);
-    showStatus(`Added ${hex.toUpperCase()} to palette`);
-  }
-}
 
-function addColorToPalette(hex: string) {
-  if (state.userPalette.length >= 16) {
-    showStatus("Maximum 16 colors - remove one first", true);
-    return;
-  }
-  
-  state.userPalette.push({
-    inputColor: hex,
-    outputColor: hex,
-    mapToBg: false,
-  });
-  
-  renderPaletteUI();
-  showStatus(`Added ${hex} to palette`);
-}
+
+
+
+
+
 
 // Convert state.userPalette to RGBA format for GPU processing
-function buildPaletteRGBA(): Uint8ClampedArray {
-  const palette = new Uint8ClampedArray(16 * 4);
-  
-  for (let i = 0; i < state.userPalette.length && i < 16; i++) {
-    const color = state.userPalette[i];
-    // Use INPUT color for matching - GPU will find nearest input color
-    // The palette stored with the result contains OUTPUT colors for display
-    const [r, g, b, a] = hexToRGBA(color.inputColor);
-    
-    palette[i * 4] = r;
-    palette[i * 4 + 1] = g;
-    palette[i * 4 + 2] = b;
-    palette[i * 4 + 3] = a;
-  }
-  
-  // Fill remaining slots with background color
-  for (let i = state.userPalette.length; i < 16; i++) {
-    const [r, g, b, a] = hexToRGBA(state.userPalette[0].inputColor);
-    palette[i * 4] = r;
-    palette[i * 4 + 1] = g;
-    palette[i * 4 + 2] = b;
-    palette[i * 4 + 3] = a;
-  }
-  
-  return palette;
-}
 
 // Palette editor event handlers
 console.log("Setting up palette event listeners...");
@@ -2323,15 +1625,15 @@ if (setDefaultPaletteBtn) {
 
 // Canvas click handler for eyedropper
 mainCanvas.addEventListener("click", (e: MouseEvent) => {
-  if (eyedropperActive) {
+  if (isEyedropperActive()) {
     pickColorFromCanvas(e.clientX, e.clientY);
   }
 });
 
 // ESC key to cancel eyedropper
 document.addEventListener("keydown", (e: KeyboardEvent) => {
-  if (e.key === "Escape" && eyedropperActive) {
-    deactivateEyedropper();
+  if (e.key === "Escape" && isEyedropperActive()) {
+    forceDeactivateEyedropper();
   }
 });
 

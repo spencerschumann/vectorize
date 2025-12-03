@@ -6,13 +6,13 @@ function loadImageFromFile(file) {
       const canvas = document.createElement("canvas");
       canvas.width = img.width;
       canvas.height = img.height;
-      const ctx2 = canvas.getContext("2d");
-      if (!ctx2) {
+      const ctx3 = canvas.getContext("2d");
+      if (!ctx3) {
         reject(new Error("Could not get 2D context"));
         return;
       }
-      ctx2.drawImage(img, 0, 0);
-      const imageData = ctx2.getImageData(0, 0, img.width, img.height);
+      ctx3.drawImage(img, 0, 0);
+      const imageData = ctx3.getImageData(0, 0, img.width, img.height);
       resolve({
         width: img.width,
         height: img.height,
@@ -2320,777 +2320,24 @@ var state = {
   processViewInitialized: false
 };
 
-// browser-app/main.ts
-var browserCanvasBackend = {
-  createCanvas(width, height) {
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    return canvas;
-  }
-};
-var uploadFileList = document.getElementById("uploadFileList");
-var uploadBtn = document.getElementById("uploadBtn");
-var clearAllBtn = document.getElementById("clearAllBtn");
-var fileInput = document.getElementById("fileInput");
-var uploadScreen = document.getElementById("uploadScreen");
-var pageSelectionScreen = document.getElementById("pageSelectionScreen");
-var pdfFileName = document.getElementById("pdfFileName");
-var pageGrid = document.getElementById("pageGrid");
-var pageStatusText = document.getElementById("pageStatusText");
-var backToFilesBtn = document.getElementById("backToFilesBtn");
-var cropScreen = document.getElementById("cropScreen");
-var canvasContainer = document.getElementById("canvasContainer");
-var mainCanvas = document.getElementById("mainCanvas");
-var ctx = mainCanvas.getContext("2d");
-var cropOverlay = document.getElementById("cropOverlay");
-var cropCtx = cropOverlay.getContext("2d");
-var zoomInBtn = document.getElementById("zoomInBtn");
-var zoomOutBtn = document.getElementById("zoomOutBtn");
-var zoomLevel = document.getElementById("zoomLevel");
-var fitToScreenBtn = document.getElementById("fitToScreenBtn");
-var clearCropBtn = document.getElementById("clearCropBtn");
-var cropInfo = document.getElementById("cropInfo");
-var processBtn = document.getElementById("processBtn");
-var statusText = document.getElementById("statusText");
-var resultsContainer = document.getElementById("resultsContainer");
-var navStepFile = document.getElementById("navStepFile");
-var navStepPage = document.getElementById("navStepPage");
-var navStepConfigure = document.getElementById("navStepConfigure");
-var toggleToolbarBtn = document.getElementById("toggleToolbarBtn");
-var cropSidebar = document.getElementById("cropSidebar");
-var processSidebar = document.getElementById("processSidebar");
-var paletteName = document.getElementById("paletteName");
-var addPaletteColorBtn = document.getElementById("addPaletteColorBtn");
-var resetPaletteBtn = document.getElementById("resetPaletteBtn");
-var savePaletteBtn = document.getElementById("savePaletteBtn");
-var loadPaletteBtn = document.getElementById("loadPaletteBtn");
-var setDefaultPaletteBtn = document.getElementById("setDefaultPaletteBtn");
-console.log("Palette buttons:", { addPaletteColorBtn, resetPaletteBtn, savePaletteBtn, loadPaletteBtn, setDefaultPaletteBtn });
-var processingScreen = document.getElementById("processingScreen");
-var processCanvasContainer = document.getElementById("processCanvasContainer");
-var processCanvas = document.getElementById("processCanvas");
-var processCtx = processCanvas.getContext("2d");
-var processZoomInBtn = document.getElementById("processZoomInBtn");
-var processZoomOutBtn = document.getElementById("processZoomOutBtn");
-var processZoomLevel = document.getElementById("processZoomLevel");
-var processFitToScreenBtn = document.getElementById("processFitToScreenBtn");
-var processStatusText = document.getElementById("processStatusText");
-var stageCroppedBtn = document.getElementById("stageCroppedBtn");
-var stageExtractBlackBtn = document.getElementById("stageExtractBlackBtn");
-var stageSubtractBlackBtn = document.getElementById("stageSubtractBlackBtn");
-var stageValueBtn = document.getElementById("stageValueBtn");
-var stageSaturationBtn = document.getElementById("stageSaturationBtn");
-var stageSaturationMedianBtn = document.getElementById("stageSaturationMedianBtn");
-var stageHueBtn = document.getElementById("stageHueBtn");
-var stageHueMedianBtn = document.getElementById("stageHueMedianBtn");
-var stageCleanupBtn = document.getElementById("stageCleanupBtn");
-var stagePalettizedBtn = document.getElementById("stagePalettizedBtn");
-var stageMedianBtn = document.getElementById("stageMedianBtn");
-var colorStagesContainer = document.getElementById("colorStagesContainer");
-stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
-stageExtractBlackBtn.addEventListener("click", () => displayProcessingStage("extract_black"));
-stageSubtractBlackBtn.addEventListener("click", () => displayProcessingStage("subtract_black"));
-stageValueBtn.addEventListener("click", () => displayProcessingStage("value"));
-stageSaturationBtn.addEventListener("click", () => displayProcessingStage("saturation"));
-stageSaturationMedianBtn.addEventListener("click", () => displayProcessingStage("saturation_median"));
-stageHueBtn.addEventListener("click", () => displayProcessingStage("hue"));
-stageHueMedianBtn.addEventListener("click", () => displayProcessingStage("hue_median"));
-stageCleanupBtn.addEventListener("click", () => displayProcessingStage("cleanup"));
-stagePalettizedBtn.addEventListener("click", () => displayProcessingStage("palettized"));
-stageMedianBtn.addEventListener("click", () => displayProcessingStage("median"));
-processZoomInBtn.addEventListener("click", () => {
-  state.processZoom = Math.min(10, state.processZoom * 1.2);
-  updateProcessZoom();
-  updateProcessTransform();
-});
-processZoomOutBtn.addEventListener("click", () => {
-  state.processZoom = Math.max(0.1, state.processZoom / 1.2);
-  updateProcessZoom();
-  updateProcessTransform();
-});
-processFitToScreenBtn.addEventListener("click", () => {
-  processFitToScreen();
-});
-navStepFile.addEventListener("click", () => {
-  if (!navStepFile.classList.contains("disabled")) {
-    setMode("upload");
-  }
-});
-navStepPage.addEventListener("click", () => {
-  if (!navStepPage.classList.contains("disabled") && state.currentPdfData) {
-    setMode("pageSelection");
-  }
-});
-toggleToolbarBtn.addEventListener("click", () => {
-  cropSidebar?.classList.toggle("collapsed");
-  processSidebar?.classList.toggle("collapsed");
-});
-refreshFileList();
-setMode("upload");
-uploadBtn.addEventListener("click", (e) => {
-  e.stopPropagation();
-  fileInput.click();
-});
-uploadScreen.addEventListener("click", (e) => {
-  const target = e.target;
-  if (target.closest(".file-card") || target.closest(".upload-actions")) {
-    return;
-  }
-  if (target === uploadScreen || target.closest(".upload-file-list")) {
-    fileInput.click();
-  }
-});
-fileInput.addEventListener("change", (e) => {
-  const files = e.target.files;
-  if (files && files.length > 0) {
-    handleFileUpload(files[0]);
-  }
-});
-uploadScreen.addEventListener("dragover", (e) => {
-  e.preventDefault();
-  uploadScreen.classList.add("drag-over");
-});
-uploadScreen.addEventListener("dragleave", (e) => {
-  if (e.target === uploadScreen) {
-    uploadScreen.classList.remove("drag-over");
-  }
-});
-uploadScreen.addEventListener("drop", (e) => {
-  e.preventDefault();
-  uploadScreen.classList.remove("drag-over");
-  const files = e.dataTransfer?.files;
-  if (files && files.length > 0) {
-    handleFileUpload(files[0]);
-  }
-});
-clearAllBtn.addEventListener("click", async () => {
-  if (confirm("Delete all saved files?")) {
-    await clearAllFiles();
-    await refreshFileList();
-    showStatus("All files cleared");
-  }
-});
-backToFilesBtn.addEventListener("click", () => {
-  state.currentFileId = null;
-  state.currentPdfData = null;
-  state.currentImage = null;
-  state.cropRegion = null;
-  setMode("upload");
-  refreshFileList();
-});
-zoomInBtn.addEventListener("click", () => {
-  state.zoom = Math.min(10, state.zoom * 1.2);
-  updateZoom();
-  updateTransform();
-});
-zoomOutBtn.addEventListener("click", () => {
-  state.zoom /= 1.2;
-  updateZoom();
-  redrawCanvas();
-});
-fitToScreenBtn.addEventListener("click", () => {
-  fitToScreen();
-});
-clearCropBtn.addEventListener("click", () => {
-  if (state.currentImage) {
-    setDefaultCrop(state.currentImage.width, state.currentImage.height);
-    drawCropOverlay();
-  }
-});
-processBtn.addEventListener("click", async () => {
-  if (state.currentImage) {
-    await startProcessing();
-  }
-});
-canvasContainer.addEventListener("mousedown", (e) => {
-  const rect = canvasContainer.getBoundingClientRect();
-  const canvasX = (e.clientX - rect.left - state.panX) / state.zoom;
-  const canvasY = (e.clientY - rect.top - state.panY) / state.zoom;
-  const handle = getCropHandleAtPoint(canvasX, canvasY);
-  if (handle && state.cropRegion) {
-    state.isDraggingCropHandle = true;
-    state.activeCropHandle = handle;
-    state.lastPanX = e.clientX;
-    state.lastPanY = e.clientY;
-  } else if (!e.shiftKey) {
-    state.isPanning = true;
-    state.lastPanX = e.clientX;
-    state.lastPanY = e.clientY;
-    canvasContainer.classList.add("grabbing");
-  }
-});
-canvasContainer.addEventListener("mousemove", (e) => {
-  if (state.isDraggingCropHandle && state.activeCropHandle && state.cropRegion) {
-    const dx = (e.clientX - state.lastPanX) / state.zoom;
-    const dy = (e.clientY - state.lastPanY) / state.zoom;
-    state.lastPanX = e.clientX;
-    state.lastPanY = e.clientY;
-    adjustCropRegion(state.activeCropHandle, dx, dy);
-    drawCropOverlay();
-  } else if (state.isPanning) {
-    const dx = e.clientX - state.lastPanX;
-    const dy = e.clientY - state.lastPanY;
-    state.panX += dx;
-    state.panY += dy;
-    state.lastPanX = e.clientX;
-    state.lastPanY = e.clientY;
-    updateTransform();
-  } else {
-    const rect = canvasContainer.getBoundingClientRect();
-    const canvasX = (e.clientX - rect.left - state.panX) / state.zoom;
-    const canvasY = (e.clientY - rect.top - state.panY) / state.zoom;
-    const handle = getCropHandleAtPoint(canvasX, canvasY);
-    updateCursorForHandle(handle);
-  }
-});
-canvasContainer.addEventListener("mouseup", () => {
-  if (state.isDraggingCropHandle) {
-    state.isDraggingCropHandle = false;
-    state.activeCropHandle = null;
-    if (state.currentImage && state.cropRegion) {
-      saveCropSettings(state.currentImage.width, state.currentImage.height, state.cropRegion);
-      updateCropInfo();
-    }
-  }
-  if (state.isPanning) {
-    state.isPanning = false;
-    canvasContainer.classList.remove("grabbing");
-  }
-});
-canvasContainer.addEventListener("mouseleave", () => {
-  state.isPanning = false;
-  canvasContainer.classList.remove("grabbing");
-});
-canvasContainer.addEventListener("wheel", (e) => {
-  e.preventDefault();
-  const isPinchZoom = e.ctrlKey;
-  if (isPinchZoom) {
-    const rect = canvasContainer.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-    const canvasX = (mouseX - state.panX) / state.zoom;
-    const canvasY = (mouseY - state.panY) / state.zoom;
-    const zoomSpeed = 0.01;
-    const zoomChange = -e.deltaY * zoomSpeed * state.zoom;
-    const newZoom = Math.max(0.1, Math.min(20, state.zoom + zoomChange));
-    state.panX = mouseX - canvasX * newZoom;
-    state.panY = mouseY - canvasY * newZoom;
-    state.zoom = newZoom;
-    updateZoom();
-    updateTransform();
-  } else {
-    state.panX -= e.deltaX;
-    state.panY -= e.deltaY;
-    updateTransform();
-  }
-});
-processCanvasContainer.addEventListener("mousedown", (e) => {
-  state.isProcessPanning = true;
-  state.lastProcessPanX = e.clientX;
-  state.lastProcessPanY = e.clientY;
-  processCanvasContainer.classList.add("grabbing");
-});
-processCanvasContainer.addEventListener("mousemove", (e) => {
-  if (state.isProcessPanning) {
-    const dx = e.clientX - state.lastProcessPanX;
-    const dy = e.clientY - state.lastProcessPanY;
-    state.processPanX += dx;
-    state.processPanY += dy;
-    state.lastProcessPanX = e.clientX;
-    state.lastProcessPanY = e.clientY;
-    updateProcessTransform();
-  }
-});
-processCanvasContainer.addEventListener("mouseup", () => {
-  if (state.isProcessPanning) {
-    state.isProcessPanning = false;
-    processCanvasContainer.classList.remove("grabbing");
-  }
-});
-processCanvasContainer.addEventListener("mouseleave", () => {
-  state.isProcessPanning = false;
-  processCanvasContainer.classList.remove("grabbing");
-});
-processCanvasContainer.addEventListener("wheel", (e) => {
-  e.preventDefault();
-  const isPinchZoom = e.ctrlKey;
-  if (isPinchZoom) {
-    const rect = processCanvasContainer.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
-    const image = state.processedImages.get(state.currentStage);
-    if (!image) return;
-    const canvasX = (mouseX - state.processPanX) / state.processZoom;
-    const canvasY = (mouseY - state.processPanY) / state.processZoom;
-    const zoomSpeed = 5e-3;
-    const zoomChange = -e.deltaY * zoomSpeed * state.processZoom;
-    const newZoom = Math.max(0.1, Math.min(10, state.processZoom + zoomChange));
-    state.processPanX = mouseX - canvasX * newZoom;
-    state.processPanY = mouseY - canvasY * newZoom;
-    state.processZoom = newZoom;
-    updateProcessZoom();
-    updateProcessTransform();
-  } else {
-    state.processPanX -= e.deltaX;
-    state.processPanY -= e.deltaY;
-    updateProcessTransform();
-  }
-});
-function updateNavigation(mode) {
-  navStepFile.classList.remove("active", "completed", "disabled");
-  navStepPage.classList.remove("active", "completed", "disabled");
-  navStepConfigure.classList.remove("active", "completed", "disabled");
-  switch (mode) {
-    case "upload":
-      navStepFile.classList.add("active");
-      navStepPage.classList.add("disabled");
-      navStepConfigure.classList.add("disabled");
-      break;
-    case "pageSelection":
-      navStepFile.classList.add("completed");
-      navStepPage.classList.add("active");
-      navStepConfigure.classList.add("disabled");
-      break;
-    case "crop":
-      navStepFile.classList.add("completed");
-      navStepPage.classList.add("completed");
-      navStepConfigure.classList.add("active");
-      break;
-    case "processing":
-      navStepFile.classList.add("completed");
-      navStepPage.classList.add("completed");
-      navStepConfigure.classList.add("completed");
-      break;
-  }
+// browser-app/canvas.ts
+var canvasContainer;
+var mainCanvas;
+var ctx;
+var cropOverlay;
+var cropCtx;
+var zoomLevel;
+var cropInfo;
+function initCanvasElements(elements) {
+  canvasContainer = elements.canvasContainer;
+  mainCanvas = elements.mainCanvas;
+  ctx = elements.ctx;
+  cropOverlay = elements.cropOverlay;
+  cropCtx = elements.cropCtx;
+  zoomLevel = elements.zoomLevel;
+  cropInfo = elements.cropInfo;
 }
-function setMode(mode) {
-  console.log("setMode called:", mode);
-  uploadScreen.classList.remove("active");
-  pageSelectionScreen.classList.remove("active");
-  cropScreen.classList.remove("active");
-  processingScreen.classList.remove("active");
-  pageSelectionScreen.style.display = "";
-  switch (mode) {
-    case "upload":
-      uploadScreen.classList.add("active");
-      console.log("Upload screen activated");
-      console.log("uploadScreen display:", globalThis.getComputedStyle(uploadScreen).display);
-      console.log("uploadScreen hasClass active:", uploadScreen.classList.contains("active"));
-      break;
-    case "pageSelection":
-      pageSelectionScreen.classList.add("active");
-      pageSelectionScreen.style.display = "flex";
-      console.log("Page selection screen activated, pageGrid children:", pageGrid.children.length);
-      console.log("pageSelectionScreen display:", globalThis.getComputedStyle(pageSelectionScreen).display);
-      console.log("pageSelectionScreen visibility:", globalThis.getComputedStyle(pageSelectionScreen).visibility);
-      break;
-    case "crop":
-      cropScreen.classList.add("active");
-      console.log("Crop screen activated");
-      break;
-    case "processing":
-      processingScreen.classList.add("active");
-      console.log("Processing screen activated");
-      break;
-  }
-  updateNavigation(mode);
-}
-function showStatus(message, isError = false) {
-  let activeStatusText = statusText;
-  if (pageSelectionScreen.classList.contains("active")) {
-    activeStatusText = pageStatusText;
-  } else if (processingScreen.classList.contains("active")) {
-    activeStatusText = processStatusText;
-  }
-  activeStatusText.textContent = message;
-  if (isError) {
-    activeStatusText.classList.add("status-error");
-  } else {
-    activeStatusText.classList.remove("status-error");
-  }
-  console.log(message);
-}
-function initPaletteDB() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open("VectorizerPalettes", 1);
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
-    request.onupgradeneeded = (event) => {
-      const db2 = event.target.result;
-      if (!db2.objectStoreNames.contains("palettes")) {
-        db2.createObjectStore("palettes", { keyPath: "name" });
-      }
-      if (!db2.objectStoreNames.contains("settings")) {
-        db2.createObjectStore("settings", { keyPath: "key" });
-      }
-    };
-  });
-}
-async function savePalette(name) {
-  if (!name.trim()) {
-    showStatus("Please enter a palette name", true);
-    return;
-  }
-  const db2 = await initPaletteDB();
-  const transaction = db2.transaction(["palettes"], "readwrite");
-  const store = transaction.objectStore("palettes");
-  const paletteData = {
-    name: name.trim(),
-    colors: state.userPalette.map((c) => ({ ...c })),
-    timestamp: Date.now()
-  };
-  await store.put(paletteData);
-  state.currentPaletteName = name.trim();
-  showStatus(`Palette "${name}" saved`);
-}
-async function loadPalette(name) {
-  const db2 = await initPaletteDB();
-  if (!name) {
-    const transaction2 = db2.transaction(["palettes"], "readonly");
-    const store2 = transaction2.objectStore("palettes");
-    const request2 = store2.getAllKeys();
-    request2.onsuccess = () => {
-      const names = request2.result;
-      if (names.length === 0) {
-        showStatus("No saved palettes found", true);
-        return;
-      }
-      const selected = prompt(`Select palette:
-${names.join("\n")}`);
-      if (selected && names.includes(selected)) {
-        loadPalette(selected);
-      }
-    };
-    return;
-  }
-  const transaction = db2.transaction(["palettes"], "readonly");
-  const store = transaction.objectStore("palettes");
-  const request = store.get(name);
-  request.onsuccess = () => {
-    const data = request.result;
-    if (data) {
-      state.userPalette.length = 0;
-      data.colors.forEach((c) => state.userPalette.push({ ...c }));
-      state.currentPaletteName = name;
-      renderPaletteUI();
-      showStatus(`Palette "${name}" loaded`);
-      const paletteNameInput = document.getElementById("paletteName");
-      if (paletteNameInput) paletteNameInput.value = name;
-    } else {
-      showStatus(`Palette "${name}" not found`, true);
-    }
-  };
-}
-async function setDefaultPalette() {
-  if (!state.currentPaletteName) {
-    showStatus("Please save the palette first", true);
-    return;
-  }
-  const db2 = await initPaletteDB();
-  const transaction = db2.transaction(["settings"], "readwrite");
-  const store = transaction.objectStore("settings");
-  await store.put({ key: "defaultPalette", value: state.currentPaletteName });
-  showStatus(`"${state.currentPaletteName}" set as default palette`);
-}
-async function loadDefaultPalette() {
-  const db2 = await initPaletteDB();
-  const transaction = db2.transaction(["settings"], "readonly");
-  const store = transaction.objectStore("settings");
-  const request = store.get("defaultPalette");
-  request.onsuccess = () => {
-    const data = request.result;
-    if (data && data.value) {
-      loadPalette(data.value);
-    }
-  };
-}
-initPaletteDB().then(() => loadDefaultPalette());
-async function handleFileUpload(file) {
-  try {
-    showStatus(`Loading: ${file.name}...`);
-    if (!state.currentFileId) {
-      try {
-        state.currentFileId = await saveFile(file);
-        console.log(`File saved with ID: ${state.currentFileId}`);
-        await refreshFileList();
-      } catch (err) {
-        console.error("Error saving file:", err);
-      }
-    }
-    if (file.type === "application/pdf") {
-      console.log("handleFileUpload: Detected PDF, calling loadPdf");
-      await loadPdf(file);
-      console.log("handleFileUpload: loadPdf complete, switching to pageSelection mode");
-      setMode("pageSelection");
-    } else {
-      console.log("handleFileUpload: Detected image, loading directly");
-      const image = await loadImageFromFile(file);
-      await loadImage(image);
-      setMode("crop");
-    }
-  } catch (error) {
-    showStatus(`Error: ${error.message}`, true);
-    console.error(error);
-  }
-}
-async function loadPdf(file) {
-  try {
-    console.log("loadPdf: Starting to load", file.name);
-    const arrayBuffer = await file.arrayBuffer();
-    console.log("loadPdf: Got arrayBuffer, length:", arrayBuffer.byteLength);
-    const copy = new Uint8Array(arrayBuffer.byteLength);
-    copy.set(new Uint8Array(arrayBuffer));
-    state.currentPdfData = copy;
-    console.log("loadPdf: Created copy", copy.length);
-    const initialCopy = state.currentPdfData.slice();
-    console.log("loadPdf: Calling getDocument");
-    const loadingTask = pdfjsLib.getDocument({ data: initialCopy });
-    const pdf = await loadingTask.promise;
-    state.pdfPageCount = pdf.numPages;
-    console.log("loadPdf: PDF loaded, pages:", state.pdfPageCount);
-    showStatus(`PDF loaded: ${state.pdfPageCount} pages`);
-    console.log("loadPdf: About to set pdfFileName, element:", pdfFileName);
-    try {
-      pdfFileName.textContent = file.name;
-      console.log("loadPdf: pdfFileName set successfully");
-    } catch (e) {
-      console.error("loadPdf: Error setting pdfFileName:", e);
-    }
-    console.log("loadPdf: pdfFileName set, about to generate thumbnails");
-    console.log("loadPdf: Generating page thumbnails, clearing pageGrid");
-    console.log("loadPdf: pageGrid element:", pageGrid);
-    const existingCards = pageGrid.children.length;
-    if (existingCards > 0) {
-      console.log(`[THUMBNAIL] PURGING ${existingCards} existing thumbnail cards from cache`);
-    }
-    pageGrid.innerHTML = "";
-    console.log("loadPdf: pageGrid cleared, adding", state.pdfPageCount, "cards");
-    const pageDimensions = [];
-    let pageLabels = null;
-    try {
-      pageLabels = await pdf.getPageLabels();
-    } catch (_e) {
-    }
-    for (let i = 1; i <= state.pdfPageCount; i++) {
-      const page = await pdf.getPage(i);
-      const viewport = page.getViewport({ scale: 1 });
-      const pageLabel = pageLabels && pageLabels[i - 1] || `Page ${i}`;
-      pageDimensions.push({
-        width: viewport.width,
-        height: viewport.height,
-        pageLabel
-      });
-      const card = document.createElement("div");
-      card.className = "page-card";
-      const imageDiv = document.createElement("div");
-      imageDiv.className = "page-card-image";
-      imageDiv.textContent = "\u{1F4C4}";
-      const aspectRatio = viewport.width / viewport.height;
-      imageDiv.style.aspectRatio = aspectRatio.toString();
-      imageDiv.style.width = 250 * aspectRatio + "px";
-      const label = document.createElement("div");
-      label.className = "page-card-label";
-      label.textContent = pageLabel;
-      card.appendChild(imageDiv);
-      card.appendChild(label);
-      card.dataset.pageNum = i.toString();
-      if (i === state.currentSelectedPage) {
-        card.classList.add("selected");
-      }
-      card.addEventListener("click", () => {
-        selectPdfPage(i);
-      });
-      pageGrid.appendChild(card);
-    }
-    const MAX_THUMBNAILS = 50;
-    const thumbnailsToRender = Math.min(state.pdfPageCount, MAX_THUMBNAILS);
-    state.cancelThumbnailLoading = false;
-    (async () => {
-      const pagesBySize = Array.from({ length: state.pdfPageCount }, (_, i) => i).sort((a, b) => {
-        const areaA = pageDimensions[a].width * pageDimensions[a].height;
-        const areaB = pageDimensions[b].width * pageDimensions[b].height;
-        return areaB - areaA;
-      });
-      const renderQueue = [];
-      const addedPages = /* @__PURE__ */ new Set();
-      let sequentialIndex = 0;
-      let largestIndex = 0;
-      console.log(`[THUMBNAIL] Building render queue for ${thumbnailsToRender} thumbnails out of ${state.pdfPageCount} pages`);
-      while (renderQueue.length < thumbnailsToRender && (sequentialIndex < state.pdfPageCount || largestIndex < pagesBySize.length)) {
-        if (sequentialIndex < state.pdfPageCount && renderQueue.length < thumbnailsToRender) {
-          if (!addedPages.has(sequentialIndex)) {
-            renderQueue.push(sequentialIndex);
-            addedPages.add(sequentialIndex);
-          }
-          sequentialIndex++;
-        }
-        if (sequentialIndex < state.pdfPageCount && renderQueue.length < thumbnailsToRender) {
-          if (!addedPages.has(sequentialIndex)) {
-            renderQueue.push(sequentialIndex);
-            addedPages.add(sequentialIndex);
-          }
-          sequentialIndex++;
-        }
-        while (largestIndex < pagesBySize.length && renderQueue.length < thumbnailsToRender) {
-          const largestPageIdx = pagesBySize[largestIndex++];
-          if (!addedPages.has(largestPageIdx)) {
-            renderQueue.push(largestPageIdx);
-            addedPages.add(largestPageIdx);
-            break;
-          }
-        }
-      }
-      console.log(`[THUMBNAIL] Render queue built with ${renderQueue.length} pages:`, renderQueue.map((idx) => {
-        const pageNum = idx + 1;
-        const label = pageDimensions[idx]?.pageLabel || `Page ${pageNum}`;
-        return `${pageNum}(${label})`;
-      }).join(", "));
-      const batchSize = 3;
-      let completed = 0;
-      const allCards = Array.from(pageGrid.children);
-      for (let i = 0; i < renderQueue.length; i += batchSize) {
-        if (state.cancelThumbnailLoading) {
-          console.log(`[THUMBNAIL] Loading cancelled after ${completed} thumbnails`);
-          showStatus(`Thumbnail loading cancelled`);
-          return;
-        }
-        const batch = [];
-        const batchInfo = [];
-        for (let j = 0; j < batchSize && i + j < renderQueue.length; j++) {
-          const pageIndex = renderQueue[i + j];
-          const pageNum = pageIndex + 1;
-          const pageLabel = pageDimensions[pageIndex]?.pageLabel || `Page ${pageNum}`;
-          if (pageIndex < allCards.length) {
-            const card = allCards[pageIndex];
-            const imageDiv = card.querySelector(".page-card-image");
-            if (imageDiv) {
-              batchInfo.push(`${pageNum}(${pageLabel})`);
-              batch.push(generatePageThumbnail(pageNum, pageLabel, imageDiv));
-            } else {
-              console.warn(`[THUMBNAIL] No imageDiv found for page ${pageNum}(${pageLabel}) at index ${pageIndex}`);
-            }
-          } else {
-            console.warn(`[THUMBNAIL] Page index ${pageIndex} out of bounds (cards.length=${allCards.length}) for page ${pageNum}`);
-          }
-        }
-        if (batch.length > 0) {
-          console.log(`[THUMBNAIL] Batch ${Math.floor(i / batchSize) + 1}: Rendering ${batchInfo.join(", ")}`);
-          await Promise.all(batch);
-          completed += batch.length;
-          console.log(`[THUMBNAIL] Batch complete. Total: ${completed}/${renderQueue.length}`);
-          const statusMsg = thumbnailsToRender < state.pdfPageCount ? `Loading thumbnails: ${completed}/${thumbnailsToRender} (${state.pdfPageCount} pages total)` : `Loading thumbnails: ${completed}/${state.pdfPageCount}`;
-          showStatus(statusMsg);
-        } else {
-          console.warn(`[THUMBNAIL] Batch ${Math.floor(i / batchSize) + 1}: No valid thumbnails to render`);
-        }
-      }
-      const finalMsg = thumbnailsToRender < state.pdfPageCount ? `PDF loaded: ${state.pdfPageCount} pages (showing ${thumbnailsToRender} thumbnails)` : `PDF loaded: ${state.pdfPageCount} pages`;
-      showStatus(finalMsg);
-    })();
-  } catch (error) {
-    console.error("loadPdf error:", error);
-    showStatus(`PDF load error: ${error.message}`, true);
-    throw error;
-  }
-}
-async function generatePageThumbnail(pageNum, pageLabel, container) {
-  try {
-    if (!state.currentPdfData) {
-      console.warn(`[THUMBNAIL] No PDF data for page ${pageNum}(${pageLabel})`);
-      return;
-    }
-    console.log(`[THUMBNAIL] START rendering page ${pageNum}(${pageLabel})`);
-    const pdfDataCopy = state.currentPdfData.slice();
-    const image = await renderPdfPage(
-      { file: pdfDataCopy, pageNumber: pageNum, scale: 0.4 },
-      browserCanvasBackend,
-      pdfjsLib
-    );
-    console.log(`[THUMBNAIL] RENDERED page ${pageNum}(${pageLabel}): ${image.width}x${image.height}`);
-    const aspectRatio = image.width / image.height;
-    container.style.aspectRatio = aspectRatio.toString();
-    container.style.width = 250 * aspectRatio + "px";
-    const canvas = document.createElement("canvas");
-    canvas.width = image.width;
-    canvas.height = image.height;
-    const ctx2 = canvas.getContext("2d");
-    if (ctx2) {
-      const imageData = new ImageData(
-        new Uint8ClampedArray(image.data),
-        image.width,
-        image.height
-      );
-      ctx2.putImageData(imageData, 0, 0);
-      const img = document.createElement("img");
-      img.src = canvas.toDataURL();
-      container.innerHTML = "";
-      container.appendChild(img);
-      console.log(`[THUMBNAIL] COMPLETE page ${pageNum}(${pageLabel}) - image inserted into DOM`);
-    }
-  } catch (err) {
-    console.error(`[THUMBNAIL] ERROR generating thumbnail for page ${pageNum}(${pageLabel}):`, err);
-  }
-}
-async function selectPdfPage(pageNum) {
-  try {
-    console.log("selectPdfPage: Starting, page:", pageNum);
-    if (!state.currentPdfData) {
-      console.error("selectPdfPage: No PDF data!");
-      showStatus("No PDF loaded", true);
-      return;
-    }
-    state.cancelThumbnailLoading = true;
-    state.currentSelectedPage = pageNum;
-    const cards = pageGrid.querySelectorAll(".page-card");
-    cards.forEach((card) => card.classList.remove("selected"));
-    const selectedCard = pageGrid.querySelector(`[data-page-num="${pageNum}"]`);
-    if (selectedCard) {
-      selectedCard.classList.add("selected");
-    }
-    setMode("crop");
-    ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
-    cropCtx.clearRect(0, 0, cropOverlay.width, cropOverlay.height);
-    mainCanvas.width = 0;
-    mainCanvas.height = 0;
-    cropOverlay.width = 0;
-    cropOverlay.height = 0;
-    cropOverlay.style.display = "none";
-    showStatus(`\u23F3 Rendering page ${pageNum} at 200 DPI...`);
-    canvasContainer.style.opacity = "0.3";
-    let progressDots = 0;
-    const progressInterval = setInterval(() => {
-      progressDots = (progressDots + 1) % 4;
-      showStatus(`\u23F3 Rendering page ${pageNum} at 200 DPI${".".repeat(progressDots)}`);
-    }, 300);
-    console.log("selectPdfPage: Creating copy");
-    const pdfDataCopy = state.currentPdfData.slice();
-    console.log("selectPdfPage: Calling renderPdfPage");
-    const image = await renderPdfPage(
-      {
-        file: pdfDataCopy,
-        pageNumber: pageNum,
-        scale: 2.778
-      },
-      browserCanvasBackend,
-      pdfjsLib
-    );
-    console.log("selectPdfPage: Got image", image.width, "x", image.height);
-    clearInterval(progressInterval);
-    canvasContainer.style.opacity = "1";
-    await loadImage(image);
-    showStatus(`\u2713 Page ${pageNum} loaded: ${image.width}\xD7${image.height}`);
-    if (state.currentFileId && state.currentImage) {
-      const thumbnail = generateThumbnail(state.currentImage);
-      await updateFile(state.currentFileId, { thumbnail });
-      await refreshFileList();
-    }
-  } catch (error) {
-    showStatus(`Error: ${error.message}`, true);
-    console.error(error);
-  }
-}
-function loadImage(image) {
+function loadImage(image, statusCallback) {
   state.currentImage = image;
   mainCanvas.width = image.width;
   mainCanvas.height = image.height;
@@ -3113,7 +2360,7 @@ function loadImage(image) {
   fitToScreen();
   cropOverlay.style.display = "block";
   drawCropOverlay();
-  showStatus(`\u2713 Ready: ${image.width}\xD7${image.height} pixels`);
+  statusCallback(`\u2713 Ready: ${image.width}\xD7${image.height} pixels`);
 }
 function fitToScreen() {
   if (!state.currentImage) return;
@@ -3319,6 +2566,1132 @@ function drawCropOverlay() {
   ];
   for (const [x, y] of handles) {
     cropCtx.fillRect(x - handleSize / 2, y - handleSize / 2, handleSize, handleSize);
+  }
+}
+function cropImage(image, crop) {
+  const x = Math.max(0, Math.min(Math.round(crop.x), image.width - 1));
+  const y = Math.max(0, Math.min(Math.round(crop.y), image.height - 1));
+  const width = Math.max(1, Math.min(Math.round(crop.width), image.width - x));
+  const height = Math.max(1, Math.min(Math.round(crop.height), image.height - y));
+  const croppedData = new Uint8ClampedArray(width * height * 4);
+  for (let row = 0; row < height; row++) {
+    const srcOffset = ((y + row) * image.width + x) * 4;
+    const dstOffset = row * width * 4;
+    const copyLength = width * 4;
+    if (srcOffset + copyLength <= image.data.length) {
+      croppedData.set(
+        image.data.subarray(srcOffset, srcOffset + copyLength),
+        dstOffset
+      );
+    }
+  }
+  return { width, height, data: croppedData };
+}
+
+// browser-app/palette.ts
+var colorEditorIndex = null;
+var eyedropperMode = null;
+var eyedropperActive = false;
+var showStatusCallback = () => {
+};
+var mainCanvasRef = null;
+function initPaletteModule(callbacks) {
+  showStatusCallback = callbacks.showStatus;
+  mainCanvasRef = callbacks.mainCanvas;
+}
+function initPaletteDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("PalettesDB", 1);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = (event) => {
+      const db2 = event.target.result;
+      if (!db2.objectStoreNames.contains("palettes")) {
+        db2.createObjectStore("palettes", { keyPath: "name" });
+      }
+    };
+  });
+}
+async function savePalette(name) {
+  if (!name || name.trim() === "") {
+    showStatusCallback("Please enter a palette name", true);
+    return;
+  }
+  try {
+    const db2 = await initPaletteDB();
+    const transaction = db2.transaction(["palettes"], "readwrite");
+    const store = transaction.objectStore("palettes");
+    await store.put({
+      name: name.trim(),
+      palette: JSON.parse(JSON.stringify(state.userPalette)),
+      timestamp: Date.now()
+    });
+    showStatusCallback(`\u2713 Palette "${name.trim()}" saved`);
+  } catch (error) {
+    showStatusCallback(`Error saving palette: ${error}`, true);
+  }
+}
+async function loadPalette(name) {
+  try {
+    const db2 = await initPaletteDB();
+    const transaction = db2.transaction(["palettes"], "readonly");
+    const store = transaction.objectStore("palettes");
+    if (name) {
+      const request = store.get(name);
+      return new Promise((resolve, reject) => {
+        request.onsuccess = () => {
+          if (request.result) {
+            state.userPalette.length = 0;
+            state.userPalette.push(...request.result.palette);
+            state.currentPaletteName = name;
+            renderPaletteUI();
+            showStatusCallback(`\u2713 Loaded palette "${name}"`);
+            resolve(request.result);
+          } else {
+            showStatusCallback(`Palette "${name}" not found`, true);
+            reject(new Error("Not found"));
+          }
+        };
+        request.onerror = () => reject(request.error);
+      });
+    } else {
+      const allRequest = store.getAll();
+      return new Promise((resolve, reject) => {
+        allRequest.onsuccess = () => {
+          const palettes = allRequest.result;
+          if (palettes.length === 0) {
+            showStatusCallback("No saved palettes", true);
+            resolve([]);
+            return;
+          }
+          const names = palettes.map((p) => p.name).join("\n");
+          const selected = prompt(`Available palettes:
+${names}
+
+Enter name to load:`);
+          if (selected && palettes.some((p) => p.name === selected)) {
+            loadPalette(selected);
+          }
+          resolve(palettes);
+        };
+        allRequest.onerror = () => reject(allRequest.error);
+      });
+    }
+  } catch (error) {
+    showStatusCallback(`Error loading palette: ${error}`, true);
+  }
+}
+async function setDefaultPalette() {
+  const name = state.currentPaletteName || prompt("Enter name for this palette:");
+  if (!name) return;
+  localStorage.setItem("defaultPalette", name);
+  await savePalette(name);
+  showStatusCallback(`\u2713 Set "${name}" as default palette`);
+}
+async function loadDefaultPalette() {
+  const defaultName = localStorage.getItem("defaultPalette");
+  if (defaultName) {
+    try {
+      await loadPalette(defaultName);
+      showStatusCallback(`\u2713 Loaded default palette "${defaultName}"`);
+    } catch {
+      showStatusCallback("Default palette not found", true);
+    }
+  }
+}
+function renderPaletteUI() {
+  const paletteDisplay = document.getElementById("paletteDisplay");
+  if (!paletteDisplay) {
+    console.error("paletteDisplay not found in DOM!");
+    return;
+  }
+  paletteDisplay.innerHTML = "";
+  state.userPalette.forEach((color, index) => {
+    const item = document.createElement("div");
+    item.style.cssText = "display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem; border-bottom: 1px solid #3a3a3a; cursor: pointer; transition: background 0.2s;";
+    item.onmouseover = () => item.style.background = "#333";
+    item.onmouseout = () => item.style.background = "transparent";
+    item.onclick = () => openColorEditor(index);
+    const inputSwatch = document.createElement("div");
+    inputSwatch.style.cssText = `width: 24px; height: 24px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.inputColor}; flex-shrink: 0;`;
+    item.appendChild(inputSwatch);
+    if (color.mapToBg) {
+      const statusIcon = document.createElement("span");
+      statusIcon.textContent = "\u2715";
+      statusIcon.style.cssText = "font-size: 0.9rem; color: #ef4444; flex-shrink: 0; width: 16px; text-align: center;";
+      statusIcon.title = "Remove";
+      item.appendChild(statusIcon);
+    } else if (color.inputColor.toLowerCase() !== color.outputColor.toLowerCase()) {
+      const arrow = document.createElement("span");
+      arrow.textContent = "\u2192";
+      arrow.style.cssText = "font-size: 0.9rem; color: #999; flex-shrink: 0;";
+      item.appendChild(arrow);
+      const outputSwatch = document.createElement("div");
+      outputSwatch.style.cssText = `width: 24px; height: 24px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.outputColor}; flex-shrink: 0;`;
+      item.appendChild(outputSwatch);
+    }
+    const hexLabel = document.createElement("div");
+    hexLabel.style.cssText = "font-family: 'Courier New', monospace; font-size: 0.8rem; color: #aaa; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;";
+    hexLabel.textContent = color.inputColor.toUpperCase();
+    hexLabel.title = color.inputColor.toUpperCase();
+    item.appendChild(hexLabel);
+    if (index === 0) {
+      const bgLabel = document.createElement("span");
+      bgLabel.textContent = "BG";
+      bgLabel.style.cssText = "font-size: 0.7rem; color: #4f46e5; font-weight: 600; flex-shrink: 0; padding: 0.1rem 0.3rem; background: rgba(79, 70, 229, 0.2); border-radius: 3px;";
+      item.appendChild(bgLabel);
+    }
+    paletteDisplay.appendChild(item);
+  });
+}
+function openColorEditor(index) {
+  colorEditorIndex = index;
+  const color = state.userPalette[index];
+  let modal = document.getElementById("colorEditorModal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "colorEditorModal";
+    modal.style.cssText = `
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(4px);
+      z-index: 3000; display: flex; align-items: center; justify-content: center;
+    `;
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `
+    <div style="background: #1a1a1a; border: 2px solid #4f46e5; border-radius: 8px; padding: 1.5rem; min-width: 400px; max-width: 500px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+        <h3 style="margin: 0; color: #fff;">Edit Color ${index}${index === 0 ? " (Background)" : ""}</h3>
+        <button id="closeColorEditor" style="background: none; border: none; color: #999; font-size: 1.5rem; cursor: pointer; padding: 0; width: 32px; height: 32px;">\xD7</button>
+      </div>
+      
+      <div style="display: flex; flex-direction: column; gap: 1.25rem;">
+        <!-- Input Color -->
+        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+          <label style="color: #aaa; font-size: 0.9rem; font-weight: 500;">Input Color (from document)</label>
+          <div style="display: flex; gap: 0.5rem; align-items: center;">
+            <div style="width: 48px; height: 48px; border-radius: 6px; border: 2px solid #3a3a3a; background: ${color.inputColor}; flex-shrink: 0;"></div>
+            <input type="text" id="inputColorHex" value="${color.inputColor}" maxlength="7" 
+              style="flex: 1; padding: 0.75rem; background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 4px; color: #fff; font-family: 'Courier New', monospace; font-size: 1rem;">
+            <button id="eyedropperInput" style="padding: 0.75rem; background: #4f46e5; border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 1.2rem;" title="Pick from canvas">\u{1F4A7}</button>
+          </div>
+        </div>
+        
+        <!-- Output Options -->
+        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+          <label style="color: #aaa; font-size: 0.9rem; font-weight: 500;">Output (in vectorized result)</label>
+          
+          <div style="display: flex; gap: 0.75rem; margin-bottom: 0.5rem;">
+            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #fff;">
+              <input type="radio" name="outputMode" value="same" ${!color.mapToBg && color.inputColor === color.outputColor ? "checked" : ""} style="cursor: pointer;">
+              <span>Keep same color</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #fff;">
+              <input type="radio" name="outputMode" value="different" ${!color.mapToBg && color.inputColor !== color.outputColor ? "checked" : ""} style="cursor: pointer;">
+              <span>Transform to:</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #fff;">
+              <input type="radio" name="outputMode" value="remove" ${color.mapToBg ? "checked" : ""} style="cursor: pointer;">
+              <span style="color: #ef4444;">Remove</span>
+            </label>
+          </div>
+          
+          <div id="outputColorSection" style="display: flex; gap: 0.5rem; align-items: center; ${color.mapToBg || color.inputColor === color.outputColor ? "opacity: 0.4; pointer-events: none;" : ""}">
+            <div style="width: 48px; height: 48px; border-radius: 6px; border: 2px solid #3a3a3a; background: ${color.outputColor}; flex-shrink: 0;"></div>
+            <input type="text" id="outputColorHex" value="${color.outputColor}" maxlength="7" 
+              style="flex: 1; padding: 0.75rem; background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 4px; color: #fff; font-family: 'Courier New', monospace; font-size: 1rem;">
+            <button id="eyedropperOutput" style="padding: 0.75rem; background: #4f46e5; border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 1.2rem;" title="Pick from canvas">\u{1F4A7}</button>
+          </div>
+        </div>
+        
+        <!-- Action Buttons -->
+        <div style="display: flex; gap: 0.75rem; margin-top: 0.5rem;">
+          <button id="saveColorEdit" style="flex: 1; padding: 0.75rem; background: #4f46e5; border: none; border-radius: 4px; color: white; cursor: pointer; font-weight: 600;">Save</button>
+          ${index !== 0 ? '<button id="deleteColor" style="padding: 0.75rem 1.25rem; background: #ef4444; border: none; border-radius: 4px; color: white; cursor: pointer;">Delete</button>' : ""}
+          <button id="cancelColorEdit" style="padding: 0.75rem 1.25rem; background: #3a3a3a; border: none; border-radius: 4px; color: white; cursor: pointer;">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `;
+  modal.style.display = "flex";
+  const inputHexField = document.getElementById("inputColorHex");
+  const outputHexField = document.getElementById("outputColorHex");
+  const outputSection = document.getElementById("outputColorSection");
+  const outputModeRadios = document.getElementsByName("outputMode");
+  outputModeRadios.forEach((radio) => {
+    radio.addEventListener("change", () => {
+      if (radio.value === "different") {
+        outputSection.style.opacity = "1";
+        outputSection.style.pointerEvents = "auto";
+      } else {
+        outputSection.style.opacity = "0.4";
+        outputSection.style.pointerEvents = "none";
+      }
+    });
+  });
+  document.getElementById("eyedropperInput").addEventListener("click", () => {
+    eyedropperMode = "input";
+    activateEyedropper();
+    modal.style.display = "none";
+  });
+  document.getElementById("eyedropperOutput").addEventListener("click", () => {
+    eyedropperMode = "output";
+    activateEyedropper();
+    modal.style.display = "none";
+  });
+  document.getElementById("saveColorEdit").addEventListener("click", () => {
+    const inputColor = inputHexField.value;
+    const outputColor = outputHexField.value;
+    const selectedMode = Array.from(outputModeRadios).find((r) => r.checked)?.value;
+    if (!/^#[0-9A-Fa-f]{6}$/.test(inputColor)) {
+      alert("Invalid input color format. Use #RRGGBB");
+      return;
+    }
+    if (selectedMode === "different" && !/^#[0-9A-Fa-f]{6}$/.test(outputColor)) {
+      alert("Invalid output color format. Use #RRGGBB");
+      return;
+    }
+    state.userPalette[index].inputColor = inputColor;
+    if (selectedMode === "remove") {
+      state.userPalette[index].mapToBg = true;
+      state.userPalette[index].outputColor = inputColor;
+    } else if (selectedMode === "different") {
+      state.userPalette[index].mapToBg = false;
+      state.userPalette[index].outputColor = outputColor;
+    } else {
+      state.userPalette[index].mapToBg = false;
+      state.userPalette[index].outputColor = inputColor;
+    }
+    renderPaletteUI();
+    closeColorEditor();
+  });
+  const deleteBtn = document.getElementById("deleteColor");
+  if (deleteBtn) {
+    deleteBtn.addEventListener("click", () => {
+      if (index !== 0 && confirm("Delete this color?")) {
+        state.userPalette.splice(index, 1);
+        renderPaletteUI();
+        closeColorEditor();
+      }
+    });
+  }
+  document.getElementById("cancelColorEdit").addEventListener("click", closeColorEditor);
+  document.getElementById("closeColorEditor").addEventListener("click", closeColorEditor);
+  modal.addEventListener("click", (e) => {
+    if (e.target === modal) closeColorEditor();
+  });
+}
+function closeColorEditor() {
+  const modal = document.getElementById("colorEditorModal");
+  if (modal) modal.style.display = "none";
+  colorEditorIndex = null;
+  eyedropperMode = null;
+}
+function addPaletteColor() {
+  if (state.userPalette.length >= 16) {
+    showStatusCallback("Maximum 16 colors allowed", true);
+    return;
+  }
+  const newIndex = state.userPalette.length;
+  state.userPalette.push({
+    inputColor: "#808080",
+    outputColor: "#808080",
+    mapToBg: false
+  });
+  renderPaletteUI();
+  openColorEditor(newIndex);
+}
+function resetPaletteToDefault() {
+  state.userPalette.length = 0;
+  Array.from(DEFAULT_PALETTE).forEach((color) => {
+    state.userPalette.push({
+      inputColor: u32ToHex(color),
+      outputColor: u32ToHex(color),
+      mapToBg: false
+    });
+  });
+  renderPaletteUI();
+  showStatusCallback("Palette reset to default");
+}
+function activateEyedropper() {
+  if (!state.currentImage) {
+    showStatusCallback("No image loaded", true);
+    return;
+  }
+  if (!mainCanvasRef) {
+    showStatusCallback("Canvas not initialized", true);
+    return;
+  }
+  eyedropperActive = true;
+  document.body.classList.add("eyedropper-active");
+  mainCanvasRef.style.cursor = "crosshair";
+  showStatusCallback("\u{1F4A7} Click on the image to pick a color (ESC to cancel)");
+}
+function deactivateEyedropper() {
+  if (!mainCanvasRef) return;
+  eyedropperActive = false;
+  document.body.classList.remove("eyedropper-active");
+  mainCanvasRef.style.cursor = "";
+  showStatusCallback("Eyedropper cancelled");
+}
+function pickColorFromCanvas(x, y) {
+  if (!state.currentImage || !mainCanvasRef) return;
+  const rect = mainCanvasRef.getBoundingClientRect();
+  const scaleX = state.currentImage.width / rect.width;
+  const scaleY = state.currentImage.height / rect.height;
+  const imgX = Math.floor((x - rect.left) * scaleX);
+  const imgY = Math.floor((y - rect.top) * scaleY);
+  if (imgX < 0 || imgX >= state.currentImage.width || imgY < 0 || imgY >= state.currentImage.height) {
+    return;
+  }
+  const pixelIndex = (imgY * state.currentImage.width + imgX) * 4;
+  const r = state.currentImage.data[pixelIndex];
+  const g = state.currentImage.data[pixelIndex + 1];
+  const b = state.currentImage.data[pixelIndex + 2];
+  const hex = `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+  deactivateEyedropper();
+  if (colorEditorIndex !== null && eyedropperMode) {
+    if (eyedropperMode === "input") {
+      state.userPalette[colorEditorIndex].inputColor = hex;
+    } else if (eyedropperMode === "output") {
+      state.userPalette[colorEditorIndex].outputColor = hex;
+      state.userPalette[colorEditorIndex].mapToBg = false;
+    }
+    openColorEditor(colorEditorIndex);
+    showStatusCallback(`Picked ${hex.toUpperCase()}`);
+  } else {
+    addColorToPalette(hex);
+    showStatusCallback(`Added ${hex.toUpperCase()} to palette`);
+  }
+}
+function addColorToPalette(hex) {
+  if (state.userPalette.length >= 16) {
+    showStatusCallback("Maximum 16 colors - remove one first", true);
+    return;
+  }
+  state.userPalette.push({
+    inputColor: hex,
+    outputColor: hex,
+    mapToBg: false
+  });
+  renderPaletteUI();
+  showStatusCallback(`Added ${hex} to palette`);
+}
+function buildPaletteRGBA() {
+  const palette = new Uint8ClampedArray(16 * 4);
+  for (let i = 0; i < state.userPalette.length && i < 16; i++) {
+    const color = state.userPalette[i];
+    const [r, g, b, a] = hexToRGBA(color.inputColor);
+    palette[i * 4] = r;
+    palette[i * 4 + 1] = g;
+    palette[i * 4 + 2] = b;
+    palette[i * 4 + 3] = a;
+  }
+  for (let i = state.userPalette.length; i < 16; i++) {
+    const [r, g, b, a] = hexToRGBA(state.userPalette[0].inputColor);
+    palette[i * 4] = r;
+    palette[i * 4 + 1] = g;
+    palette[i * 4 + 2] = b;
+    palette[i * 4 + 3] = a;
+  }
+  return palette;
+}
+function isEyedropperActive() {
+  return eyedropperActive;
+}
+function forceDeactivateEyedropper() {
+  if (eyedropperActive) {
+    deactivateEyedropper();
+  }
+}
+
+// browser-app/main.ts
+var browserCanvasBackend = {
+  createCanvas(width, height) {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    return canvas;
+  }
+};
+var uploadFileList = document.getElementById("uploadFileList");
+var uploadBtn = document.getElementById("uploadBtn");
+var clearAllBtn = document.getElementById("clearAllBtn");
+var fileInput = document.getElementById("fileInput");
+var uploadScreen = document.getElementById("uploadScreen");
+var pageSelectionScreen = document.getElementById("pageSelectionScreen");
+var pdfFileName = document.getElementById("pdfFileName");
+var pageGrid = document.getElementById("pageGrid");
+var pageStatusText = document.getElementById("pageStatusText");
+var backToFilesBtn = document.getElementById("backToFilesBtn");
+var cropScreen = document.getElementById("cropScreen");
+var canvasContainer2 = document.getElementById("canvasContainer");
+var mainCanvas2 = document.getElementById("mainCanvas");
+var ctx2 = mainCanvas2.getContext("2d");
+var cropOverlay2 = document.getElementById("cropOverlay");
+var cropCtx2 = cropOverlay2.getContext("2d");
+var zoomInBtn = document.getElementById("zoomInBtn");
+var zoomOutBtn = document.getElementById("zoomOutBtn");
+var zoomLevel2 = document.getElementById("zoomLevel");
+var fitToScreenBtn = document.getElementById("fitToScreenBtn");
+var clearCropBtn = document.getElementById("clearCropBtn");
+var cropInfo2 = document.getElementById("cropInfo");
+var processBtn = document.getElementById("processBtn");
+var statusText = document.getElementById("statusText");
+var resultsContainer = document.getElementById("resultsContainer");
+var navStepFile = document.getElementById("navStepFile");
+var navStepPage = document.getElementById("navStepPage");
+var navStepConfigure = document.getElementById("navStepConfigure");
+var toggleToolbarBtn = document.getElementById("toggleToolbarBtn");
+var cropSidebar = document.getElementById("cropSidebar");
+var processSidebar = document.getElementById("processSidebar");
+var paletteName = document.getElementById("paletteName");
+var addPaletteColorBtn = document.getElementById("addPaletteColorBtn");
+var resetPaletteBtn = document.getElementById("resetPaletteBtn");
+var savePaletteBtn = document.getElementById("savePaletteBtn");
+var loadPaletteBtn = document.getElementById("loadPaletteBtn");
+var setDefaultPaletteBtn = document.getElementById("setDefaultPaletteBtn");
+console.log("Palette buttons:", { addPaletteColorBtn, resetPaletteBtn, savePaletteBtn, loadPaletteBtn, setDefaultPaletteBtn });
+var processingScreen = document.getElementById("processingScreen");
+var processCanvasContainer = document.getElementById("processCanvasContainer");
+var processCanvas = document.getElementById("processCanvas");
+var processCtx = processCanvas.getContext("2d");
+var processZoomInBtn = document.getElementById("processZoomInBtn");
+var processZoomOutBtn = document.getElementById("processZoomOutBtn");
+var processZoomLevel = document.getElementById("processZoomLevel");
+var processFitToScreenBtn = document.getElementById("processFitToScreenBtn");
+var processStatusText = document.getElementById("processStatusText");
+var stageCroppedBtn = document.getElementById("stageCroppedBtn");
+var stageExtractBlackBtn = document.getElementById("stageExtractBlackBtn");
+var stageSubtractBlackBtn = document.getElementById("stageSubtractBlackBtn");
+var stageValueBtn = document.getElementById("stageValueBtn");
+var stageSaturationBtn = document.getElementById("stageSaturationBtn");
+var stageSaturationMedianBtn = document.getElementById("stageSaturationMedianBtn");
+var stageHueBtn = document.getElementById("stageHueBtn");
+var stageHueMedianBtn = document.getElementById("stageHueMedianBtn");
+var stageCleanupBtn = document.getElementById("stageCleanupBtn");
+var stagePalettizedBtn = document.getElementById("stagePalettizedBtn");
+var stageMedianBtn = document.getElementById("stageMedianBtn");
+var colorStagesContainer = document.getElementById("colorStagesContainer");
+initCanvasElements({
+  canvasContainer: canvasContainer2,
+  mainCanvas: mainCanvas2,
+  ctx: ctx2,
+  cropOverlay: cropOverlay2,
+  cropCtx: cropCtx2,
+  zoomLevel: zoomLevel2,
+  cropInfo: cropInfo2
+});
+initPaletteModule({
+  showStatus,
+  mainCanvas: mainCanvas2
+});
+stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
+stageExtractBlackBtn.addEventListener("click", () => displayProcessingStage("extract_black"));
+stageSubtractBlackBtn.addEventListener("click", () => displayProcessingStage("subtract_black"));
+stageValueBtn.addEventListener("click", () => displayProcessingStage("value"));
+stageSaturationBtn.addEventListener("click", () => displayProcessingStage("saturation"));
+stageSaturationMedianBtn.addEventListener("click", () => displayProcessingStage("saturation_median"));
+stageHueBtn.addEventListener("click", () => displayProcessingStage("hue"));
+stageHueMedianBtn.addEventListener("click", () => displayProcessingStage("hue_median"));
+stageCleanupBtn.addEventListener("click", () => displayProcessingStage("cleanup"));
+stagePalettizedBtn.addEventListener("click", () => displayProcessingStage("palettized"));
+stageMedianBtn.addEventListener("click", () => displayProcessingStage("median"));
+processZoomInBtn.addEventListener("click", () => {
+  state.processZoom = Math.min(10, state.processZoom * 1.2);
+  updateProcessZoom();
+  updateProcessTransform();
+});
+processZoomOutBtn.addEventListener("click", () => {
+  state.processZoom = Math.max(0.1, state.processZoom / 1.2);
+  updateProcessZoom();
+  updateProcessTransform();
+});
+processFitToScreenBtn.addEventListener("click", () => {
+  processFitToScreen();
+});
+navStepFile.addEventListener("click", () => {
+  if (!navStepFile.classList.contains("disabled")) {
+    setMode("upload");
+  }
+});
+navStepPage.addEventListener("click", () => {
+  if (!navStepPage.classList.contains("disabled") && state.currentPdfData) {
+    setMode("pageSelection");
+  }
+});
+toggleToolbarBtn.addEventListener("click", () => {
+  cropSidebar?.classList.toggle("collapsed");
+  processSidebar?.classList.toggle("collapsed");
+});
+refreshFileList();
+setMode("upload");
+uploadBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  fileInput.click();
+});
+uploadScreen.addEventListener("click", (e) => {
+  const target = e.target;
+  if (target.closest(".file-card") || target.closest(".upload-actions")) {
+    return;
+  }
+  if (target === uploadScreen || target.closest(".upload-file-list")) {
+    fileInput.click();
+  }
+});
+fileInput.addEventListener("change", (e) => {
+  const files = e.target.files;
+  if (files && files.length > 0) {
+    handleFileUpload(files[0]);
+  }
+});
+uploadScreen.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  uploadScreen.classList.add("drag-over");
+});
+uploadScreen.addEventListener("dragleave", (e) => {
+  if (e.target === uploadScreen) {
+    uploadScreen.classList.remove("drag-over");
+  }
+});
+uploadScreen.addEventListener("drop", (e) => {
+  e.preventDefault();
+  uploadScreen.classList.remove("drag-over");
+  const files = e.dataTransfer?.files;
+  if (files && files.length > 0) {
+    handleFileUpload(files[0]);
+  }
+});
+clearAllBtn.addEventListener("click", async () => {
+  if (confirm("Delete all saved files?")) {
+    await clearAllFiles();
+    await refreshFileList();
+    showStatus("All files cleared");
+  }
+});
+backToFilesBtn.addEventListener("click", () => {
+  state.currentFileId = null;
+  state.currentPdfData = null;
+  state.currentImage = null;
+  state.cropRegion = null;
+  setMode("upload");
+  refreshFileList();
+});
+zoomInBtn.addEventListener("click", () => {
+  state.zoom = Math.min(10, state.zoom * 1.2);
+  updateZoom();
+  updateTransform();
+});
+zoomOutBtn.addEventListener("click", () => {
+  state.zoom /= 1.2;
+  updateZoom();
+  redrawCanvas();
+});
+fitToScreenBtn.addEventListener("click", () => {
+  fitToScreen();
+});
+clearCropBtn.addEventListener("click", () => {
+  if (state.currentImage) {
+    setDefaultCrop(state.currentImage.width, state.currentImage.height);
+    drawCropOverlay();
+  }
+});
+processBtn.addEventListener("click", async () => {
+  if (state.currentImage) {
+    await startProcessing();
+  }
+});
+canvasContainer2.addEventListener("mousedown", (e) => {
+  const rect = canvasContainer2.getBoundingClientRect();
+  const canvasX = (e.clientX - rect.left - state.panX) / state.zoom;
+  const canvasY = (e.clientY - rect.top - state.panY) / state.zoom;
+  const handle = getCropHandleAtPoint(canvasX, canvasY);
+  if (handle && state.cropRegion) {
+    state.isDraggingCropHandle = true;
+    state.activeCropHandle = handle;
+    state.lastPanX = e.clientX;
+    state.lastPanY = e.clientY;
+  } else if (!e.shiftKey) {
+    state.isPanning = true;
+    state.lastPanX = e.clientX;
+    state.lastPanY = e.clientY;
+    canvasContainer2.classList.add("grabbing");
+  }
+});
+canvasContainer2.addEventListener("mousemove", (e) => {
+  if (state.isDraggingCropHandle && state.activeCropHandle && state.cropRegion) {
+    const dx = (e.clientX - state.lastPanX) / state.zoom;
+    const dy = (e.clientY - state.lastPanY) / state.zoom;
+    state.lastPanX = e.clientX;
+    state.lastPanY = e.clientY;
+    adjustCropRegion(state.activeCropHandle, dx, dy);
+    drawCropOverlay();
+  } else if (state.isPanning) {
+    const dx = e.clientX - state.lastPanX;
+    const dy = e.clientY - state.lastPanY;
+    state.panX += dx;
+    state.panY += dy;
+    state.lastPanX = e.clientX;
+    state.lastPanY = e.clientY;
+    updateTransform();
+  } else {
+    const rect = canvasContainer2.getBoundingClientRect();
+    const canvasX = (e.clientX - rect.left - state.panX) / state.zoom;
+    const canvasY = (e.clientY - rect.top - state.panY) / state.zoom;
+    const handle = getCropHandleAtPoint(canvasX, canvasY);
+    updateCursorForHandle(handle);
+  }
+});
+canvasContainer2.addEventListener("mouseup", () => {
+  if (state.isDraggingCropHandle) {
+    state.isDraggingCropHandle = false;
+    state.activeCropHandle = null;
+    if (state.currentImage && state.cropRegion) {
+      saveCropSettings(state.currentImage.width, state.currentImage.height, state.cropRegion);
+      updateCropInfo();
+    }
+  }
+  if (state.isPanning) {
+    state.isPanning = false;
+    canvasContainer2.classList.remove("grabbing");
+  }
+});
+canvasContainer2.addEventListener("mouseleave", () => {
+  state.isPanning = false;
+  canvasContainer2.classList.remove("grabbing");
+});
+canvasContainer2.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const isPinchZoom = e.ctrlKey;
+  if (isPinchZoom) {
+    const rect = canvasContainer2.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    const canvasX = (mouseX - state.panX) / state.zoom;
+    const canvasY = (mouseY - state.panY) / state.zoom;
+    const zoomSpeed = 0.01;
+    const zoomChange = -e.deltaY * zoomSpeed * state.zoom;
+    const newZoom = Math.max(0.1, Math.min(20, state.zoom + zoomChange));
+    state.panX = mouseX - canvasX * newZoom;
+    state.panY = mouseY - canvasY * newZoom;
+    state.zoom = newZoom;
+    updateZoom();
+    updateTransform();
+  } else {
+    state.panX -= e.deltaX;
+    state.panY -= e.deltaY;
+    updateTransform();
+  }
+});
+processCanvasContainer.addEventListener("mousedown", (e) => {
+  state.isProcessPanning = true;
+  state.lastProcessPanX = e.clientX;
+  state.lastProcessPanY = e.clientY;
+  processCanvasContainer.classList.add("grabbing");
+});
+processCanvasContainer.addEventListener("mousemove", (e) => {
+  if (state.isProcessPanning) {
+    const dx = e.clientX - state.lastProcessPanX;
+    const dy = e.clientY - state.lastProcessPanY;
+    state.processPanX += dx;
+    state.processPanY += dy;
+    state.lastProcessPanX = e.clientX;
+    state.lastProcessPanY = e.clientY;
+    updateProcessTransform();
+  }
+});
+processCanvasContainer.addEventListener("mouseup", () => {
+  if (state.isProcessPanning) {
+    state.isProcessPanning = false;
+    processCanvasContainer.classList.remove("grabbing");
+  }
+});
+processCanvasContainer.addEventListener("mouseleave", () => {
+  state.isProcessPanning = false;
+  processCanvasContainer.classList.remove("grabbing");
+});
+processCanvasContainer.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const isPinchZoom = e.ctrlKey;
+  if (isPinchZoom) {
+    const rect = processCanvasContainer.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    const image = state.processedImages.get(state.currentStage);
+    if (!image) return;
+    const canvasX = (mouseX - state.processPanX) / state.processZoom;
+    const canvasY = (mouseY - state.processPanY) / state.processZoom;
+    const zoomSpeed = 5e-3;
+    const zoomChange = -e.deltaY * zoomSpeed * state.processZoom;
+    const newZoom = Math.max(0.1, Math.min(10, state.processZoom + zoomChange));
+    state.processPanX = mouseX - canvasX * newZoom;
+    state.processPanY = mouseY - canvasY * newZoom;
+    state.processZoom = newZoom;
+    updateProcessZoom();
+    updateProcessTransform();
+  } else {
+    state.processPanX -= e.deltaX;
+    state.processPanY -= e.deltaY;
+    updateProcessTransform();
+  }
+});
+function updateNavigation(mode) {
+  navStepFile.classList.remove("active", "completed", "disabled");
+  navStepPage.classList.remove("active", "completed", "disabled");
+  navStepConfigure.classList.remove("active", "completed", "disabled");
+  switch (mode) {
+    case "upload":
+      navStepFile.classList.add("active");
+      navStepPage.classList.add("disabled");
+      navStepConfigure.classList.add("disabled");
+      break;
+    case "pageSelection":
+      navStepFile.classList.add("completed");
+      navStepPage.classList.add("active");
+      navStepConfigure.classList.add("disabled");
+      break;
+    case "crop":
+      navStepFile.classList.add("completed");
+      navStepPage.classList.add("completed");
+      navStepConfigure.classList.add("active");
+      break;
+    case "processing":
+      navStepFile.classList.add("completed");
+      navStepPage.classList.add("completed");
+      navStepConfigure.classList.add("completed");
+      break;
+  }
+}
+function setMode(mode) {
+  console.log("setMode called:", mode);
+  uploadScreen.classList.remove("active");
+  pageSelectionScreen.classList.remove("active");
+  cropScreen.classList.remove("active");
+  processingScreen.classList.remove("active");
+  pageSelectionScreen.style.display = "";
+  switch (mode) {
+    case "upload":
+      uploadScreen.classList.add("active");
+      console.log("Upload screen activated");
+      console.log("uploadScreen display:", globalThis.getComputedStyle(uploadScreen).display);
+      console.log("uploadScreen hasClass active:", uploadScreen.classList.contains("active"));
+      break;
+    case "pageSelection":
+      pageSelectionScreen.classList.add("active");
+      pageSelectionScreen.style.display = "flex";
+      console.log("Page selection screen activated, pageGrid children:", pageGrid.children.length);
+      console.log("pageSelectionScreen display:", globalThis.getComputedStyle(pageSelectionScreen).display);
+      console.log("pageSelectionScreen visibility:", globalThis.getComputedStyle(pageSelectionScreen).visibility);
+      break;
+    case "crop":
+      cropScreen.classList.add("active");
+      console.log("Crop screen activated");
+      break;
+    case "processing":
+      processingScreen.classList.add("active");
+      console.log("Processing screen activated");
+      break;
+  }
+  updateNavigation(mode);
+}
+function showStatus(message, isError = false) {
+  let activeStatusText = statusText;
+  if (pageSelectionScreen.classList.contains("active")) {
+    activeStatusText = pageStatusText;
+  } else if (processingScreen.classList.contains("active")) {
+    activeStatusText = processStatusText;
+  }
+  activeStatusText.textContent = message;
+  if (isError) {
+    activeStatusText.classList.add("status-error");
+  } else {
+    activeStatusText.classList.remove("status-error");
+  }
+  console.log(message);
+}
+initPaletteDB().then(() => loadDefaultPalette());
+async function handleFileUpload(file) {
+  try {
+    showStatus(`Loading: ${file.name}...`);
+    if (!state.currentFileId) {
+      try {
+        state.currentFileId = await saveFile(file);
+        console.log(`File saved with ID: ${state.currentFileId}`);
+        await refreshFileList();
+      } catch (err) {
+        console.error("Error saving file:", err);
+      }
+    }
+    if (file.type === "application/pdf") {
+      console.log("handleFileUpload: Detected PDF, calling loadPdf");
+      await loadPdf(file);
+      console.log("handleFileUpload: loadPdf complete, switching to pageSelection mode");
+      setMode("pageSelection");
+    } else {
+      console.log("handleFileUpload: Detected image, loading directly");
+      const image = await loadImageFromFile(file);
+      await loadImage(image, showStatus);
+      setMode("crop");
+    }
+  } catch (error) {
+    showStatus(`Error: ${error.message}`, true);
+    console.error(error);
+  }
+}
+async function loadPdf(file) {
+  try {
+    console.log("loadPdf: Starting to load", file.name);
+    const arrayBuffer = await file.arrayBuffer();
+    console.log("loadPdf: Got arrayBuffer, length:", arrayBuffer.byteLength);
+    const copy = new Uint8Array(arrayBuffer.byteLength);
+    copy.set(new Uint8Array(arrayBuffer));
+    state.currentPdfData = copy;
+    console.log("loadPdf: Created copy", copy.length);
+    const initialCopy = state.currentPdfData.slice();
+    console.log("loadPdf: Calling getDocument");
+    const loadingTask = pdfjsLib.getDocument({ data: initialCopy });
+    const pdf = await loadingTask.promise;
+    state.pdfPageCount = pdf.numPages;
+    console.log("loadPdf: PDF loaded, pages:", state.pdfPageCount);
+    showStatus(`PDF loaded: ${state.pdfPageCount} pages`);
+    console.log("loadPdf: About to set pdfFileName, element:", pdfFileName);
+    try {
+      pdfFileName.textContent = file.name;
+      console.log("loadPdf: pdfFileName set successfully");
+    } catch (e) {
+      console.error("loadPdf: Error setting pdfFileName:", e);
+    }
+    console.log("loadPdf: pdfFileName set, about to generate thumbnails");
+    console.log("loadPdf: Generating page thumbnails, clearing pageGrid");
+    console.log("loadPdf: pageGrid element:", pageGrid);
+    const existingCards = pageGrid.children.length;
+    if (existingCards > 0) {
+      console.log(`[THUMBNAIL] PURGING ${existingCards} existing thumbnail cards from cache`);
+    }
+    pageGrid.innerHTML = "";
+    console.log("loadPdf: pageGrid cleared, adding", state.pdfPageCount, "cards");
+    const pageDimensions = [];
+    let pageLabels = null;
+    try {
+      pageLabels = await pdf.getPageLabels();
+    } catch (_e) {
+    }
+    for (let i = 1; i <= state.pdfPageCount; i++) {
+      const page = await pdf.getPage(i);
+      const viewport = page.getViewport({ scale: 1 });
+      const pageLabel = pageLabels && pageLabels[i - 1] || `Page ${i}`;
+      pageDimensions.push({
+        width: viewport.width,
+        height: viewport.height,
+        pageLabel
+      });
+      const card = document.createElement("div");
+      card.className = "page-card";
+      const imageDiv = document.createElement("div");
+      imageDiv.className = "page-card-image";
+      imageDiv.textContent = "\u{1F4C4}";
+      const aspectRatio = viewport.width / viewport.height;
+      imageDiv.style.aspectRatio = aspectRatio.toString();
+      imageDiv.style.width = 250 * aspectRatio + "px";
+      const label = document.createElement("div");
+      label.className = "page-card-label";
+      label.textContent = pageLabel;
+      card.appendChild(imageDiv);
+      card.appendChild(label);
+      card.dataset.pageNum = i.toString();
+      if (i === state.currentSelectedPage) {
+        card.classList.add("selected");
+      }
+      card.addEventListener("click", () => {
+        selectPdfPage(i);
+      });
+      pageGrid.appendChild(card);
+    }
+    const MAX_THUMBNAILS = 50;
+    const thumbnailsToRender = Math.min(state.pdfPageCount, MAX_THUMBNAILS);
+    state.cancelThumbnailLoading = false;
+    (async () => {
+      const pagesBySize = Array.from({ length: state.pdfPageCount }, (_, i) => i).sort((a, b) => {
+        const areaA = pageDimensions[a].width * pageDimensions[a].height;
+        const areaB = pageDimensions[b].width * pageDimensions[b].height;
+        return areaB - areaA;
+      });
+      const renderQueue = [];
+      const addedPages = /* @__PURE__ */ new Set();
+      let sequentialIndex = 0;
+      let largestIndex = 0;
+      console.log(`[THUMBNAIL] Building render queue for ${thumbnailsToRender} thumbnails out of ${state.pdfPageCount} pages`);
+      while (renderQueue.length < thumbnailsToRender && (sequentialIndex < state.pdfPageCount || largestIndex < pagesBySize.length)) {
+        if (sequentialIndex < state.pdfPageCount && renderQueue.length < thumbnailsToRender) {
+          if (!addedPages.has(sequentialIndex)) {
+            renderQueue.push(sequentialIndex);
+            addedPages.add(sequentialIndex);
+          }
+          sequentialIndex++;
+        }
+        if (sequentialIndex < state.pdfPageCount && renderQueue.length < thumbnailsToRender) {
+          if (!addedPages.has(sequentialIndex)) {
+            renderQueue.push(sequentialIndex);
+            addedPages.add(sequentialIndex);
+          }
+          sequentialIndex++;
+        }
+        while (largestIndex < pagesBySize.length && renderQueue.length < thumbnailsToRender) {
+          const largestPageIdx = pagesBySize[largestIndex++];
+          if (!addedPages.has(largestPageIdx)) {
+            renderQueue.push(largestPageIdx);
+            addedPages.add(largestPageIdx);
+            break;
+          }
+        }
+      }
+      console.log(`[THUMBNAIL] Render queue built with ${renderQueue.length} pages:`, renderQueue.map((idx) => {
+        const pageNum = idx + 1;
+        const label = pageDimensions[idx]?.pageLabel || `Page ${pageNum}`;
+        return `${pageNum}(${label})`;
+      }).join(", "));
+      const batchSize = 3;
+      let completed = 0;
+      const allCards = Array.from(pageGrid.children);
+      for (let i = 0; i < renderQueue.length; i += batchSize) {
+        if (state.cancelThumbnailLoading) {
+          console.log(`[THUMBNAIL] Loading cancelled after ${completed} thumbnails`);
+          showStatus(`Thumbnail loading cancelled`);
+          return;
+        }
+        const batch = [];
+        const batchInfo = [];
+        for (let j = 0; j < batchSize && i + j < renderQueue.length; j++) {
+          const pageIndex = renderQueue[i + j];
+          const pageNum = pageIndex + 1;
+          const pageLabel = pageDimensions[pageIndex]?.pageLabel || `Page ${pageNum}`;
+          if (pageIndex < allCards.length) {
+            const card = allCards[pageIndex];
+            const imageDiv = card.querySelector(".page-card-image");
+            if (imageDiv) {
+              batchInfo.push(`${pageNum}(${pageLabel})`);
+              batch.push(generatePageThumbnail(pageNum, pageLabel, imageDiv));
+            } else {
+              console.warn(`[THUMBNAIL] No imageDiv found for page ${pageNum}(${pageLabel}) at index ${pageIndex}`);
+            }
+          } else {
+            console.warn(`[THUMBNAIL] Page index ${pageIndex} out of bounds (cards.length=${allCards.length}) for page ${pageNum}`);
+          }
+        }
+        if (batch.length > 0) {
+          console.log(`[THUMBNAIL] Batch ${Math.floor(i / batchSize) + 1}: Rendering ${batchInfo.join(", ")}`);
+          await Promise.all(batch);
+          completed += batch.length;
+          console.log(`[THUMBNAIL] Batch complete. Total: ${completed}/${renderQueue.length}`);
+          const statusMsg = thumbnailsToRender < state.pdfPageCount ? `Loading thumbnails: ${completed}/${thumbnailsToRender} (${state.pdfPageCount} pages total)` : `Loading thumbnails: ${completed}/${state.pdfPageCount}`;
+          showStatus(statusMsg);
+        } else {
+          console.warn(`[THUMBNAIL] Batch ${Math.floor(i / batchSize) + 1}: No valid thumbnails to render`);
+        }
+      }
+      const finalMsg = thumbnailsToRender < state.pdfPageCount ? `PDF loaded: ${state.pdfPageCount} pages (showing ${thumbnailsToRender} thumbnails)` : `PDF loaded: ${state.pdfPageCount} pages`;
+      showStatus(finalMsg);
+    })();
+  } catch (error) {
+    console.error("loadPdf error:", error);
+    showStatus(`PDF load error: ${error.message}`, true);
+    throw error;
+  }
+}
+async function generatePageThumbnail(pageNum, pageLabel, container) {
+  try {
+    if (!state.currentPdfData) {
+      console.warn(`[THUMBNAIL] No PDF data for page ${pageNum}(${pageLabel})`);
+      return;
+    }
+    console.log(`[THUMBNAIL] START rendering page ${pageNum}(${pageLabel})`);
+    const pdfDataCopy = state.currentPdfData.slice();
+    const image = await renderPdfPage(
+      { file: pdfDataCopy, pageNumber: pageNum, scale: 0.4 },
+      browserCanvasBackend,
+      pdfjsLib
+    );
+    console.log(`[THUMBNAIL] RENDERED page ${pageNum}(${pageLabel}): ${image.width}x${image.height}`);
+    const aspectRatio = image.width / image.height;
+    container.style.aspectRatio = aspectRatio.toString();
+    container.style.width = 250 * aspectRatio + "px";
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx3 = canvas.getContext("2d");
+    if (ctx3) {
+      const imageData = new ImageData(
+        new Uint8ClampedArray(image.data),
+        image.width,
+        image.height
+      );
+      ctx3.putImageData(imageData, 0, 0);
+      const img = document.createElement("img");
+      img.src = canvas.toDataURL();
+      container.innerHTML = "";
+      container.appendChild(img);
+      console.log(`[THUMBNAIL] COMPLETE page ${pageNum}(${pageLabel}) - image inserted into DOM`);
+    }
+  } catch (err) {
+    console.error(`[THUMBNAIL] ERROR generating thumbnail for page ${pageNum}(${pageLabel}):`, err);
+  }
+}
+async function selectPdfPage(pageNum) {
+  try {
+    console.log("selectPdfPage: Starting, page:", pageNum);
+    if (!state.currentPdfData) {
+      console.error("selectPdfPage: No PDF data!");
+      showStatus("No PDF loaded", true);
+      return;
+    }
+    state.cancelThumbnailLoading = true;
+    state.currentSelectedPage = pageNum;
+    const cards = pageGrid.querySelectorAll(".page-card");
+    cards.forEach((card) => card.classList.remove("selected"));
+    const selectedCard = pageGrid.querySelector(`[data-page-num="${pageNum}"]`);
+    if (selectedCard) {
+      selectedCard.classList.add("selected");
+    }
+    setMode("crop");
+    ctx2.clearRect(0, 0, mainCanvas2.width, mainCanvas2.height);
+    cropCtx2.clearRect(0, 0, cropOverlay2.width, cropOverlay2.height);
+    mainCanvas2.width = 0;
+    mainCanvas2.height = 0;
+    cropOverlay2.width = 0;
+    cropOverlay2.height = 0;
+    cropOverlay2.style.display = "none";
+    showStatus(`\u23F3 Rendering page ${pageNum} at 200 DPI...`);
+    canvasContainer2.style.opacity = "0.3";
+    let progressDots = 0;
+    const progressInterval = setInterval(() => {
+      progressDots = (progressDots + 1) % 4;
+      showStatus(`\u23F3 Rendering page ${pageNum} at 200 DPI${".".repeat(progressDots)}`);
+    }, 300);
+    console.log("selectPdfPage: Creating copy");
+    const pdfDataCopy = state.currentPdfData.slice();
+    console.log("selectPdfPage: Calling renderPdfPage");
+    const image = await renderPdfPage(
+      {
+        file: pdfDataCopy,
+        pageNumber: pageNum,
+        scale: 2.778
+      },
+      browserCanvasBackend,
+      pdfjsLib
+    );
+    console.log("selectPdfPage: Got image", image.width, "x", image.height);
+    clearInterval(progressInterval);
+    canvasContainer2.style.opacity = "1";
+    await loadImage(image, showStatus);
+    showStatus(`\u2713 Page ${pageNum} loaded: ${image.width}\xD7${image.height}`);
+    if (state.currentFileId && state.currentImage) {
+      const thumbnail = generateThumbnail(state.currentImage);
+      await updateFile(state.currentFileId, { thumbnail });
+      await refreshFileList();
+    }
+  } catch (error) {
+    showStatus(`Error: ${error.message}`, true);
+    console.error(error);
   }
 }
 function extractColorFromPalettized(palettized, colorIndex) {
@@ -3633,22 +4006,6 @@ function updateProcessTransform() {
     processCanvas.style.imageRendering = "auto";
   }
 }
-function cropImage(image, region) {
-  const x = Math.max(0, Math.floor(region.x));
-  const y = Math.max(0, Math.floor(region.y));
-  const width = Math.min(image.width - x, Math.floor(region.width));
-  const height = Math.min(image.height - y, Math.floor(region.height));
-  const croppedData = new Uint8ClampedArray(width * height * 4);
-  for (let row = 0; row < height; row++) {
-    const srcOffset = ((y + row) * image.width + x) * 4;
-    const dstOffset = row * width * 4;
-    croppedData.set(
-      image.data.subarray(srcOffset, srcOffset + width * 4),
-      dstOffset
-    );
-  }
-  return { width, height, data: croppedData };
-}
 function generateThumbnail(image) {
   const maxSize = 128;
   const scale = Math.min(maxSize / image.width, maxSize / image.height);
@@ -3657,8 +4014,8 @@ function generateThumbnail(image) {
   const canvas = document.createElement("canvas");
   canvas.width = thumbWidth;
   canvas.height = thumbHeight;
-  const ctx2 = canvas.getContext("2d");
-  if (!ctx2) return "";
+  const ctx3 = canvas.getContext("2d");
+  if (!ctx3) return "";
   const tempCanvas = document.createElement("canvas");
   tempCanvas.width = image.width;
   tempCanvas.height = image.height;
@@ -3670,9 +4027,9 @@ function generateThumbnail(image) {
     image.height
   );
   tempCtx.putImageData(imageData, 0, 0);
-  ctx2.imageSmoothingEnabled = true;
-  ctx2.imageSmoothingQuality = "high";
-  ctx2.drawImage(tempCanvas, 0, 0, thumbWidth, thumbHeight);
+  ctx3.imageSmoothingEnabled = true;
+  ctx3.imageSmoothingQuality = "high";
+  ctx3.drawImage(tempCanvas, 0, 0, thumbWidth, thumbHeight);
   return canvas.toDataURL("image/png");
 }
 async function refreshFileList() {
@@ -3756,304 +4113,6 @@ async function loadStoredFile(id) {
   await refreshFileList();
   await handleFileUpload(file);
 }
-function renderPaletteUI() {
-  console.log("renderPaletteUI called, state.userPalette length:", state.userPalette.length);
-  const paletteDisplay = document.getElementById("paletteDisplay");
-  console.log("paletteDisplay element:", paletteDisplay);
-  if (!paletteDisplay) {
-    console.error("paletteDisplay not found in DOM!");
-    return;
-  }
-  paletteDisplay.innerHTML = "";
-  state.userPalette.forEach((color, index) => {
-    const item = document.createElement("div");
-    item.style.cssText = "display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem; border-bottom: 1px solid #3a3a3a; cursor: pointer; transition: background 0.2s;";
-    item.onmouseover = () => item.style.background = "#333";
-    item.onmouseout = () => item.style.background = "transparent";
-    item.onclick = () => openColorEditor(index);
-    const inputSwatch = document.createElement("div");
-    inputSwatch.style.cssText = `width: 24px; height: 24px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.inputColor}; flex-shrink: 0;`;
-    item.appendChild(inputSwatch);
-    if (color.mapToBg) {
-      const statusIcon = document.createElement("span");
-      statusIcon.textContent = "\u2715";
-      statusIcon.style.cssText = "font-size: 0.9rem; color: #ef4444; flex-shrink: 0; width: 16px; text-align: center;";
-      statusIcon.title = "Remove";
-      item.appendChild(statusIcon);
-    } else if (color.inputColor.toLowerCase() !== color.outputColor.toLowerCase()) {
-      const arrow = document.createElement("span");
-      arrow.textContent = "\u2192";
-      arrow.style.cssText = "font-size: 0.9rem; color: #999; flex-shrink: 0;";
-      item.appendChild(arrow);
-      const outputSwatch = document.createElement("div");
-      outputSwatch.style.cssText = `width: 24px; height: 24px; border-radius: 4px; border: 2px solid ${index === 0 ? "#4f46e5" : "#3a3a3a"}; background: ${color.outputColor}; flex-shrink: 0;`;
-      item.appendChild(outputSwatch);
-    }
-    const hexLabel = document.createElement("div");
-    hexLabel.style.cssText = "font-family: 'Courier New', monospace; font-size: 0.8rem; color: #aaa; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;";
-    hexLabel.textContent = color.inputColor.toUpperCase();
-    hexLabel.title = color.inputColor.toUpperCase();
-    item.appendChild(hexLabel);
-    if (index === 0) {
-      const bgLabel = document.createElement("span");
-      bgLabel.textContent = "BG";
-      bgLabel.style.cssText = "font-size: 0.7rem; color: #4f46e5; font-weight: 600; flex-shrink: 0; padding: 0.1rem 0.3rem; background: rgba(79, 70, 229, 0.2); border-radius: 3px;";
-      item.appendChild(bgLabel);
-    }
-    paletteDisplay.appendChild(item);
-  });
-}
-var colorEditorIndex = null;
-var eyedropperMode = null;
-function openColorEditor(index) {
-  colorEditorIndex = index;
-  const color = state.userPalette[index];
-  let modal = document.getElementById("colorEditorModal");
-  if (!modal) {
-    modal = document.createElement("div");
-    modal.id = "colorEditorModal";
-    modal.style.cssText = `
-      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(4px);
-      z-index: 3000; display: flex; align-items: center; justify-content: center;
-    `;
-    document.body.appendChild(modal);
-  }
-  modal.innerHTML = `
-    <div style="background: #1a1a1a; border: 2px solid #4f46e5; border-radius: 8px; padding: 1.5rem; min-width: 400px; max-width: 500px;">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
-        <h3 style="margin: 0; color: #fff;">Edit Color ${index}${index === 0 ? " (Background)" : ""}</h3>
-        <button id="closeColorEditor" style="background: none; border: none; color: #999; font-size: 1.5rem; cursor: pointer; padding: 0; width: 32px; height: 32px;">\xD7</button>
-      </div>
-      
-      <div style="display: flex; flex-direction: column; gap: 1.25rem;">
-        <!-- Input Color -->
-        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-          <label style="color: #aaa; font-size: 0.9rem; font-weight: 500;">Input Color (from document)</label>
-          <div style="display: flex; gap: 0.5rem; align-items: center;">
-            <div style="width: 48px; height: 48px; border-radius: 6px; border: 2px solid #3a3a3a; background: ${color.inputColor}; flex-shrink: 0;"></div>
-            <input type="text" id="inputColorHex" value="${color.inputColor}" maxlength="7" 
-              style="flex: 1; padding: 0.75rem; background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 4px; color: #fff; font-family: 'Courier New', monospace; font-size: 1rem;">
-            <button id="eyedropperInput" style="padding: 0.75rem; background: #4f46e5; border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 1.2rem;" title="Pick from canvas">\u{1F4A7}</button>
-          </div>
-        </div>
-        
-        <!-- Output Options -->
-        <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-          <label style="color: #aaa; font-size: 0.9rem; font-weight: 500;">Output (in vectorized result)</label>
-          
-          <div style="display: flex; gap: 0.75rem; margin-bottom: 0.5rem;">
-            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #fff;">
-              <input type="radio" name="outputMode" value="same" ${!color.mapToBg && color.inputColor === color.outputColor ? "checked" : ""} style="cursor: pointer;">
-              <span>Keep same color</span>
-            </label>
-            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #fff;">
-              <input type="radio" name="outputMode" value="different" ${!color.mapToBg && color.inputColor !== color.outputColor ? "checked" : ""} style="cursor: pointer;">
-              <span>Transform to:</span>
-            </label>
-            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #fff;">
-              <input type="radio" name="outputMode" value="remove" ${color.mapToBg ? "checked" : ""} style="cursor: pointer;">
-              <span style="color: #ef4444;">Remove</span>
-            </label>
-          </div>
-          
-          <div id="outputColorSection" style="display: flex; gap: 0.5rem; align-items: center; ${color.mapToBg || color.inputColor === color.outputColor ? "opacity: 0.4; pointer-events: none;" : ""}">
-            <div style="width: 48px; height: 48px; border-radius: 6px; border: 2px solid #3a3a3a; background: ${color.outputColor}; flex-shrink: 0;"></div>
-            <input type="text" id="outputColorHex" value="${color.outputColor}" maxlength="7" 
-              style="flex: 1; padding: 0.75rem; background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 4px; color: #fff; font-family: 'Courier New', monospace; font-size: 1rem;">
-            <button id="eyedropperOutput" style="padding: 0.75rem; background: #4f46e5; border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 1.2rem;" title="Pick from canvas">\u{1F4A7}</button>
-          </div>
-        </div>
-        
-        <!-- Action Buttons -->
-        <div style="display: flex; gap: 0.75rem; margin-top: 0.5rem;">
-          <button id="saveColorEdit" style="flex: 1; padding: 0.75rem; background: #4f46e5; border: none; border-radius: 4px; color: white; cursor: pointer; font-weight: 600;">Save</button>
-          ${index !== 0 ? '<button id="deleteColor" style="padding: 0.75rem 1.25rem; background: #ef4444; border: none; border-radius: 4px; color: white; cursor: pointer;">Delete</button>' : ""}
-          <button id="cancelColorEdit" style="padding: 0.75rem 1.25rem; background: #3a3a3a; border: none; border-radius: 4px; color: white; cursor: pointer;">Cancel</button>
-        </div>
-      </div>
-    </div>
-  `;
-  modal.style.display = "flex";
-  const inputHexField = document.getElementById("inputColorHex");
-  const outputHexField = document.getElementById("outputColorHex");
-  const outputSection = document.getElementById("outputColorSection");
-  const outputModeRadios = document.getElementsByName("outputMode");
-  outputModeRadios.forEach((radio) => {
-    radio.addEventListener("change", () => {
-      if (radio.value === "different") {
-        outputSection.style.opacity = "1";
-        outputSection.style.pointerEvents = "auto";
-      } else {
-        outputSection.style.opacity = "0.4";
-        outputSection.style.pointerEvents = "none";
-      }
-    });
-  });
-  document.getElementById("eyedropperInput").addEventListener("click", () => {
-    eyedropperMode = "input";
-    activateEyedropper();
-    modal.style.display = "none";
-  });
-  document.getElementById("eyedropperOutput").addEventListener("click", () => {
-    eyedropperMode = "output";
-    activateEyedropper();
-    modal.style.display = "none";
-  });
-  document.getElementById("saveColorEdit").addEventListener("click", () => {
-    const inputColor = inputHexField.value;
-    const outputColor = outputHexField.value;
-    const selectedMode = Array.from(outputModeRadios).find((r) => r.checked)?.value;
-    if (!/^#[0-9A-Fa-f]{6}$/.test(inputColor)) {
-      alert("Invalid input color format. Use #RRGGBB");
-      return;
-    }
-    if (selectedMode === "different" && !/^#[0-9A-Fa-f]{6}$/.test(outputColor)) {
-      alert("Invalid output color format. Use #RRGGBB");
-      return;
-    }
-    state.userPalette[index].inputColor = inputColor;
-    if (selectedMode === "remove") {
-      state.userPalette[index].mapToBg = true;
-      state.userPalette[index].outputColor = inputColor;
-    } else if (selectedMode === "different") {
-      state.userPalette[index].mapToBg = false;
-      state.userPalette[index].outputColor = outputColor;
-    } else {
-      state.userPalette[index].mapToBg = false;
-      state.userPalette[index].outputColor = inputColor;
-    }
-    renderPaletteUI();
-    closeColorEditor();
-  });
-  const deleteBtn = document.getElementById("deleteColor");
-  if (deleteBtn) {
-    deleteBtn.addEventListener("click", () => {
-      if (index !== 0 && confirm("Delete this color?")) {
-        state.userPalette.splice(index, 1);
-        renderPaletteUI();
-        closeColorEditor();
-      }
-    });
-  }
-  document.getElementById("cancelColorEdit").addEventListener("click", closeColorEditor);
-  document.getElementById("closeColorEditor").addEventListener("click", closeColorEditor);
-  modal.addEventListener("click", (e) => {
-    if (e.target === modal) closeColorEditor();
-  });
-}
-function closeColorEditor() {
-  const modal = document.getElementById("colorEditorModal");
-  if (modal) modal.style.display = "none";
-  colorEditorIndex = null;
-  eyedropperMode = null;
-}
-function addPaletteColor() {
-  console.log("Add palette color clicked, current length:", state.userPalette.length);
-  if (state.userPalette.length >= 16) {
-    showStatus("Maximum 16 colors allowed", true);
-    return;
-  }
-  const newIndex = state.userPalette.length;
-  state.userPalette.push({
-    inputColor: "#808080",
-    outputColor: "#808080",
-    mapToBg: false
-  });
-  renderPaletteUI();
-  openColorEditor(newIndex);
-}
-function resetPaletteToDefault() {
-  state.userPalette.length = 0;
-  Array.from(DEFAULT_PALETTE).forEach((color) => {
-    state.userPalette.push({
-      inputColor: u32ToHex(color),
-      outputColor: u32ToHex(color),
-      mapToBg: false
-    });
-  });
-  renderPaletteUI();
-  showStatus("Palette reset to default");
-}
-var eyedropperActive = false;
-function activateEyedropper() {
-  if (!state.currentImage) {
-    showStatus("No image loaded", true);
-    return;
-  }
-  eyedropperActive = true;
-  document.body.classList.add("eyedropper-active");
-  mainCanvas.style.cursor = "crosshair";
-  showStatus("\u{1F4A7} Click on the image to pick a color (ESC to cancel)");
-}
-function deactivateEyedropper() {
-  eyedropperActive = false;
-  document.body.classList.remove("eyedropper-active");
-  mainCanvas.style.cursor = "";
-  showStatus("Eyedropper cancelled");
-}
-function pickColorFromCanvas(x, y) {
-  if (!state.currentImage) return;
-  const rect = mainCanvas.getBoundingClientRect();
-  const scaleX = state.currentImage.width / rect.width;
-  const scaleY = state.currentImage.height / rect.height;
-  const imgX = Math.floor((x - rect.left) * scaleX);
-  const imgY = Math.floor((y - rect.top) * scaleY);
-  if (imgX < 0 || imgX >= state.currentImage.width || imgY < 0 || imgY >= state.currentImage.height) {
-    return;
-  }
-  const pixelIndex = (imgY * state.currentImage.width + imgX) * 4;
-  const r = state.currentImage.data[pixelIndex];
-  const g = state.currentImage.data[pixelIndex + 1];
-  const b = state.currentImage.data[pixelIndex + 2];
-  const hex = `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
-  deactivateEyedropper();
-  if (colorEditorIndex !== null && eyedropperMode) {
-    if (eyedropperMode === "input") {
-      state.userPalette[colorEditorIndex].inputColor = hex;
-    } else if (eyedropperMode === "output") {
-      state.userPalette[colorEditorIndex].outputColor = hex;
-      state.userPalette[colorEditorIndex].mapToBg = false;
-    }
-    openColorEditor(colorEditorIndex);
-    showStatus(`Picked ${hex.toUpperCase()}`);
-  } else {
-    addColorToPalette(hex);
-    showStatus(`Added ${hex.toUpperCase()} to palette`);
-  }
-}
-function addColorToPalette(hex) {
-  if (state.userPalette.length >= 16) {
-    showStatus("Maximum 16 colors - remove one first", true);
-    return;
-  }
-  state.userPalette.push({
-    inputColor: hex,
-    outputColor: hex,
-    mapToBg: false
-  });
-  renderPaletteUI();
-  showStatus(`Added ${hex} to palette`);
-}
-function buildPaletteRGBA() {
-  const palette = new Uint8ClampedArray(16 * 4);
-  for (let i = 0; i < state.userPalette.length && i < 16; i++) {
-    const color = state.userPalette[i];
-    const [r, g, b, a] = hexToRGBA(color.inputColor);
-    palette[i * 4] = r;
-    palette[i * 4 + 1] = g;
-    palette[i * 4 + 2] = b;
-    palette[i * 4 + 3] = a;
-  }
-  for (let i = state.userPalette.length; i < 16; i++) {
-    const [r, g, b, a] = hexToRGBA(state.userPalette[0].inputColor);
-    palette[i * 4] = r;
-    palette[i * 4 + 1] = g;
-    palette[i * 4 + 2] = b;
-    palette[i * 4 + 3] = a;
-  }
-  return palette;
-}
 console.log("Setting up palette event listeners...");
 if (addPaletteColorBtn) {
   addPaletteColorBtn.addEventListener("click", () => {
@@ -4087,14 +4146,14 @@ if (setDefaultPaletteBtn) {
     setDefaultPalette();
   });
 }
-mainCanvas.addEventListener("click", (e) => {
-  if (eyedropperActive) {
+mainCanvas2.addEventListener("click", (e) => {
+  if (isEyedropperActive()) {
     pickColorFromCanvas(e.clientX, e.clientY);
   }
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && eyedropperActive) {
-    deactivateEyedropper();
+  if (e.key === "Escape" && isEyedropperActive()) {
+    forceDeactivateEyedropper();
   }
 });
 renderPaletteUI();
