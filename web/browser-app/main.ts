@@ -15,6 +15,9 @@ import type { PalettizedImage } from "../src/formats/palettized.ts";
 import type { BinaryImage } from "../src/formats/binary.ts";
 import { DEFAULT_PALETTE } from "../src/formats/palettized.ts";
 import { saveFile, getFile, listFiles, deleteFile, clearAllFiles, updateFile } from "./storage.ts";
+import type { AppMode, ProcessingStage, BaseProcessingStage, PaletteColor } from "./types.ts";
+import { u32ToHex, hexToRGBA } from "./utils.ts";
+import { state } from "./state.ts";
 
 // Browser canvas backend for PDF rendering
 const browserCanvasBackend: CanvasBackend = {
@@ -29,89 +32,6 @@ const browserCanvasBackend: CanvasBackend = {
 // Declare global pdfjsLib from CDN script
 // deno-lint-ignore no-explicit-any
 declare const pdfjsLib: any;
-
-// UI State
-type AppMode = "upload" | "pageSelection" | "crop" | "processing";
-let currentFileId: string | null = null;
-let currentPdfData: Uint8Array | null = null;
-let currentImage: RGBAImage | null = null;
-let currentSelectedPage: number | null = null;
-let pdfPageCount = 0;
-let cancelThumbnailLoading = false;
-
-// Processing state
-// Base processing stages
-type BaseProcessingStage = 
-  | "cropped" 
-  | "extract_black"
-  | "subtract_black"
-  | "value" 
-  | "saturation" 
-  | "saturation_median" 
-  | "hue" 
-  | "hue_median" 
-  | "cleanup" 
-  | "palettized" 
-  | "median";
-
-// Dynamic stages: color_0, color_0_skel, color_1, color_1_skel, etc.
-type ProcessingStage = BaseProcessingStage | string;
-
-let currentStage: ProcessingStage = "cropped";
-const processedImages: Map<ProcessingStage, RGBAImage | PalettizedImage | BinaryImage> = new Map();
-
-// Palette configuration
-interface PaletteColor {
-  inputColor: string;   // Hex color for matching
-  outputColor: string;  // Hex color for display
-  mapToBg: boolean;     // Map this color to background
-}
-
-// Convert u32 color to hex
-function u32ToHex(color: number): string {
-  const r = (color >> 24) & 0xff;
-  const g = (color >> 16) & 0xff;
-  const b = (color >> 8) & 0xff;
-  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
-}
-
-// Convert hex to RGBA values
-function hexToRGBA(hex: string): [number, number, number, number] {
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return [r, g, b, 255];
-}
-
-// Initialize palette from DEFAULT_PALETTE
-const userPalette: PaletteColor[] = Array.from(DEFAULT_PALETTE).map(color => ({
-  inputColor: u32ToHex(color),
-  outputColor: u32ToHex(color),
-  mapToBg: false,
-}));
-
-// Palette storage variables
-let currentPaletteName = "";
-
-// Canvas/Viewport State
-let zoom = 1.0;
-let panX = 0;
-let panY = 0;
-let isPanning = false;
-let isDraggingCropHandle = false;
-let activeCropHandle: string | null = null; // 'tl', 'tr', 'bl', 'br', 't', 'r', 'b', 'l'
-let cropRegion: { x: number; y: number; width: number; height: number } | null = null;
-let lastPanX = 0;
-let lastPanY = 0;
-
-// Processing canvas state
-let processZoom = 1.0;
-let processPanX = 0;
-let processPanY = 0;
-let isProcessPanning = false;
-let lastProcessPanX = 0;
-let lastProcessPanY = 0;
-let processViewInitialized = false;
 
 // DOM Elements
 const uploadFileList = document.getElementById("uploadFileList") as HTMLDivElement;
@@ -199,13 +119,13 @@ stagePalettizedBtn.addEventListener("click", () => displayProcessingStage("palet
 stageMedianBtn.addEventListener("click", () => displayProcessingStage("median"));
 
 processZoomInBtn.addEventListener("click", () => {
-  processZoom = Math.min(10, processZoom * 1.2);
+  state.processZoom = Math.min(10, state.processZoom * 1.2);
   updateProcessZoom();
   updateProcessTransform();
 });
 
 processZoomOutBtn.addEventListener("click", () => {
-  processZoom = Math.max(0.1, processZoom / 1.2);
+  state.processZoom = Math.max(0.1, state.processZoom / 1.2);
   updateProcessZoom();
   updateProcessTransform();
 });
@@ -222,7 +142,7 @@ navStepFile.addEventListener("click", () => {
 });
 
 navStepPage.addEventListener("click", () => {
-  if (!navStepPage.classList.contains("disabled") && currentPdfData) {
+  if (!navStepPage.classList.contains("disabled") && state.currentPdfData) {
     setMode("pageSelection");
   }
 });
@@ -292,23 +212,23 @@ clearAllBtn.addEventListener("click", async () => {
 });
 
 backToFilesBtn.addEventListener("click", () => {
-  currentFileId = null;
-  currentPdfData = null;
-  currentImage = null;
-  cropRegion = null;
+  state.currentFileId = null;
+  state.currentPdfData = null;
+  state.currentImage = null;
+  state.cropRegion = null;
   setMode("upload");
   refreshFileList();
 });
 
 // Zoom controls
 zoomInBtn.addEventListener("click", () => {
-  zoom = Math.min(10, zoom * 1.2);
+  state.zoom = Math.min(10, state.zoom * 1.2);
   updateZoom();
   updateTransform();
 });
 
 zoomOutBtn.addEventListener("click", () => {
-  zoom /= 1.2;
+  state.zoom /= 1.2;
   updateZoom();
   redrawCanvas();
 });
@@ -320,14 +240,14 @@ fitToScreenBtn.addEventListener("click", () => {
 // Crop controls - crop is always active
 clearCropBtn.addEventListener("click", () => {
   // Reset to default 10% margin
-  if (currentImage) {
-    setDefaultCrop(currentImage.width, currentImage.height);
+  if (state.currentImage) {
+    setDefaultCrop(state.currentImage.width, state.currentImage.height);
     drawCropOverlay();
   }
 });
 
 processBtn.addEventListener("click", async () => {
-  if (currentImage) {
+  if (state.currentImage) {
     await startProcessing();
   }
 });
@@ -335,141 +255,141 @@ processBtn.addEventListener("click", async () => {
 // Canvas interaction
 canvasContainer.addEventListener("mousedown", (e) => {
   const rect = canvasContainer.getBoundingClientRect();
-  const canvasX = (e.clientX - rect.left - panX) / zoom;
-  const canvasY = (e.clientY - rect.top - panY) / zoom;
+  const canvasX = (e.clientX - rect.left - state.panX) / state.zoom;
+  const canvasY = (e.clientY - rect.top - state.panY) / state.zoom;
   
   // Check if clicking on a crop handle
   const handle = getCropHandleAtPoint(canvasX, canvasY);
-  if (handle && cropRegion) {
-    isDraggingCropHandle = true;
-    activeCropHandle = handle;
-    lastPanX = e.clientX;
-    lastPanY = e.clientY;
+  if (handle && state.cropRegion) {
+    state.isDraggingCropHandle = true;
+    state.activeCropHandle = handle;
+    state.lastPanX = e.clientX;
+    state.lastPanY = e.clientY;
   } else if (!e.shiftKey) {
     // Pan with mouse drag (when not shift-clicking)
-    isPanning = true;
-    lastPanX = e.clientX;
-    lastPanY = e.clientY;
+    state.isPanning = true;
+    state.lastPanX = e.clientX;
+    state.lastPanY = e.clientY;
     canvasContainer.classList.add("grabbing");
   }
 });
 
 canvasContainer.addEventListener("mousemove", (e) => {
-  if (isDraggingCropHandle && activeCropHandle && cropRegion) {
-    const dx = (e.clientX - lastPanX) / zoom;
-    const dy = (e.clientY - lastPanY) / zoom;
-    lastPanX = e.clientX;
-    lastPanY = e.clientY;
+  if (state.isDraggingCropHandle && state.activeCropHandle && state.cropRegion) {
+    const dx = (e.clientX - state.lastPanX) / state.zoom;
+    const dy = (e.clientY - state.lastPanY) / state.zoom;
+    state.lastPanX = e.clientX;
+    state.lastPanY = e.clientY;
     
     // Adjust crop region based on handle
-    adjustCropRegion(activeCropHandle, dx, dy);
+    adjustCropRegion(state.activeCropHandle, dx, dy);
     drawCropOverlay();
-  } else if (isPanning) {
-    const dx = e.clientX - lastPanX;
-    const dy = e.clientY - lastPanY;
-    panX += dx;
-    panY += dy;
-    lastPanX = e.clientX;
-    lastPanY = e.clientY;
+  } else if (state.isPanning) {
+    const dx = e.clientX - state.lastPanX;
+    const dy = e.clientY - state.lastPanY;
+    state.panX += dx;
+    state.panY += dy;
+    state.lastPanX = e.clientX;
+    state.lastPanY = e.clientY;
     updateTransform();
   } else {
     // Update cursor based on hover
     const rect = canvasContainer.getBoundingClientRect();
-    const canvasX = (e.clientX - rect.left - panX) / zoom;
-    const canvasY = (e.clientY - rect.top - panY) / zoom;
+    const canvasX = (e.clientX - rect.left - state.panX) / state.zoom;
+    const canvasY = (e.clientY - rect.top - state.panY) / state.zoom;
     const handle = getCropHandleAtPoint(canvasX, canvasY);
     updateCursorForHandle(handle);
   }
 });
 
 canvasContainer.addEventListener("mouseup", () => {
-  if (isDraggingCropHandle) {
-    isDraggingCropHandle = false;
-    activeCropHandle = null;
+  if (state.isDraggingCropHandle) {
+    state.isDraggingCropHandle = false;
+    state.activeCropHandle = null;
     // Save crop settings
-    if (currentImage && cropRegion) {
-      saveCropSettings(currentImage.width, currentImage.height, cropRegion);
+    if (state.currentImage && state.cropRegion) {
+      saveCropSettings(state.currentImage.width, state.currentImage.height, state.cropRegion);
       updateCropInfo();
     }
   }
   
-  if (isPanning) {
-    isPanning = false;
+  if (state.isPanning) {
+    state.isPanning = false;
     canvasContainer.classList.remove("grabbing");
   }
 });
 
 canvasContainer.addEventListener("mouseleave", () => {
-  isPanning = false;
+  state.isPanning = false;
   canvasContainer.classList.remove("grabbing");
 });
 
 canvasContainer.addEventListener("wheel", (e) => {
   e.preventDefault();
   
-  // Check if this is a pinch zoom (ctrlKey) or two-finger pan
+  // Check if this is a pinch state.zoom (ctrlKey) or two-finger pan
   const isPinchZoom = e.ctrlKey;
   
   if (isPinchZoom) {
-    // Pinch to zoom
+    // Pinch to state.zoom
     const rect = canvasContainer.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
     
-    // Calculate the point in canvas coordinates before zoom
-    const canvasX = (mouseX - panX) / zoom;
-    const canvasY = (mouseY - panY) / zoom;
+    // Calculate the point in canvas coordinates before state.zoom
+    const canvasX = (mouseX - state.panX) / state.zoom;
+    const canvasY = (mouseY - state.panY) / state.zoom;
     
-    // Apply zoom with constant speed in log space (feels consistent at all zoom levels)
-    // Instead of multiplying by a factor, we adjust by a fixed percentage of the current zoom
-    const zoomSpeed = 0.01; // Adjust this to change overall zoom speed
-    const zoomChange = -e.deltaY * zoomSpeed * zoom;
-    const newZoom = Math.max(0.1, Math.min(20, zoom + zoomChange));
+    // Apply state.zoom with constant speed in log space (feels consistent at all state.zoom levels)
+    // Instead of multiplying by a factor, we adjust by a fixed percentage of the current state.zoom
+    const zoomSpeed = 0.01; // Adjust this to change overall state.zoom speed
+    const zoomChange = -e.deltaY * zoomSpeed * state.zoom;
+    const newZoom = Math.max(0.1, Math.min(20, state.zoom + zoomChange));
     
     // Adjust pan to keep the point under the mouse
-    panX = mouseX - canvasX * newZoom;
-    panY = mouseY - canvasY * newZoom;
-    zoom = newZoom;
+    state.panX = mouseX - canvasX * newZoom;
+    state.panY = mouseY - canvasY * newZoom;
+    state.zoom = newZoom;
     
     updateZoom();
     updateTransform();
   } else {
     // Two-finger pan (or mouse wheel)
-    panX -= e.deltaX;
-    panY -= e.deltaY;
+    state.panX -= e.deltaX;
+    state.panY -= e.deltaY;
     updateTransform();
   }
 });
 
 // Processing canvas interaction
 processCanvasContainer.addEventListener("mousedown", (e) => {
-  isProcessPanning = true;
-  lastProcessPanX = e.clientX;
-  lastProcessPanY = e.clientY;
+  state.isProcessPanning = true;
+  state.lastProcessPanX = e.clientX;
+  state.lastProcessPanY = e.clientY;
   processCanvasContainer.classList.add("grabbing");
 });
 
 processCanvasContainer.addEventListener("mousemove", (e) => {
-  if (isProcessPanning) {
-    const dx = e.clientX - lastProcessPanX;
-    const dy = e.clientY - lastProcessPanY;
-    processPanX += dx;
-    processPanY += dy;
-    lastProcessPanX = e.clientX;
-    lastProcessPanY = e.clientY;
+  if (state.isProcessPanning) {
+    const dx = e.clientX - state.lastProcessPanX;
+    const dy = e.clientY - state.lastProcessPanY;
+    state.processPanX += dx;
+    state.processPanY += dy;
+    state.lastProcessPanX = e.clientX;
+    state.lastProcessPanY = e.clientY;
     updateProcessTransform();
   }
 });
 
 processCanvasContainer.addEventListener("mouseup", () => {
-  if (isProcessPanning) {
-    isProcessPanning = false;
+  if (state.isProcessPanning) {
+    state.isProcessPanning = false;
     processCanvasContainer.classList.remove("grabbing");
   }
 });
 
 processCanvasContainer.addEventListener("mouseleave", () => {
-  isProcessPanning = false;
+  state.isProcessPanning = false;
   processCanvasContainer.classList.remove("grabbing");
 });
 
@@ -479,31 +399,31 @@ processCanvasContainer.addEventListener("wheel", (e) => {
   const isPinchZoom = e.ctrlKey;
   
   if (isPinchZoom) {
-    // Pinch to zoom
+    // Pinch to state.zoom
     const rect = processCanvasContainer.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
     
-    const image = processedImages.get(currentStage);
+    const image = state.processedImages.get(state.currentStage);
     if (!image) return;
     
-    const canvasX = (mouseX - processPanX) / processZoom;
-    const canvasY = (mouseY - processPanY) / processZoom;
+    const canvasX = (mouseX - state.processPanX) / state.processZoom;
+    const canvasY = (mouseY - state.processPanY) / state.processZoom;
     
     const zoomSpeed = 0.005;
-    const zoomChange = -e.deltaY * zoomSpeed * processZoom;
-    const newZoom = Math.max(0.1, Math.min(10, processZoom + zoomChange));
+    const zoomChange = -e.deltaY * zoomSpeed * state.processZoom;
+    const newZoom = Math.max(0.1, Math.min(10, state.processZoom + zoomChange));
     
-    processPanX = mouseX - canvasX * newZoom;
-    processPanY = mouseY - canvasY * newZoom;
-    processZoom = newZoom;
+    state.processPanX = mouseX - canvasX * newZoom;
+    state.processPanY = mouseY - canvasY * newZoom;
+    state.processZoom = newZoom;
     
     updateProcessZoom();
     updateProcessTransform();
   } else {
     // Two-finger pan (or mouse wheel)
-    processPanX -= e.deltaX;
-    processPanY -= e.deltaY;
+    state.processPanX -= e.deltaX;
+    state.processPanY -= e.deltaY;
     updateProcessTransform();
   }
 });
@@ -627,12 +547,12 @@ async function savePalette(name: string) {
   
   const paletteData = {
     name: name.trim(),
-    colors: userPalette.map(c => ({ ...c })),
+    colors: state.userPalette.map(c => ({ ...c })),
     timestamp: Date.now()
   };
   
   await store.put(paletteData);
-  currentPaletteName = name.trim();
+  state.currentPaletteName = name.trim();
   showStatus(`Palette "${name}" saved`);
 }
 
@@ -667,9 +587,9 @@ async function loadPalette(name?: string) {
   request.onsuccess = () => {
     const data = request.result;
     if (data) {
-      userPalette.length = 0;
-      data.colors.forEach((c: PaletteColor) => userPalette.push({ ...c }));
-      currentPaletteName = name;
+      state.userPalette.length = 0;
+      data.colors.forEach((c: PaletteColor) => state.userPalette.push({ ...c }));
+      state.currentPaletteName = name;
       renderPaletteUI();
       showStatus(`Palette "${name}" loaded`);
       
@@ -683,7 +603,7 @@ async function loadPalette(name?: string) {
 }
 
 async function setDefaultPalette() {
-  if (!currentPaletteName) {
+  if (!state.currentPaletteName) {
     showStatus("Please save the palette first", true);
     return;
   }
@@ -692,8 +612,8 @@ async function setDefaultPalette() {
   const transaction = db.transaction(["settings"], "readwrite");
   const store = transaction.objectStore("settings");
   
-  await store.put({ key: "defaultPalette", value: currentPaletteName });
-  showStatus(`"${currentPaletteName}" set as default palette`);
+  await store.put({ key: "defaultPalette", value: state.currentPaletteName });
+  showStatus(`"${state.currentPaletteName}" set as default palette`);
 }
 
 async function loadDefaultPalette() {
@@ -719,10 +639,10 @@ async function handleFileUpload(file: File) {
     showStatus(`Loading: ${file.name}...`);
     
     // Save to storage if not already saved
-    if (!currentFileId) {
+    if (!state.currentFileId) {
       try {
-        currentFileId = await saveFile(file);
-        console.log(`File saved with ID: ${currentFileId}`);
+        state.currentFileId = await saveFile(file);
+        console.log(`File saved with ID: ${state.currentFileId}`);
         await refreshFileList();
       } catch (err) {
         console.error("Error saving file:", err);
@@ -753,17 +673,17 @@ async function loadPdf(file: File) {
     console.log("loadPdf: Got arrayBuffer, length:", arrayBuffer.byteLength);
     const copy = new Uint8Array(arrayBuffer.byteLength);
     copy.set(new Uint8Array(arrayBuffer));
-    currentPdfData = copy;
+    state.currentPdfData = copy;
     console.log("loadPdf: Created copy", copy.length);
     
-    const initialCopy = currentPdfData.slice();
+    const initialCopy = state.currentPdfData.slice();
     console.log("loadPdf: Calling getDocument");
     const loadingTask = pdfjsLib.getDocument({ data: initialCopy });
     const pdf = await loadingTask.promise;
-    pdfPageCount = pdf.numPages;
-    console.log("loadPdf: PDF loaded, pages:", pdfPageCount);
+    state.pdfPageCount = pdf.numPages;
+    console.log("loadPdf: PDF loaded, pages:", state.pdfPageCount);
     
-    showStatus(`PDF loaded: ${pdfPageCount} pages`);
+    showStatus(`PDF loaded: ${state.pdfPageCount} pages`);
     console.log("loadPdf: About to set pdfFileName, element:", pdfFileName);
     try {
       pdfFileName.textContent = file.name;
@@ -781,7 +701,7 @@ async function loadPdf(file: File) {
       console.log(`[THUMBNAIL] PURGING ${existingCards} existing thumbnail cards from cache`);
     }
     pageGrid.innerHTML = "";
-    console.log("loadPdf: pageGrid cleared, adding", pdfPageCount, "cards");
+    console.log("loadPdf: pageGrid cleared, adding", state.pdfPageCount, "cards");
     
     // First pass: get all page dimensions and create cards with proper aspect ratios
     const pageDimensions: Array<{width: number; height: number; pageLabel: string}> = [];
@@ -794,7 +714,7 @@ async function loadPdf(file: File) {
       // Page labels not available, will use page numbers
     }
     
-    for (let i = 1; i <= pdfPageCount; i++) {
+    for (let i = 1; i <= state.pdfPageCount; i++) {
       const page = await pdf.getPage(i);
       const viewport = page.getViewport({ scale: 1.0 });
       
@@ -828,7 +748,7 @@ async function loadPdf(file: File) {
       card.dataset.pageNum = i.toString();
       
       // Highlight if this is the currently selected page
-      if (i === currentSelectedPage) {
+      if (i === state.currentSelectedPage) {
         card.classList.add("selected");
       }
       
@@ -842,14 +762,14 @@ async function loadPdf(file: File) {
     // Second pass: render thumbnails with interleaved priority (early pages + largest pages)
     // Cap at reasonable number for large PDFs (~2-3 screenfuls worth)
     const MAX_THUMBNAILS = 50;
-    const thumbnailsToRender = Math.min(pdfPageCount, MAX_THUMBNAILS);
+    const thumbnailsToRender = Math.min(state.pdfPageCount, MAX_THUMBNAILS);
     
     // Reset cancellation flag
-    cancelThumbnailLoading = false;
+    state.cancelThumbnailLoading = false;
     
     (async () => {
       // Sort pages by size (largest first)
-      const pagesBySize = Array.from({ length: pdfPageCount }, (_, i) => i)
+      const pagesBySize = Array.from({ length: state.pdfPageCount }, (_, i) => i)
         .sort((a, b) => {
           const areaA = pageDimensions[a].width * pageDimensions[a].height;
           const areaB = pageDimensions[b].width * pageDimensions[b].height;
@@ -862,18 +782,18 @@ async function loadPdf(file: File) {
       let sequentialIndex = 0;
       let largestIndex = 0;
       
-      console.log(`[THUMBNAIL] Building render queue for ${thumbnailsToRender} thumbnails out of ${pdfPageCount} pages`);
+      console.log(`[THUMBNAIL] Building render queue for ${thumbnailsToRender} thumbnails out of ${state.pdfPageCount} pages`);
       
-      while (renderQueue.length < thumbnailsToRender && (sequentialIndex < pdfPageCount || largestIndex < pagesBySize.length)) {
+      while (renderQueue.length < thumbnailsToRender && (sequentialIndex < state.pdfPageCount || largestIndex < pagesBySize.length)) {
         // Add next 2 sequential pages
-        if (sequentialIndex < pdfPageCount && renderQueue.length < thumbnailsToRender) {
+        if (sequentialIndex < state.pdfPageCount && renderQueue.length < thumbnailsToRender) {
           if (!addedPages.has(sequentialIndex)) {
             renderQueue.push(sequentialIndex);
             addedPages.add(sequentialIndex);
           }
           sequentialIndex++;
         }
-        if (sequentialIndex < pdfPageCount && renderQueue.length < thumbnailsToRender) {
+        if (sequentialIndex < state.pdfPageCount && renderQueue.length < thumbnailsToRender) {
           if (!addedPages.has(sequentialIndex)) {
             renderQueue.push(sequentialIndex);
             addedPages.add(sequentialIndex);
@@ -907,7 +827,7 @@ async function loadPdf(file: File) {
       
       for (let i = 0; i < renderQueue.length; i += batchSize) {
         // Check cancellation flag
-        if (cancelThumbnailLoading) {
+        if (state.cancelThumbnailLoading) {
           console.log(`[THUMBNAIL] Loading cancelled after ${completed} thumbnails`);
           showStatus(`Thumbnail loading cancelled`);
           return;
@@ -940,17 +860,17 @@ async function loadPdf(file: File) {
           await Promise.all(batch);
           completed += batch.length;
           console.log(`[THUMBNAIL] Batch complete. Total: ${completed}/${renderQueue.length}`);
-          const statusMsg = thumbnailsToRender < pdfPageCount 
-            ? `Loading thumbnails: ${completed}/${thumbnailsToRender} (${pdfPageCount} pages total)`
-            : `Loading thumbnails: ${completed}/${pdfPageCount}`;
+          const statusMsg = thumbnailsToRender < state.pdfPageCount 
+            ? `Loading thumbnails: ${completed}/${thumbnailsToRender} (${state.pdfPageCount} pages total)`
+            : `Loading thumbnails: ${completed}/${state.pdfPageCount}`;
           showStatus(statusMsg);
         } else {
           console.warn(`[THUMBNAIL] Batch ${Math.floor(i / batchSize) + 1}: No valid thumbnails to render`);
         }
       }
-      const finalMsg = thumbnailsToRender < pdfPageCount
-        ? `PDF loaded: ${pdfPageCount} pages (showing ${thumbnailsToRender} thumbnails)`
-        : `PDF loaded: ${pdfPageCount} pages`;
+      const finalMsg = thumbnailsToRender < state.pdfPageCount
+        ? `PDF loaded: ${state.pdfPageCount} pages (showing ${thumbnailsToRender} thumbnails)`
+        : `PDF loaded: ${state.pdfPageCount} pages`;
       showStatus(finalMsg);
     })();
   } catch (error) {
@@ -962,13 +882,13 @@ async function loadPdf(file: File) {
 
 async function generatePageThumbnail(pageNum: number, pageLabel: string, container: HTMLElement) {
   try {
-    if (!currentPdfData) {
+    if (!state.currentPdfData) {
       console.warn(`[THUMBNAIL] No PDF data for page ${pageNum}(${pageLabel})`);
       return;
     }
     
     console.log(`[THUMBNAIL] START rendering page ${pageNum}(${pageLabel})`);
-    const pdfDataCopy = currentPdfData.slice();
+    const pdfDataCopy = state.currentPdfData.slice();
     const image = await renderPdfPage(
       { file: pdfDataCopy, pageNumber: pageNum, scale: 0.4 },
       browserCanvasBackend,
@@ -1007,17 +927,17 @@ async function generatePageThumbnail(pageNum: number, pageLabel: string, contain
 async function selectPdfPage(pageNum: number) {
   try {
     console.log("selectPdfPage: Starting, page:", pageNum);
-    if (!currentPdfData) {
+    if (!state.currentPdfData) {
       console.error("selectPdfPage: No PDF data!");
       showStatus("No PDF loaded", true);
       return;
     }
     
     // Cancel any ongoing thumbnail loading
-    cancelThumbnailLoading = true;
+    state.cancelThumbnailLoading = true;
     
     // Update selected page tracking
-    currentSelectedPage = pageNum;
+    state.currentSelectedPage = pageNum;
     
     // Update page card selection highlighting
     const cards = pageGrid.querySelectorAll(".page-card");
@@ -1050,7 +970,7 @@ async function selectPdfPage(pageNum: number) {
     }, 300);
     
     console.log("selectPdfPage: Creating copy");
-    const pdfDataCopy = currentPdfData.slice();
+    const pdfDataCopy = state.currentPdfData.slice();
     console.log("selectPdfPage: Calling renderPdfPage");
     // Scale 2.778 ≈ 200 DPI (72 * 2.778 ≈ 200)
     const image = await renderPdfPage(
@@ -1070,9 +990,9 @@ async function selectPdfPage(pageNum: number) {
     showStatus(`✓ Page ${pageNum} loaded: ${image.width}×${image.height}`);
     
     // Update thumbnail in storage
-    if (currentFileId && currentImage) {
-      const thumbnail = generateThumbnail(currentImage);
-      await updateFile(currentFileId, { thumbnail });
+    if (state.currentFileId && state.currentImage) {
+      const thumbnail = generateThumbnail(state.currentImage);
+      await updateFile(state.currentFileId, { thumbnail });
       await refreshFileList();
     }
   } catch (error) {
@@ -1082,7 +1002,7 @@ async function selectPdfPage(pageNum: number) {
 }
 
 function loadImage(image: RGBAImage) {
-  currentImage = image;
+  state.currentImage = image;
   
   // Set up canvases
   mainCanvas.width = image.width;
@@ -1097,7 +1017,7 @@ function loadImage(image: RGBAImage) {
   // Load saved crop settings or set default 10% margin
   const savedCrop = getCropSettings(image.width, image.height);
   if (savedCrop) {
-    cropRegion = savedCrop;
+    state.cropRegion = savedCrop;
   } else {
     setDefaultCrop(image.width, image.height);
   }
@@ -1119,32 +1039,32 @@ function loadImage(image: RGBAImage) {
 }
 
 function fitToScreen() {
-  if (!currentImage) return;
+  if (!state.currentImage) return;
   
   const containerWidth = canvasContainer.clientWidth;
   const containerHeight = canvasContainer.clientHeight;
-  const imageWidth = currentImage.width;
-  const imageHeight = currentImage.height;
+  const imageWidth = state.currentImage.width;
+  const imageHeight = state.currentImage.height;
   
   const scaleX = containerWidth / imageWidth;
   const scaleY = containerHeight / imageHeight;
-  zoom = Math.min(scaleX, scaleY) * 0.9; // 90% to add padding
+  state.zoom = Math.min(scaleX, scaleY) * 0.9; // 90% to add padding
   
-  panX = (containerWidth - imageWidth * zoom) / 2;
-  panY = (containerHeight - imageHeight * zoom) / 2;
+  state.panX = (containerWidth - imageWidth * state.zoom) / 2;
+  state.panY = (containerHeight - imageHeight * state.zoom) / 2;
   
   updateZoom();
   updateTransform();
 }
 
 function updateZoom() {
-  zoomLevel.textContent = `${Math.round(zoom * 100)}%`;
+  zoomLevel.textContent = `${Math.round(state.zoom * 100)}%`;
 }
 
 // Crop management functions
 function setDefaultCrop(imageWidth: number, imageHeight: number) {
   const margin = 0.1; // 10% margin
-  cropRegion = {
+  state.cropRegion = {
     x: imageWidth * margin,
     y: imageHeight * margin,
     width: imageWidth * (1 - 2 * margin),
@@ -1172,16 +1092,16 @@ function saveCropSettings(imageWidth: number, imageHeight: number, crop: { x: nu
 }
 
 function updateCropInfo() {
-  if (cropRegion) {
-    cropInfo.textContent = `Crop: ${Math.round(cropRegion.width)}×${Math.round(cropRegion.height)} at (${Math.round(cropRegion.x)}, ${Math.round(cropRegion.y)})`;
+  if (state.cropRegion) {
+    cropInfo.textContent = `Crop: ${Math.round(state.cropRegion.width)}×${Math.round(state.cropRegion.height)} at (${Math.round(state.cropRegion.x)}, ${Math.round(state.cropRegion.y)})`;
   }
 }
 
 function getCropHandleAtPoint(x: number, y: number): string | null {
-  if (!cropRegion) return null;
+  if (!state.cropRegion) return null;
   
-  const handleSize = 15 / zoom; // Handle hit area in canvas coordinates
-  const { x: cx, y: cy, width: cw, height: ch } = cropRegion;
+  const handleSize = 15 / state.zoom; // Handle hit area in canvas coordinates
+  const { x: cx, y: cy, width: cw, height: ch } = state.cropRegion;
   
   // Check corners first
   if (Math.abs(x - cx) < handleSize && Math.abs(y - cy) < handleSize) return "tl";
@@ -1213,9 +1133,9 @@ function updateCursorForHandle(handle: string | null) {
 }
 
 function adjustCropRegion(handle: string, dx: number, dy: number) {
-  if (!cropRegion || !currentImage) return;
+  if (!state.cropRegion || !state.currentImage) return;
   
-  const { x, y, width, height } = cropRegion;
+  const { x, y, width, height } = state.cropRegion;
   let newX = x, newY = y, newWidth = width, newHeight = height;
   
   switch (handle) {
@@ -1256,22 +1176,22 @@ function adjustCropRegion(handle: string, dx: number, dy: number) {
   }
   
   // Constrain to image bounds
-  newX = Math.max(0, Math.min(newX, currentImage.width - 10));
-  newY = Math.max(0, Math.min(newY, currentImage.height - 10));
-  newWidth = Math.max(10, Math.min(newWidth, currentImage.width - newX));
-  newHeight = Math.max(10, Math.min(newHeight, currentImage.height - newY));
+  newX = Math.max(0, Math.min(newX, state.currentImage.width - 10));
+  newY = Math.max(0, Math.min(newY, state.currentImage.height - 10));
+  newWidth = Math.max(10, Math.min(newWidth, state.currentImage.width - newX));
+  newHeight = Math.max(10, Math.min(newHeight, state.currentImage.height - newY));
   
-  cropRegion.x = newX;
-  cropRegion.y = newY;
-  cropRegion.width = newWidth;
-  cropRegion.height = newHeight;
+  state.cropRegion.x = newX;
+  state.cropRegion.y = newY;
+  state.cropRegion.width = newWidth;
+  state.cropRegion.height = newHeight;
   
   updateCropInfo();
 }
 
 // Fast update - only changes transform (for panning/zooming)
 function updateTransform() {
-  const transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  const transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
   mainCanvas.style.transform = transform;
   mainCanvas.style.transformOrigin = "0 0";
   mainCanvas.style.willChange = "transform";
@@ -1281,7 +1201,7 @@ function updateTransform() {
   cropOverlay.style.willChange = "transform";
   
   // Use crisp pixels when zoomed in (>= 1x), filtered when zoomed out (< 1x)
-  if (zoom >= 1) {
+  if (state.zoom >= 1) {
     mainCanvas.style.imageRendering = "pixelated";
   } else {
     mainCanvas.style.imageRendering = "smooth";
@@ -1293,14 +1213,14 @@ function updateTransform() {
 
 // Full redraw - updates canvas content
 function redrawCanvas() {
-  if (!currentImage) return;
+  if (!state.currentImage) return;
   
   // Clear and redraw base image
   ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
   const imageData = new ImageData(
-    new Uint8ClampedArray(currentImage.data),
-    currentImage.width,
-    currentImage.height,
+    new Uint8ClampedArray(state.currentImage.data),
+    state.currentImage.width,
+    state.currentImage.height,
   );
   ctx.putImageData(imageData, 0, 0);
   
@@ -1309,7 +1229,7 @@ function redrawCanvas() {
 
 // Draw crop overlay with darkened mask and handles
 function drawCropOverlay() {
-  if (!currentImage || !cropRegion) {
+  if (!state.currentImage || !state.cropRegion) {
     cropCtx.clearRect(0, 0, cropOverlay.width, cropOverlay.height);
     return;
   }
@@ -1318,37 +1238,37 @@ function drawCropOverlay() {
   
   // Draw darkened mask over entire image
   cropCtx.fillStyle = "rgba(0, 0, 0, 0.5)";
-  cropCtx.fillRect(0, 0, currentImage.width, currentImage.height);
+  cropCtx.fillRect(0, 0, state.currentImage.width, state.currentImage.height);
   
   // Clear the crop region (composite mode)
   cropCtx.globalCompositeOperation = "destination-out";
   cropCtx.fillStyle = "rgba(0, 0, 0, 1)";
   cropCtx.fillRect(
-    cropRegion.x,
-    cropRegion.y,
-    cropRegion.width,
-    cropRegion.height,
+    state.cropRegion.x,
+    state.cropRegion.y,
+    state.cropRegion.width,
+    state.cropRegion.height,
   );
   cropCtx.globalCompositeOperation = "source-over";
   
   // Draw crop rectangle border
   cropCtx.strokeStyle = "#4f46e5";
-  cropCtx.lineWidth = 3 / zoom;
+  cropCtx.lineWidth = 3 / state.zoom;
   cropCtx.strokeRect(
-    cropRegion.x,
-    cropRegion.y,
-    cropRegion.width,
-    cropRegion.height,
+    state.cropRegion.x,
+    state.cropRegion.y,
+    state.cropRegion.width,
+    state.cropRegion.height,
   );
   
   // Draw handles - 4 corners + 4 edges
-  const handleSize = 10 / zoom;
+  const handleSize = 10 / state.zoom;
   cropCtx.fillStyle = "#4f46e5";
   
-  const cx = cropRegion.x;
-  const cy = cropRegion.y;
-  const cw = cropRegion.width;
-  const ch = cropRegion.height;
+  const cx = state.cropRegion.x;
+  const cy = state.cropRegion.y;
+  const cw = state.cropRegion.width;
+  const ch = state.cropRegion.height;
   
   const handles = [
     // Corners
@@ -1433,22 +1353,22 @@ async function binaryToGPUBuffer(binary: BinaryImage): Promise<GPUBuffer> {
 
 // Processing mode functions
 async function startProcessing() {
-  if (!currentImage) return;
+  if (!state.currentImage) return;
   
   try {
     setMode("processing");
-    processedImages.clear();
-    processViewInitialized = false; // Reset for new processing session
+    state.processedImages.clear();
+    state.processViewInitialized = false; // Reset for new processing session
     
     // Apply crop if selected
-    let processImage = currentImage;
-    if (cropRegion && cropRegion.width > 0 && cropRegion.height > 0) {
+    let processImage = state.currentImage;
+    if (state.cropRegion && state.cropRegion.width > 0 && state.cropRegion.height > 0) {
       showStatus("Cropping image...");
-      processImage = cropImage(currentImage, cropRegion);
+      processImage = cropImage(state.currentImage, state.cropRegion);
     }
     
     // Store and display cropped image
-    processedImages.set("cropped", processImage);
+    state.processedImages.set("cropped", processImage);
     displayProcessingStage("cropped");
     
     // Extract black from cropped image
@@ -1458,7 +1378,7 @@ async function startProcessing() {
     const extractBlackEnd = performance.now();
     showStatus(`Extract black: ${(extractBlackEnd - extractBlackStart).toFixed(1)}ms`);
     
-    processedImages.set("extract_black", extractedBlack);
+    state.processedImages.set("extract_black", extractedBlack);
     displayProcessingStage("extract_black");
     
     // Process color_1: median filter and skeletonize
@@ -1470,8 +1390,8 @@ async function startProcessing() {
     );
     
     // Store median-filtered version as color_1, skeletonized as color_1_skel
-    processedImages.set("color_1", color1SkelResults.median);
-    processedImages.set("color_1_skel", color1SkelResults.skeleton);
+    state.processedImages.set("color_1", color1SkelResults.median);
+    state.processedImages.set("color_1_skel", color1SkelResults.skeleton);
     
     color1Buffer.destroy();
     color1SkelResults.skeletonBuffer.destroy();
@@ -1489,7 +1409,7 @@ async function startProcessing() {
     const subtractedImage = await subtractBlackGPU(processImage, bloomFiltered);
     const subtractEnd = performance.now();
     showStatus(`Subtract black: ${(subtractEnd - subtractStart).toFixed(1)}ms`);
-    processedImages.set("subtract_black", subtractedImage);
+    state.processedImages.set("subtract_black", subtractedImage);
     displayProcessingStage("subtract_black");
     
     // Use subtracted image for further processing
@@ -1503,11 +1423,11 @@ async function startProcessing() {
     showStatus(`Cleanup: ${(t2 - t1).toFixed(1)}ms`);
     
     // Store all intermediate cleanup stages
-    processedImages.set("value", cleanupResults.value);
-    processedImages.set("saturation", cleanupResults.saturation);
-    processedImages.set("saturation_median", cleanupResults.saturationMedian);
-    processedImages.set("hue", cleanupResults.hue);
-    processedImages.set("hue_median", cleanupResults.hueMedian);
+    state.processedImages.set("value", cleanupResults.value);
+    state.processedImages.set("saturation", cleanupResults.saturation);
+    state.processedImages.set("saturation_median", cleanupResults.saturationMedian);
+    state.processedImages.set("hue", cleanupResults.hue);
+    state.processedImages.set("hue_median", cleanupResults.hueMedian);
     
     // Recombine with thresholded value (no skeletonization yet)
     showStatus("Recombining channels...");
@@ -1521,7 +1441,7 @@ async function startProcessing() {
     );
     const t2e = performance.now();
     showStatus(`Recombine: ${(t2e - t2d).toFixed(1)}ms`);
-    processedImages.set("cleanup", cleanupFinal);
+    state.processedImages.set("cleanup", cleanupFinal);
     displayProcessingStage("cleanup");
     
     // Clean up buffers now that we're done with them
@@ -1536,18 +1456,18 @@ async function startProcessing() {
     
     // Replace palette with output colors (after matching is done)
     const outputPalette = new Uint8ClampedArray(16 * 4);
-    for (let i = 0; i < userPalette.length && i < 16; i++) {
-      const color = userPalette[i];
+    for (let i = 0; i < state.userPalette.length && i < 16; i++) {
+      const color = state.userPalette[i];
       // Use output color, or background if marked for removal
-      const useColor = color.mapToBg ? userPalette[0].outputColor : color.outputColor;
+      const useColor = color.mapToBg ? state.userPalette[0].outputColor : color.outputColor;
       const [r, g, b, a] = hexToRGBA(useColor);
       outputPalette[i * 4] = r;
       outputPalette[i * 4 + 1] = g;
       outputPalette[i * 4 + 2] = b;
       outputPalette[i * 4 + 3] = a;
     }
-    for (let i = userPalette.length; i < 16; i++) {
-      const [r, g, b, a] = hexToRGBA(userPalette[0].outputColor);
+    for (let i = state.userPalette.length; i < 16; i++) {
+      const [r, g, b, a] = hexToRGBA(state.userPalette[0].outputColor);
       outputPalette[i * 4] = r;
       outputPalette[i * 4 + 1] = g;
       outputPalette[i * 4 + 2] = b;
@@ -1564,7 +1484,7 @@ async function startProcessing() {
     
     const t4 = performance.now();
     showStatus(`Palettize: ${(t4 - t3).toFixed(1)}ms`);
-    processedImages.set("palettized", palettized);
+    state.processedImages.set("palettized", palettized);
     displayProcessingStage("palettized");
     
     // Apply median filter right after palettization (3 passes for aggressive cleaning)
@@ -1577,14 +1497,14 @@ async function startProcessing() {
     median = await median3x3GPU(median);
     const t4c = performance.now();
     showStatus(`Median filter (3 passes): ${(t4c - t4b).toFixed(1)}ms`);
-    processedImages.set("median", median);
+    state.processedImages.set("median", median);
     displayProcessingStage("median");
     
     // Process each non-background, non-removed color separately
     showStatus("Processing individual colors...");
     const t5 = performance.now();
-    for (let i = 1; i < userPalette.length && i < 16; i++) {
-      const color = userPalette[i];
+    for (let i = 1; i < state.userPalette.length && i < 16; i++) {
+      const color = state.userPalette[i];
       if (color.mapToBg) continue; // Skip removed colors
       if (i === 1) continue; // Skip color_1 - already processed as extracted black
       
@@ -1592,7 +1512,7 @@ async function startProcessing() {
       
       // Extract this color as binary from median-filtered image
       const colorBinary = extractColorFromPalettized(median, i);
-      processedImages.set(`color_${i}`, colorBinary);
+      state.processedImages.set(`color_${i}`, colorBinary);
       
       // Convert to GPU buffer and run skeletonization
       const colorBuffer = await binaryToGPUBuffer(colorBinary);
@@ -1603,7 +1523,7 @@ async function startProcessing() {
       );
       
       // Store skeletonized result
-      processedImages.set(`color_${i}_skel`, skelResults.skeleton);
+      state.processedImages.set(`color_${i}_skel`, skelResults.skeleton);
       
       // Clean up
       colorBuffer.destroy();
@@ -1629,12 +1549,12 @@ function addColorStageButtons() {
   colorStagesContainer.innerHTML = "";
   
   // Add a button for each non-background, non-removed color
-  for (let i = 1; i < userPalette.length && i < 16; i++) {
-    const color = userPalette[i];
+  for (let i = 1; i < state.userPalette.length && i < 16; i++) {
+    const color = state.userPalette[i];
     if (color.mapToBg) continue; // Skip removed colors
     
     // Check if this color stage exists
-    if (!processedImages.has(`color_${i}`)) continue;
+    if (!state.processedImages.has(`color_${i}`)) continue;
     
     // Color button
     const colorBtn = document.createElement("button");
@@ -1645,7 +1565,7 @@ function addColorStageButtons() {
     colorStagesContainer.appendChild(colorBtn);
     
     // Skeleton button (if it exists)
-    if (processedImages.has(`color_${i}_skel`)) {
+    if (state.processedImages.has(`color_${i}_skel`)) {
       const skelBtn = document.createElement("button");
       skelBtn.className = "stage-btn";
       skelBtn.textContent = `Color ${i} Skel`;
@@ -1657,13 +1577,13 @@ function addColorStageButtons() {
 }
 
 function displayProcessingStage(stage: ProcessingStage) {
-  const image = processedImages.get(stage);
+  const image = state.processedImages.get(stage);
   if (!image) {
     showStatus(`Stage ${stage} not available`, true);
     return;
   }
   
-  currentStage = stage;
+  state.currentStage = stage;
   
   // Update stage button states
   document.querySelectorAll(".stage-btn").forEach(btn => btn.classList.remove("active"));
@@ -1755,10 +1675,10 @@ function displayProcessingStage(stage: ProcessingStage) {
   );
   processCtx.putImageData(imageData, 0, 0);
   
-  // Only fit to screen on first display, then preserve zoom/pan
-  if (!processViewInitialized) {
+  // Only fit to screen on first display, then preserve state.zoom/pan
+  if (!state.processViewInitialized) {
     processFitToScreen();
-    processViewInitialized = true;
+    state.processViewInitialized = true;
   } else {
     updateProcessTransform();
   }
@@ -1767,7 +1687,7 @@ function displayProcessingStage(stage: ProcessingStage) {
 }
 
 function processFitToScreen() {
-  const image = processedImages.get(currentStage);
+  const image = state.processedImages.get(state.currentStage);
   if (!image) return;
   
   const containerWidth = processCanvasContainer.clientWidth;
@@ -1777,26 +1697,26 @@ function processFitToScreen() {
   
   const scaleX = containerWidth / imageWidth;
   const scaleY = containerHeight / imageHeight;
-  processZoom = Math.min(scaleX, scaleY) * 0.9;
+  state.processZoom = Math.min(scaleX, scaleY) * 0.9;
   
-  processPanX = (containerWidth - imageWidth * processZoom) / 2;
-  processPanY = (containerHeight - imageHeight * processZoom) / 2;
+  state.processPanX = (containerWidth - imageWidth * state.processZoom) / 2;
+  state.processPanY = (containerHeight - imageHeight * state.processZoom) / 2;
   
   updateProcessZoom();
   updateProcessTransform();
 }
 
 function updateProcessZoom() {
-  processZoomLevel.textContent = `${Math.round(processZoom * 100)}%`;
+  processZoomLevel.textContent = `${Math.round(state.processZoom * 100)}%`;
 }
 
 function updateProcessTransform() {
-  const transform = `translate(${processPanX}px, ${processPanY}px) scale(${processZoom})`;
+  const transform = `translate(${state.processPanX}px, ${state.processPanY}px) scale(${state.processZoom})`;
   processCanvas.style.transform = transform;
   processCanvas.style.transformOrigin = "0 0";
   processCanvas.style.willChange = "transform";
   
-  if (processZoom >= 1) {
+  if (state.processZoom >= 1) {
     processCanvas.style.imageRendering = "pixelated";
   } else {
     processCanvas.style.imageRendering = "auto";
@@ -1909,7 +1829,7 @@ async function refreshFileList() {
   for (const file of files) {
     const item = document.createElement("div");
     item.className = "file-card";
-    if (file.id === currentFileId) {
+    if (file.id === state.currentFileId) {
       item.classList.add("active");
     }
     
@@ -1948,10 +1868,10 @@ async function refreshFileList() {
       e.stopPropagation();
       if (confirm(`Delete ${file.name}?`)) {
         await deleteFile(file.id);
-        if (file.id === currentFileId) {
-          currentFileId = null;
-          currentPdfData = null;
-          currentImage = null;
+        if (file.id === state.currentFileId) {
+          state.currentFileId = null;
+          state.currentPdfData = null;
+          state.currentImage = null;
           setMode("upload");
         }
         await refreshFileList();
@@ -1978,7 +1898,7 @@ async function loadStoredFile(id: string) {
     return;
   }
   
-  currentFileId = id;
+  state.currentFileId = id;
   const data = new Uint8Array(stored.data);
   const blob = new Blob([data], { type: stored.type });
   const file = new File([blob], stored.name, { type: stored.type });
@@ -1989,7 +1909,7 @@ async function loadStoredFile(id: string) {
 
 // Palette Editor Functions
 function renderPaletteUI() {
-  console.log("renderPaletteUI called, userPalette length:", userPalette.length);
+  console.log("renderPaletteUI called, state.userPalette length:", state.userPalette.length);
   // Render compact display in sidebar with colors and hex values
   const paletteDisplay = document.getElementById("paletteDisplay") as HTMLDivElement;
   console.log("paletteDisplay element:", paletteDisplay);
@@ -1999,7 +1919,7 @@ function renderPaletteUI() {
   }
   paletteDisplay.innerHTML = "";
   
-  userPalette.forEach((color, index) => {
+  state.userPalette.forEach((color, index) => {
     const item = document.createElement("div");
     item.style.cssText = "display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem; border-bottom: 1px solid #3a3a3a; cursor: pointer; transition: background 0.2s;";
     item.onmouseover = () => item.style.background = "#333";
@@ -2054,7 +1974,7 @@ let eyedropperMode: 'input' | 'output' | null = null;
 
 function openColorEditor(index: number) {
   colorEditorIndex = index;
-  const color = userPalette[index];
+  const color = state.userPalette[index];
   
   // Create or get color editor modal
   let modal = document.getElementById("colorEditorModal");
@@ -2175,17 +2095,17 @@ function openColorEditor(index: number) {
       return;
     }
     
-    userPalette[index].inputColor = inputColor;
+    state.userPalette[index].inputColor = inputColor;
     
     if (selectedMode === 'remove') {
-      userPalette[index].mapToBg = true;
-      userPalette[index].outputColor = inputColor; // Keep it same for display
+      state.userPalette[index].mapToBg = true;
+      state.userPalette[index].outputColor = inputColor; // Keep it same for display
     } else if (selectedMode === 'different') {
-      userPalette[index].mapToBg = false;
-      userPalette[index].outputColor = outputColor;
+      state.userPalette[index].mapToBg = false;
+      state.userPalette[index].outputColor = outputColor;
     } else { // same
-      userPalette[index].mapToBg = false;
-      userPalette[index].outputColor = inputColor;
+      state.userPalette[index].mapToBg = false;
+      state.userPalette[index].outputColor = inputColor;
     }
     
     renderPaletteUI();
@@ -2197,7 +2117,7 @@ function openColorEditor(index: number) {
   if (deleteBtn) {
     deleteBtn.addEventListener("click", () => {
       if (index !== 0 && confirm("Delete this color?")) {
-        userPalette.splice(index, 1);
+        state.userPalette.splice(index, 1);
         renderPaletteUI();
         closeColorEditor();
       }
@@ -2222,14 +2142,14 @@ function closeColorEditor() {
 }
 
 function addPaletteColor() {
-  console.log("Add palette color clicked, current length:", userPalette.length);
-  if (userPalette.length >= 16) {
+  console.log("Add palette color clicked, current length:", state.userPalette.length);
+  if (state.userPalette.length >= 16) {
     showStatus("Maximum 16 colors allowed", true);
     return;
   }
   
-  const newIndex = userPalette.length;
-  userPalette.push({
+  const newIndex = state.userPalette.length;
+  state.userPalette.push({
     inputColor: "#808080",
     outputColor: "#808080",
     mapToBg: false,
@@ -2242,9 +2162,9 @@ function addPaletteColor() {
 }
 
 function resetPaletteToDefault() {
-  userPalette.length = 0;
+  state.userPalette.length = 0;
   Array.from(DEFAULT_PALETTE).forEach(color => {
-    userPalette.push({
+    state.userPalette.push({
       inputColor: u32ToHex(color),
       outputColor: u32ToHex(color),
       mapToBg: false,
@@ -2257,7 +2177,7 @@ function resetPaletteToDefault() {
 let eyedropperActive = false;
 
 function activateEyedropper() {
-  if (!currentImage) {
+  if (!state.currentImage) {
     showStatus("No image loaded", true);
     return;
   }
@@ -2276,25 +2196,25 @@ function deactivateEyedropper() {
 }
 
 function pickColorFromCanvas(x: number, y: number) {
-  if (!currentImage) return;
+  if (!state.currentImage) return;
   
   // Convert canvas coordinates to image coordinates
   const rect = mainCanvas.getBoundingClientRect();
-  const scaleX = currentImage.width / rect.width;
-  const scaleY = currentImage.height / rect.height;
+  const scaleX = state.currentImage.width / rect.width;
+  const scaleY = state.currentImage.height / rect.height;
   const imgX = Math.floor((x - rect.left) * scaleX);
   const imgY = Math.floor((y - rect.top) * scaleY);
   
   // Check bounds
-  if (imgX < 0 || imgX >= currentImage.width || imgY < 0 || imgY >= currentImage.height) {
+  if (imgX < 0 || imgX >= state.currentImage.width || imgY < 0 || imgY >= state.currentImage.height) {
     return;
   }
   
   // Get pixel color
-  const pixelIndex = (imgY * currentImage.width + imgX) * 4;
-  const r = currentImage.data[pixelIndex];
-  const g = currentImage.data[pixelIndex + 1];
-  const b = currentImage.data[pixelIndex + 2];
+  const pixelIndex = (imgY * state.currentImage.width + imgX) * 4;
+  const r = state.currentImage.data[pixelIndex];
+  const g = state.currentImage.data[pixelIndex + 1];
+  const b = state.currentImage.data[pixelIndex + 2];
   
   const hex = `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
   
@@ -2303,10 +2223,10 @@ function pickColorFromCanvas(x: number, y: number) {
   // If we're in color editor mode, update the color editor
   if (colorEditorIndex !== null && eyedropperMode) {
     if (eyedropperMode === 'input') {
-      userPalette[colorEditorIndex].inputColor = hex;
+      state.userPalette[colorEditorIndex].inputColor = hex;
     } else if (eyedropperMode === 'output') {
-      userPalette[colorEditorIndex].outputColor = hex;
-      userPalette[colorEditorIndex].mapToBg = false; // Ensure it's not set to remove
+      state.userPalette[colorEditorIndex].outputColor = hex;
+      state.userPalette[colorEditorIndex].mapToBg = false; // Ensure it's not set to remove
     }
     // Reopen the color editor with updated values
     openColorEditor(colorEditorIndex);
@@ -2319,12 +2239,12 @@ function pickColorFromCanvas(x: number, y: number) {
 }
 
 function addColorToPalette(hex: string) {
-  if (userPalette.length >= 16) {
+  if (state.userPalette.length >= 16) {
     showStatus("Maximum 16 colors - remove one first", true);
     return;
   }
   
-  userPalette.push({
+  state.userPalette.push({
     inputColor: hex,
     outputColor: hex,
     mapToBg: false,
@@ -2334,12 +2254,12 @@ function addColorToPalette(hex: string) {
   showStatus(`Added ${hex} to palette`);
 }
 
-// Convert userPalette to RGBA format for GPU processing
+// Convert state.userPalette to RGBA format for GPU processing
 function buildPaletteRGBA(): Uint8ClampedArray {
   const palette = new Uint8ClampedArray(16 * 4);
   
-  for (let i = 0; i < userPalette.length && i < 16; i++) {
-    const color = userPalette[i];
+  for (let i = 0; i < state.userPalette.length && i < 16; i++) {
+    const color = state.userPalette[i];
     // Use INPUT color for matching - GPU will find nearest input color
     // The palette stored with the result contains OUTPUT colors for display
     const [r, g, b, a] = hexToRGBA(color.inputColor);
@@ -2351,8 +2271,8 @@ function buildPaletteRGBA(): Uint8ClampedArray {
   }
   
   // Fill remaining slots with background color
-  for (let i = userPalette.length; i < 16; i++) {
-    const [r, g, b, a] = hexToRGBA(userPalette[0].inputColor);
+  for (let i = state.userPalette.length; i < 16; i++) {
+    const [r, g, b, a] = hexToRGBA(state.userPalette[0].inputColor);
     palette[i * 4] = r;
     palette[i * 4 + 1] = g;
     palette[i * 4 + 2] = b;

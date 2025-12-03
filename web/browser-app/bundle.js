@@ -2268,23 +2268,7 @@ async function clearAllFiles() {
   });
 }
 
-// browser-app/main.ts
-var browserCanvasBackend = {
-  createCanvas(width, height) {
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    return canvas;
-  }
-};
-var currentFileId = null;
-var currentPdfData = null;
-var currentImage = null;
-var currentSelectedPage = null;
-var pdfPageCount = 0;
-var cancelThumbnailLoading = false;
-var currentStage = "cropped";
-var processedImages = /* @__PURE__ */ new Map();
+// browser-app/utils.ts
 function u32ToHex(color) {
   const r = color >> 24 & 255;
   const g = color >> 16 & 255;
@@ -2297,28 +2281,54 @@ function hexToRGBA(hex) {
   const b = parseInt(hex.slice(5, 7), 16);
   return [r, g, b, 255];
 }
-var userPalette = Array.from(DEFAULT_PALETTE).map((color) => ({
-  inputColor: u32ToHex(color),
-  outputColor: u32ToHex(color),
-  mapToBg: false
-}));
-var currentPaletteName = "";
-var zoom = 1;
-var panX = 0;
-var panY = 0;
-var isPanning = false;
-var isDraggingCropHandle = false;
-var activeCropHandle = null;
-var cropRegion = null;
-var lastPanX = 0;
-var lastPanY = 0;
-var processZoom = 1;
-var processPanX = 0;
-var processPanY = 0;
-var isProcessPanning = false;
-var lastProcessPanX = 0;
-var lastProcessPanY = 0;
-var processViewInitialized = false;
+
+// browser-app/state.ts
+var state = {
+  currentFileId: null,
+  currentPdfData: null,
+  currentImage: null,
+  currentSelectedPage: null,
+  pdfPageCount: 0,
+  cancelThumbnailLoading: false,
+  // Processing state
+  currentStage: "cropped",
+  processedImages: /* @__PURE__ */ new Map(),
+  // Palette configuration
+  userPalette: Array.from(DEFAULT_PALETTE).map((color) => ({
+    inputColor: u32ToHex(color),
+    outputColor: u32ToHex(color),
+    mapToBg: false
+  })),
+  currentPaletteName: "",
+  // Canvas/Viewport State
+  zoom: 1,
+  panX: 0,
+  panY: 0,
+  isPanning: false,
+  isDraggingCropHandle: false,
+  activeCropHandle: null,
+  cropRegion: null,
+  lastPanX: 0,
+  lastPanY: 0,
+  // Processing canvas state
+  processZoom: 1,
+  processPanX: 0,
+  processPanY: 0,
+  isProcessPanning: false,
+  lastProcessPanX: 0,
+  lastProcessPanY: 0,
+  processViewInitialized: false
+};
+
+// browser-app/main.ts
+var browserCanvasBackend = {
+  createCanvas(width, height) {
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    return canvas;
+  }
+};
 var uploadFileList = document.getElementById("uploadFileList");
 var uploadBtn = document.getElementById("uploadBtn");
 var clearAllBtn = document.getElementById("clearAllBtn");
@@ -2390,12 +2400,12 @@ stageCleanupBtn.addEventListener("click", () => displayProcessingStage("cleanup"
 stagePalettizedBtn.addEventListener("click", () => displayProcessingStage("palettized"));
 stageMedianBtn.addEventListener("click", () => displayProcessingStage("median"));
 processZoomInBtn.addEventListener("click", () => {
-  processZoom = Math.min(10, processZoom * 1.2);
+  state.processZoom = Math.min(10, state.processZoom * 1.2);
   updateProcessZoom();
   updateProcessTransform();
 });
 processZoomOutBtn.addEventListener("click", () => {
-  processZoom = Math.max(0.1, processZoom / 1.2);
+  state.processZoom = Math.max(0.1, state.processZoom / 1.2);
   updateProcessZoom();
   updateProcessTransform();
 });
@@ -2408,7 +2418,7 @@ navStepFile.addEventListener("click", () => {
   }
 });
 navStepPage.addEventListener("click", () => {
-  if (!navStepPage.classList.contains("disabled") && currentPdfData) {
+  if (!navStepPage.classList.contains("disabled") && state.currentPdfData) {
     setMode("pageSelection");
   }
 });
@@ -2462,20 +2472,20 @@ clearAllBtn.addEventListener("click", async () => {
   }
 });
 backToFilesBtn.addEventListener("click", () => {
-  currentFileId = null;
-  currentPdfData = null;
-  currentImage = null;
-  cropRegion = null;
+  state.currentFileId = null;
+  state.currentPdfData = null;
+  state.currentImage = null;
+  state.cropRegion = null;
   setMode("upload");
   refreshFileList();
 });
 zoomInBtn.addEventListener("click", () => {
-  zoom = Math.min(10, zoom * 1.2);
+  state.zoom = Math.min(10, state.zoom * 1.2);
   updateZoom();
   updateTransform();
 });
 zoomOutBtn.addEventListener("click", () => {
-  zoom /= 1.2;
+  state.zoom /= 1.2;
   updateZoom();
   redrawCanvas();
 });
@@ -2483,73 +2493,73 @@ fitToScreenBtn.addEventListener("click", () => {
   fitToScreen();
 });
 clearCropBtn.addEventListener("click", () => {
-  if (currentImage) {
-    setDefaultCrop(currentImage.width, currentImage.height);
+  if (state.currentImage) {
+    setDefaultCrop(state.currentImage.width, state.currentImage.height);
     drawCropOverlay();
   }
 });
 processBtn.addEventListener("click", async () => {
-  if (currentImage) {
+  if (state.currentImage) {
     await startProcessing();
   }
 });
 canvasContainer.addEventListener("mousedown", (e) => {
   const rect = canvasContainer.getBoundingClientRect();
-  const canvasX = (e.clientX - rect.left - panX) / zoom;
-  const canvasY = (e.clientY - rect.top - panY) / zoom;
+  const canvasX = (e.clientX - rect.left - state.panX) / state.zoom;
+  const canvasY = (e.clientY - rect.top - state.panY) / state.zoom;
   const handle = getCropHandleAtPoint(canvasX, canvasY);
-  if (handle && cropRegion) {
-    isDraggingCropHandle = true;
-    activeCropHandle = handle;
-    lastPanX = e.clientX;
-    lastPanY = e.clientY;
+  if (handle && state.cropRegion) {
+    state.isDraggingCropHandle = true;
+    state.activeCropHandle = handle;
+    state.lastPanX = e.clientX;
+    state.lastPanY = e.clientY;
   } else if (!e.shiftKey) {
-    isPanning = true;
-    lastPanX = e.clientX;
-    lastPanY = e.clientY;
+    state.isPanning = true;
+    state.lastPanX = e.clientX;
+    state.lastPanY = e.clientY;
     canvasContainer.classList.add("grabbing");
   }
 });
 canvasContainer.addEventListener("mousemove", (e) => {
-  if (isDraggingCropHandle && activeCropHandle && cropRegion) {
-    const dx = (e.clientX - lastPanX) / zoom;
-    const dy = (e.clientY - lastPanY) / zoom;
-    lastPanX = e.clientX;
-    lastPanY = e.clientY;
-    adjustCropRegion(activeCropHandle, dx, dy);
+  if (state.isDraggingCropHandle && state.activeCropHandle && state.cropRegion) {
+    const dx = (e.clientX - state.lastPanX) / state.zoom;
+    const dy = (e.clientY - state.lastPanY) / state.zoom;
+    state.lastPanX = e.clientX;
+    state.lastPanY = e.clientY;
+    adjustCropRegion(state.activeCropHandle, dx, dy);
     drawCropOverlay();
-  } else if (isPanning) {
-    const dx = e.clientX - lastPanX;
-    const dy = e.clientY - lastPanY;
-    panX += dx;
-    panY += dy;
-    lastPanX = e.clientX;
-    lastPanY = e.clientY;
+  } else if (state.isPanning) {
+    const dx = e.clientX - state.lastPanX;
+    const dy = e.clientY - state.lastPanY;
+    state.panX += dx;
+    state.panY += dy;
+    state.lastPanX = e.clientX;
+    state.lastPanY = e.clientY;
     updateTransform();
   } else {
     const rect = canvasContainer.getBoundingClientRect();
-    const canvasX = (e.clientX - rect.left - panX) / zoom;
-    const canvasY = (e.clientY - rect.top - panY) / zoom;
+    const canvasX = (e.clientX - rect.left - state.panX) / state.zoom;
+    const canvasY = (e.clientY - rect.top - state.panY) / state.zoom;
     const handle = getCropHandleAtPoint(canvasX, canvasY);
     updateCursorForHandle(handle);
   }
 });
 canvasContainer.addEventListener("mouseup", () => {
-  if (isDraggingCropHandle) {
-    isDraggingCropHandle = false;
-    activeCropHandle = null;
-    if (currentImage && cropRegion) {
-      saveCropSettings(currentImage.width, currentImage.height, cropRegion);
+  if (state.isDraggingCropHandle) {
+    state.isDraggingCropHandle = false;
+    state.activeCropHandle = null;
+    if (state.currentImage && state.cropRegion) {
+      saveCropSettings(state.currentImage.width, state.currentImage.height, state.cropRegion);
       updateCropInfo();
     }
   }
-  if (isPanning) {
-    isPanning = false;
+  if (state.isPanning) {
+    state.isPanning = false;
     canvasContainer.classList.remove("grabbing");
   }
 });
 canvasContainer.addEventListener("mouseleave", () => {
-  isPanning = false;
+  state.isPanning = false;
   canvasContainer.classList.remove("grabbing");
 });
 canvasContainer.addEventListener("wheel", (e) => {
@@ -2559,47 +2569,47 @@ canvasContainer.addEventListener("wheel", (e) => {
     const rect = canvasContainer.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
-    const canvasX = (mouseX - panX) / zoom;
-    const canvasY = (mouseY - panY) / zoom;
+    const canvasX = (mouseX - state.panX) / state.zoom;
+    const canvasY = (mouseY - state.panY) / state.zoom;
     const zoomSpeed = 0.01;
-    const zoomChange = -e.deltaY * zoomSpeed * zoom;
-    const newZoom = Math.max(0.1, Math.min(20, zoom + zoomChange));
-    panX = mouseX - canvasX * newZoom;
-    panY = mouseY - canvasY * newZoom;
-    zoom = newZoom;
+    const zoomChange = -e.deltaY * zoomSpeed * state.zoom;
+    const newZoom = Math.max(0.1, Math.min(20, state.zoom + zoomChange));
+    state.panX = mouseX - canvasX * newZoom;
+    state.panY = mouseY - canvasY * newZoom;
+    state.zoom = newZoom;
     updateZoom();
     updateTransform();
   } else {
-    panX -= e.deltaX;
-    panY -= e.deltaY;
+    state.panX -= e.deltaX;
+    state.panY -= e.deltaY;
     updateTransform();
   }
 });
 processCanvasContainer.addEventListener("mousedown", (e) => {
-  isProcessPanning = true;
-  lastProcessPanX = e.clientX;
-  lastProcessPanY = e.clientY;
+  state.isProcessPanning = true;
+  state.lastProcessPanX = e.clientX;
+  state.lastProcessPanY = e.clientY;
   processCanvasContainer.classList.add("grabbing");
 });
 processCanvasContainer.addEventListener("mousemove", (e) => {
-  if (isProcessPanning) {
-    const dx = e.clientX - lastProcessPanX;
-    const dy = e.clientY - lastProcessPanY;
-    processPanX += dx;
-    processPanY += dy;
-    lastProcessPanX = e.clientX;
-    lastProcessPanY = e.clientY;
+  if (state.isProcessPanning) {
+    const dx = e.clientX - state.lastProcessPanX;
+    const dy = e.clientY - state.lastProcessPanY;
+    state.processPanX += dx;
+    state.processPanY += dy;
+    state.lastProcessPanX = e.clientX;
+    state.lastProcessPanY = e.clientY;
     updateProcessTransform();
   }
 });
 processCanvasContainer.addEventListener("mouseup", () => {
-  if (isProcessPanning) {
-    isProcessPanning = false;
+  if (state.isProcessPanning) {
+    state.isProcessPanning = false;
     processCanvasContainer.classList.remove("grabbing");
   }
 });
 processCanvasContainer.addEventListener("mouseleave", () => {
-  isProcessPanning = false;
+  state.isProcessPanning = false;
   processCanvasContainer.classList.remove("grabbing");
 });
 processCanvasContainer.addEventListener("wheel", (e) => {
@@ -2609,21 +2619,21 @@ processCanvasContainer.addEventListener("wheel", (e) => {
     const rect = processCanvasContainer.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
-    const image = processedImages.get(currentStage);
+    const image = state.processedImages.get(state.currentStage);
     if (!image) return;
-    const canvasX = (mouseX - processPanX) / processZoom;
-    const canvasY = (mouseY - processPanY) / processZoom;
+    const canvasX = (mouseX - state.processPanX) / state.processZoom;
+    const canvasY = (mouseY - state.processPanY) / state.processZoom;
     const zoomSpeed = 5e-3;
-    const zoomChange = -e.deltaY * zoomSpeed * processZoom;
-    const newZoom = Math.max(0.1, Math.min(10, processZoom + zoomChange));
-    processPanX = mouseX - canvasX * newZoom;
-    processPanY = mouseY - canvasY * newZoom;
-    processZoom = newZoom;
+    const zoomChange = -e.deltaY * zoomSpeed * state.processZoom;
+    const newZoom = Math.max(0.1, Math.min(10, state.processZoom + zoomChange));
+    state.processPanX = mouseX - canvasX * newZoom;
+    state.processPanY = mouseY - canvasY * newZoom;
+    state.processZoom = newZoom;
     updateProcessZoom();
     updateProcessTransform();
   } else {
-    processPanX -= e.deltaX;
-    processPanY -= e.deltaY;
+    state.processPanX -= e.deltaX;
+    state.processPanY -= e.deltaY;
     updateProcessTransform();
   }
 });
@@ -2727,11 +2737,11 @@ async function savePalette(name) {
   const store = transaction.objectStore("palettes");
   const paletteData = {
     name: name.trim(),
-    colors: userPalette.map((c) => ({ ...c })),
+    colors: state.userPalette.map((c) => ({ ...c })),
     timestamp: Date.now()
   };
   await store.put(paletteData);
-  currentPaletteName = name.trim();
+  state.currentPaletteName = name.trim();
   showStatus(`Palette "${name}" saved`);
 }
 async function loadPalette(name) {
@@ -2760,9 +2770,9 @@ ${names.join("\n")}`);
   request.onsuccess = () => {
     const data = request.result;
     if (data) {
-      userPalette.length = 0;
-      data.colors.forEach((c) => userPalette.push({ ...c }));
-      currentPaletteName = name;
+      state.userPalette.length = 0;
+      data.colors.forEach((c) => state.userPalette.push({ ...c }));
+      state.currentPaletteName = name;
       renderPaletteUI();
       showStatus(`Palette "${name}" loaded`);
       const paletteNameInput = document.getElementById("paletteName");
@@ -2773,15 +2783,15 @@ ${names.join("\n")}`);
   };
 }
 async function setDefaultPalette() {
-  if (!currentPaletteName) {
+  if (!state.currentPaletteName) {
     showStatus("Please save the palette first", true);
     return;
   }
   const db2 = await initPaletteDB();
   const transaction = db2.transaction(["settings"], "readwrite");
   const store = transaction.objectStore("settings");
-  await store.put({ key: "defaultPalette", value: currentPaletteName });
-  showStatus(`"${currentPaletteName}" set as default palette`);
+  await store.put({ key: "defaultPalette", value: state.currentPaletteName });
+  showStatus(`"${state.currentPaletteName}" set as default palette`);
 }
 async function loadDefaultPalette() {
   const db2 = await initPaletteDB();
@@ -2799,10 +2809,10 @@ initPaletteDB().then(() => loadDefaultPalette());
 async function handleFileUpload(file) {
   try {
     showStatus(`Loading: ${file.name}...`);
-    if (!currentFileId) {
+    if (!state.currentFileId) {
       try {
-        currentFileId = await saveFile(file);
-        console.log(`File saved with ID: ${currentFileId}`);
+        state.currentFileId = await saveFile(file);
+        console.log(`File saved with ID: ${state.currentFileId}`);
         await refreshFileList();
       } catch (err) {
         console.error("Error saving file:", err);
@@ -2831,15 +2841,15 @@ async function loadPdf(file) {
     console.log("loadPdf: Got arrayBuffer, length:", arrayBuffer.byteLength);
     const copy = new Uint8Array(arrayBuffer.byteLength);
     copy.set(new Uint8Array(arrayBuffer));
-    currentPdfData = copy;
+    state.currentPdfData = copy;
     console.log("loadPdf: Created copy", copy.length);
-    const initialCopy = currentPdfData.slice();
+    const initialCopy = state.currentPdfData.slice();
     console.log("loadPdf: Calling getDocument");
     const loadingTask = pdfjsLib.getDocument({ data: initialCopy });
     const pdf = await loadingTask.promise;
-    pdfPageCount = pdf.numPages;
-    console.log("loadPdf: PDF loaded, pages:", pdfPageCount);
-    showStatus(`PDF loaded: ${pdfPageCount} pages`);
+    state.pdfPageCount = pdf.numPages;
+    console.log("loadPdf: PDF loaded, pages:", state.pdfPageCount);
+    showStatus(`PDF loaded: ${state.pdfPageCount} pages`);
     console.log("loadPdf: About to set pdfFileName, element:", pdfFileName);
     try {
       pdfFileName.textContent = file.name;
@@ -2855,14 +2865,14 @@ async function loadPdf(file) {
       console.log(`[THUMBNAIL] PURGING ${existingCards} existing thumbnail cards from cache`);
     }
     pageGrid.innerHTML = "";
-    console.log("loadPdf: pageGrid cleared, adding", pdfPageCount, "cards");
+    console.log("loadPdf: pageGrid cleared, adding", state.pdfPageCount, "cards");
     const pageDimensions = [];
     let pageLabels = null;
     try {
       pageLabels = await pdf.getPageLabels();
     } catch (_e) {
     }
-    for (let i = 1; i <= pdfPageCount; i++) {
+    for (let i = 1; i <= state.pdfPageCount; i++) {
       const page = await pdf.getPage(i);
       const viewport = page.getViewport({ scale: 1 });
       const pageLabel = pageLabels && pageLabels[i - 1] || `Page ${i}`;
@@ -2885,7 +2895,7 @@ async function loadPdf(file) {
       card.appendChild(imageDiv);
       card.appendChild(label);
       card.dataset.pageNum = i.toString();
-      if (i === currentSelectedPage) {
+      if (i === state.currentSelectedPage) {
         card.classList.add("selected");
       }
       card.addEventListener("click", () => {
@@ -2894,10 +2904,10 @@ async function loadPdf(file) {
       pageGrid.appendChild(card);
     }
     const MAX_THUMBNAILS = 50;
-    const thumbnailsToRender = Math.min(pdfPageCount, MAX_THUMBNAILS);
-    cancelThumbnailLoading = false;
+    const thumbnailsToRender = Math.min(state.pdfPageCount, MAX_THUMBNAILS);
+    state.cancelThumbnailLoading = false;
     (async () => {
-      const pagesBySize = Array.from({ length: pdfPageCount }, (_, i) => i).sort((a, b) => {
+      const pagesBySize = Array.from({ length: state.pdfPageCount }, (_, i) => i).sort((a, b) => {
         const areaA = pageDimensions[a].width * pageDimensions[a].height;
         const areaB = pageDimensions[b].width * pageDimensions[b].height;
         return areaB - areaA;
@@ -2906,16 +2916,16 @@ async function loadPdf(file) {
       const addedPages = /* @__PURE__ */ new Set();
       let sequentialIndex = 0;
       let largestIndex = 0;
-      console.log(`[THUMBNAIL] Building render queue for ${thumbnailsToRender} thumbnails out of ${pdfPageCount} pages`);
-      while (renderQueue.length < thumbnailsToRender && (sequentialIndex < pdfPageCount || largestIndex < pagesBySize.length)) {
-        if (sequentialIndex < pdfPageCount && renderQueue.length < thumbnailsToRender) {
+      console.log(`[THUMBNAIL] Building render queue for ${thumbnailsToRender} thumbnails out of ${state.pdfPageCount} pages`);
+      while (renderQueue.length < thumbnailsToRender && (sequentialIndex < state.pdfPageCount || largestIndex < pagesBySize.length)) {
+        if (sequentialIndex < state.pdfPageCount && renderQueue.length < thumbnailsToRender) {
           if (!addedPages.has(sequentialIndex)) {
             renderQueue.push(sequentialIndex);
             addedPages.add(sequentialIndex);
           }
           sequentialIndex++;
         }
-        if (sequentialIndex < pdfPageCount && renderQueue.length < thumbnailsToRender) {
+        if (sequentialIndex < state.pdfPageCount && renderQueue.length < thumbnailsToRender) {
           if (!addedPages.has(sequentialIndex)) {
             renderQueue.push(sequentialIndex);
             addedPages.add(sequentialIndex);
@@ -2940,7 +2950,7 @@ async function loadPdf(file) {
       let completed = 0;
       const allCards = Array.from(pageGrid.children);
       for (let i = 0; i < renderQueue.length; i += batchSize) {
-        if (cancelThumbnailLoading) {
+        if (state.cancelThumbnailLoading) {
           console.log(`[THUMBNAIL] Loading cancelled after ${completed} thumbnails`);
           showStatus(`Thumbnail loading cancelled`);
           return;
@@ -2969,13 +2979,13 @@ async function loadPdf(file) {
           await Promise.all(batch);
           completed += batch.length;
           console.log(`[THUMBNAIL] Batch complete. Total: ${completed}/${renderQueue.length}`);
-          const statusMsg = thumbnailsToRender < pdfPageCount ? `Loading thumbnails: ${completed}/${thumbnailsToRender} (${pdfPageCount} pages total)` : `Loading thumbnails: ${completed}/${pdfPageCount}`;
+          const statusMsg = thumbnailsToRender < state.pdfPageCount ? `Loading thumbnails: ${completed}/${thumbnailsToRender} (${state.pdfPageCount} pages total)` : `Loading thumbnails: ${completed}/${state.pdfPageCount}`;
           showStatus(statusMsg);
         } else {
           console.warn(`[THUMBNAIL] Batch ${Math.floor(i / batchSize) + 1}: No valid thumbnails to render`);
         }
       }
-      const finalMsg = thumbnailsToRender < pdfPageCount ? `PDF loaded: ${pdfPageCount} pages (showing ${thumbnailsToRender} thumbnails)` : `PDF loaded: ${pdfPageCount} pages`;
+      const finalMsg = thumbnailsToRender < state.pdfPageCount ? `PDF loaded: ${state.pdfPageCount} pages (showing ${thumbnailsToRender} thumbnails)` : `PDF loaded: ${state.pdfPageCount} pages`;
       showStatus(finalMsg);
     })();
   } catch (error) {
@@ -2986,12 +2996,12 @@ async function loadPdf(file) {
 }
 async function generatePageThumbnail(pageNum, pageLabel, container) {
   try {
-    if (!currentPdfData) {
+    if (!state.currentPdfData) {
       console.warn(`[THUMBNAIL] No PDF data for page ${pageNum}(${pageLabel})`);
       return;
     }
     console.log(`[THUMBNAIL] START rendering page ${pageNum}(${pageLabel})`);
-    const pdfDataCopy = currentPdfData.slice();
+    const pdfDataCopy = state.currentPdfData.slice();
     const image = await renderPdfPage(
       { file: pdfDataCopy, pageNumber: pageNum, scale: 0.4 },
       browserCanvasBackend,
@@ -3025,13 +3035,13 @@ async function generatePageThumbnail(pageNum, pageLabel, container) {
 async function selectPdfPage(pageNum) {
   try {
     console.log("selectPdfPage: Starting, page:", pageNum);
-    if (!currentPdfData) {
+    if (!state.currentPdfData) {
       console.error("selectPdfPage: No PDF data!");
       showStatus("No PDF loaded", true);
       return;
     }
-    cancelThumbnailLoading = true;
-    currentSelectedPage = pageNum;
+    state.cancelThumbnailLoading = true;
+    state.currentSelectedPage = pageNum;
     const cards = pageGrid.querySelectorAll(".page-card");
     cards.forEach((card) => card.classList.remove("selected"));
     const selectedCard = pageGrid.querySelector(`[data-page-num="${pageNum}"]`);
@@ -3054,7 +3064,7 @@ async function selectPdfPage(pageNum) {
       showStatus(`\u23F3 Rendering page ${pageNum} at 200 DPI${".".repeat(progressDots)}`);
     }, 300);
     console.log("selectPdfPage: Creating copy");
-    const pdfDataCopy = currentPdfData.slice();
+    const pdfDataCopy = state.currentPdfData.slice();
     console.log("selectPdfPage: Calling renderPdfPage");
     const image = await renderPdfPage(
       {
@@ -3070,9 +3080,9 @@ async function selectPdfPage(pageNum) {
     canvasContainer.style.opacity = "1";
     await loadImage(image);
     showStatus(`\u2713 Page ${pageNum} loaded: ${image.width}\xD7${image.height}`);
-    if (currentFileId && currentImage) {
-      const thumbnail = generateThumbnail(currentImage);
-      await updateFile(currentFileId, { thumbnail });
+    if (state.currentFileId && state.currentImage) {
+      const thumbnail = generateThumbnail(state.currentImage);
+      await updateFile(state.currentFileId, { thumbnail });
       await refreshFileList();
     }
   } catch (error) {
@@ -3081,7 +3091,7 @@ async function selectPdfPage(pageNum) {
   }
 }
 function loadImage(image) {
-  currentImage = image;
+  state.currentImage = image;
   mainCanvas.width = image.width;
   mainCanvas.height = image.height;
   cropOverlay.width = image.width;
@@ -3090,7 +3100,7 @@ function loadImage(image) {
   canvasContainer.style.opacity = "1";
   const savedCrop = getCropSettings(image.width, image.height);
   if (savedCrop) {
-    cropRegion = savedCrop;
+    state.cropRegion = savedCrop;
   } else {
     setDefaultCrop(image.width, image.height);
   }
@@ -3106,25 +3116,25 @@ function loadImage(image) {
   showStatus(`\u2713 Ready: ${image.width}\xD7${image.height} pixels`);
 }
 function fitToScreen() {
-  if (!currentImage) return;
+  if (!state.currentImage) return;
   const containerWidth = canvasContainer.clientWidth;
   const containerHeight = canvasContainer.clientHeight;
-  const imageWidth = currentImage.width;
-  const imageHeight = currentImage.height;
+  const imageWidth = state.currentImage.width;
+  const imageHeight = state.currentImage.height;
   const scaleX = containerWidth / imageWidth;
   const scaleY = containerHeight / imageHeight;
-  zoom = Math.min(scaleX, scaleY) * 0.9;
-  panX = (containerWidth - imageWidth * zoom) / 2;
-  panY = (containerHeight - imageHeight * zoom) / 2;
+  state.zoom = Math.min(scaleX, scaleY) * 0.9;
+  state.panX = (containerWidth - imageWidth * state.zoom) / 2;
+  state.panY = (containerHeight - imageHeight * state.zoom) / 2;
   updateZoom();
   updateTransform();
 }
 function updateZoom() {
-  zoomLevel.textContent = `${Math.round(zoom * 100)}%`;
+  zoomLevel.textContent = `${Math.round(state.zoom * 100)}%`;
 }
 function setDefaultCrop(imageWidth, imageHeight) {
   const margin = 0.1;
-  cropRegion = {
+  state.cropRegion = {
     x: imageWidth * margin,
     y: imageHeight * margin,
     width: imageWidth * (1 - 2 * margin),
@@ -3149,14 +3159,14 @@ function saveCropSettings(imageWidth, imageHeight, crop) {
   localStorage.setItem(key, JSON.stringify(crop));
 }
 function updateCropInfo() {
-  if (cropRegion) {
-    cropInfo.textContent = `Crop: ${Math.round(cropRegion.width)}\xD7${Math.round(cropRegion.height)} at (${Math.round(cropRegion.x)}, ${Math.round(cropRegion.y)})`;
+  if (state.cropRegion) {
+    cropInfo.textContent = `Crop: ${Math.round(state.cropRegion.width)}\xD7${Math.round(state.cropRegion.height)} at (${Math.round(state.cropRegion.x)}, ${Math.round(state.cropRegion.y)})`;
   }
 }
 function getCropHandleAtPoint(x, y) {
-  if (!cropRegion) return null;
-  const handleSize = 15 / zoom;
-  const { x: cx, y: cy, width: cw, height: ch } = cropRegion;
+  if (!state.cropRegion) return null;
+  const handleSize = 15 / state.zoom;
+  const { x: cx, y: cy, width: cw, height: ch } = state.cropRegion;
   if (Math.abs(x - cx) < handleSize && Math.abs(y - cy) < handleSize) return "tl";
   if (Math.abs(x - (cx + cw)) < handleSize && Math.abs(y - cy) < handleSize) return "tr";
   if (Math.abs(x - cx) < handleSize && Math.abs(y - (cy + ch)) < handleSize) return "bl";
@@ -3181,8 +3191,8 @@ function updateCursorForHandle(handle) {
   }
 }
 function adjustCropRegion(handle, dx, dy) {
-  if (!cropRegion || !currentImage) return;
-  const { x, y, width, height } = cropRegion;
+  if (!state.cropRegion || !state.currentImage) return;
+  const { x, y, width, height } = state.cropRegion;
   let newX = x, newY = y, newWidth = width, newHeight = height;
   switch (handle) {
     case "tl":
@@ -3220,25 +3230,25 @@ function adjustCropRegion(handle, dx, dy) {
       newWidth = width + dx;
       break;
   }
-  newX = Math.max(0, Math.min(newX, currentImage.width - 10));
-  newY = Math.max(0, Math.min(newY, currentImage.height - 10));
-  newWidth = Math.max(10, Math.min(newWidth, currentImage.width - newX));
-  newHeight = Math.max(10, Math.min(newHeight, currentImage.height - newY));
-  cropRegion.x = newX;
-  cropRegion.y = newY;
-  cropRegion.width = newWidth;
-  cropRegion.height = newHeight;
+  newX = Math.max(0, Math.min(newX, state.currentImage.width - 10));
+  newY = Math.max(0, Math.min(newY, state.currentImage.height - 10));
+  newWidth = Math.max(10, Math.min(newWidth, state.currentImage.width - newX));
+  newHeight = Math.max(10, Math.min(newHeight, state.currentImage.height - newY));
+  state.cropRegion.x = newX;
+  state.cropRegion.y = newY;
+  state.cropRegion.width = newWidth;
+  state.cropRegion.height = newHeight;
   updateCropInfo();
 }
 function updateTransform() {
-  const transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  const transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
   mainCanvas.style.transform = transform;
   mainCanvas.style.transformOrigin = "0 0";
   mainCanvas.style.willChange = "transform";
   cropOverlay.style.transform = transform;
   cropOverlay.style.transformOrigin = "0 0";
   cropOverlay.style.willChange = "transform";
-  if (zoom >= 1) {
+  if (state.zoom >= 1) {
     mainCanvas.style.imageRendering = "pixelated";
   } else {
     mainCanvas.style.imageRendering = "smooth";
@@ -3246,47 +3256,47 @@ function updateTransform() {
   drawCropOverlay();
 }
 function redrawCanvas() {
-  if (!currentImage) return;
+  if (!state.currentImage) return;
   ctx.clearRect(0, 0, mainCanvas.width, mainCanvas.height);
   const imageData = new ImageData(
-    new Uint8ClampedArray(currentImage.data),
-    currentImage.width,
-    currentImage.height
+    new Uint8ClampedArray(state.currentImage.data),
+    state.currentImage.width,
+    state.currentImage.height
   );
   ctx.putImageData(imageData, 0, 0);
   drawCropOverlay();
 }
 function drawCropOverlay() {
-  if (!currentImage || !cropRegion) {
+  if (!state.currentImage || !state.cropRegion) {
     cropCtx.clearRect(0, 0, cropOverlay.width, cropOverlay.height);
     return;
   }
   cropCtx.clearRect(0, 0, cropOverlay.width, cropOverlay.height);
   cropCtx.fillStyle = "rgba(0, 0, 0, 0.5)";
-  cropCtx.fillRect(0, 0, currentImage.width, currentImage.height);
+  cropCtx.fillRect(0, 0, state.currentImage.width, state.currentImage.height);
   cropCtx.globalCompositeOperation = "destination-out";
   cropCtx.fillStyle = "rgba(0, 0, 0, 1)";
   cropCtx.fillRect(
-    cropRegion.x,
-    cropRegion.y,
-    cropRegion.width,
-    cropRegion.height
+    state.cropRegion.x,
+    state.cropRegion.y,
+    state.cropRegion.width,
+    state.cropRegion.height
   );
   cropCtx.globalCompositeOperation = "source-over";
   cropCtx.strokeStyle = "#4f46e5";
-  cropCtx.lineWidth = 3 / zoom;
+  cropCtx.lineWidth = 3 / state.zoom;
   cropCtx.strokeRect(
-    cropRegion.x,
-    cropRegion.y,
-    cropRegion.width,
-    cropRegion.height
+    state.cropRegion.x,
+    state.cropRegion.y,
+    state.cropRegion.width,
+    state.cropRegion.height
   );
-  const handleSize = 10 / zoom;
+  const handleSize = 10 / state.zoom;
   cropCtx.fillStyle = "#4f46e5";
-  const cx = cropRegion.x;
-  const cy = cropRegion.y;
-  const cw = cropRegion.width;
-  const ch = cropRegion.height;
+  const cx = state.cropRegion.x;
+  const cy = state.cropRegion.y;
+  const cw = state.cropRegion.width;
+  const ch = state.cropRegion.height;
   const handles = [
     // Corners
     [cx, cy],
@@ -3352,24 +3362,24 @@ async function binaryToGPUBuffer(binary) {
   return buffer;
 }
 async function startProcessing() {
-  if (!currentImage) return;
+  if (!state.currentImage) return;
   try {
     setMode("processing");
-    processedImages.clear();
-    processViewInitialized = false;
-    let processImage = currentImage;
-    if (cropRegion && cropRegion.width > 0 && cropRegion.height > 0) {
+    state.processedImages.clear();
+    state.processViewInitialized = false;
+    let processImage = state.currentImage;
+    if (state.cropRegion && state.cropRegion.width > 0 && state.cropRegion.height > 0) {
       showStatus("Cropping image...");
-      processImage = cropImage(currentImage, cropRegion);
+      processImage = cropImage(state.currentImage, state.cropRegion);
     }
-    processedImages.set("cropped", processImage);
+    state.processedImages.set("cropped", processImage);
     displayProcessingStage("cropped");
     showStatus("Extracting black...");
     const extractBlackStart = performance.now();
     const extractedBlack = await extractBlackGPU(processImage, 0.2);
     const extractBlackEnd = performance.now();
     showStatus(`Extract black: ${(extractBlackEnd - extractBlackStart).toFixed(1)}ms`);
-    processedImages.set("extract_black", extractedBlack);
+    state.processedImages.set("extract_black", extractedBlack);
     displayProcessingStage("extract_black");
     const color1Buffer = await binaryToGPUBuffer(extractedBlack);
     const color1SkelResults = await processValueChannel(
@@ -3377,8 +3387,8 @@ async function startProcessing() {
       extractedBlack.width,
       extractedBlack.height
     );
-    processedImages.set("color_1", color1SkelResults.median);
-    processedImages.set("color_1_skel", color1SkelResults.skeleton);
+    state.processedImages.set("color_1", color1SkelResults.median);
+    state.processedImages.set("color_1_skel", color1SkelResults.skeleton);
     color1Buffer.destroy();
     color1SkelResults.skeletonBuffer.destroy();
     showStatus("Applying bloom filter...");
@@ -3391,7 +3401,7 @@ async function startProcessing() {
     const subtractedImage = await subtractBlackGPU(processImage, bloomFiltered);
     const subtractEnd = performance.now();
     showStatus(`Subtract black: ${(subtractEnd - subtractStart).toFixed(1)}ms`);
-    processedImages.set("subtract_black", subtractedImage);
+    state.processedImages.set("subtract_black", subtractedImage);
     displayProcessingStage("subtract_black");
     processImage = subtractedImage;
     showStatus("Running cleanup (extracting channels)...");
@@ -3399,11 +3409,11 @@ async function startProcessing() {
     const cleanupResults = await cleanupGPU(processImage);
     const t2 = performance.now();
     showStatus(`Cleanup: ${(t2 - t1).toFixed(1)}ms`);
-    processedImages.set("value", cleanupResults.value);
-    processedImages.set("saturation", cleanupResults.saturation);
-    processedImages.set("saturation_median", cleanupResults.saturationMedian);
-    processedImages.set("hue", cleanupResults.hue);
-    processedImages.set("hue_median", cleanupResults.hueMedian);
+    state.processedImages.set("value", cleanupResults.value);
+    state.processedImages.set("saturation", cleanupResults.saturation);
+    state.processedImages.set("saturation_median", cleanupResults.saturationMedian);
+    state.processedImages.set("hue", cleanupResults.hue);
+    state.processedImages.set("hue_median", cleanupResults.hueMedian);
     showStatus("Recombining channels...");
     const t2d = performance.now();
     const cleanupFinal = await recombineWithValue(
@@ -3415,7 +3425,7 @@ async function startProcessing() {
     );
     const t2e = performance.now();
     showStatus(`Recombine: ${(t2e - t2d).toFixed(1)}ms`);
-    processedImages.set("cleanup", cleanupFinal);
+    state.processedImages.set("cleanup", cleanupFinal);
     displayProcessingStage("cleanup");
     cleanupResults.valueBuffer.destroy();
     cleanupResults.saturationBuffer.destroy();
@@ -3425,17 +3435,17 @@ async function startProcessing() {
     const inputPalette = buildPaletteRGBA();
     const palettized = await palettizeGPU(cleanupFinal, inputPalette);
     const outputPalette = new Uint8ClampedArray(16 * 4);
-    for (let i = 0; i < userPalette.length && i < 16; i++) {
-      const color = userPalette[i];
-      const useColor = color.mapToBg ? userPalette[0].outputColor : color.outputColor;
+    for (let i = 0; i < state.userPalette.length && i < 16; i++) {
+      const color = state.userPalette[i];
+      const useColor = color.mapToBg ? state.userPalette[0].outputColor : color.outputColor;
       const [r, g, b, a] = hexToRGBA(useColor);
       outputPalette[i * 4] = r;
       outputPalette[i * 4 + 1] = g;
       outputPalette[i * 4 + 2] = b;
       outputPalette[i * 4 + 3] = a;
     }
-    for (let i = userPalette.length; i < 16; i++) {
-      const [r, g, b, a] = hexToRGBA(userPalette[0].outputColor);
+    for (let i = state.userPalette.length; i < 16; i++) {
+      const [r, g, b, a] = hexToRGBA(state.userPalette[0].outputColor);
       outputPalette[i * 4] = r;
       outputPalette[i * 4 + 1] = g;
       outputPalette[i * 4 + 2] = b;
@@ -3449,7 +3459,7 @@ async function startProcessing() {
     palettized.palette = outputPaletteU32;
     const t4 = performance.now();
     showStatus(`Palettize: ${(t4 - t3).toFixed(1)}ms`);
-    processedImages.set("palettized", palettized);
+    state.processedImages.set("palettized", palettized);
     displayProcessingStage("palettized");
     showStatus("Applying median filter (pass 1/3)...");
     const t4b = performance.now();
@@ -3460,24 +3470,24 @@ async function startProcessing() {
     median = await median3x3GPU(median);
     const t4c = performance.now();
     showStatus(`Median filter (3 passes): ${(t4c - t4b).toFixed(1)}ms`);
-    processedImages.set("median", median);
+    state.processedImages.set("median", median);
     displayProcessingStage("median");
     showStatus("Processing individual colors...");
     const t5 = performance.now();
-    for (let i = 1; i < userPalette.length && i < 16; i++) {
-      const color = userPalette[i];
+    for (let i = 1; i < state.userPalette.length && i < 16; i++) {
+      const color = state.userPalette[i];
       if (color.mapToBg) continue;
       if (i === 1) continue;
       showStatus(`Processing color ${i}...`);
       const colorBinary = extractColorFromPalettized(median, i);
-      processedImages.set(`color_${i}`, colorBinary);
+      state.processedImages.set(`color_${i}`, colorBinary);
       const colorBuffer = await binaryToGPUBuffer(colorBinary);
       const skelResults = await processValueChannel(
         colorBuffer,
         colorBinary.width,
         colorBinary.height
       );
-      processedImages.set(`color_${i}_skel`, skelResults.skeleton);
+      state.processedImages.set(`color_${i}_skel`, skelResults.skeleton);
       colorBuffer.destroy();
       skelResults.skeletonBuffer.destroy();
     }
@@ -3493,17 +3503,17 @@ async function startProcessing() {
 }
 function addColorStageButtons() {
   colorStagesContainer.innerHTML = "";
-  for (let i = 1; i < userPalette.length && i < 16; i++) {
-    const color = userPalette[i];
+  for (let i = 1; i < state.userPalette.length && i < 16; i++) {
+    const color = state.userPalette[i];
     if (color.mapToBg) continue;
-    if (!processedImages.has(`color_${i}`)) continue;
+    if (!state.processedImages.has(`color_${i}`)) continue;
     const colorBtn = document.createElement("button");
     colorBtn.className = "stage-btn";
     colorBtn.textContent = `Color ${i}`;
     colorBtn.style.borderLeft = `4px solid ${color.outputColor}`;
     colorBtn.addEventListener("click", () => displayProcessingStage(`color_${i}`));
     colorStagesContainer.appendChild(colorBtn);
-    if (processedImages.has(`color_${i}_skel`)) {
+    if (state.processedImages.has(`color_${i}_skel`)) {
       const skelBtn = document.createElement("button");
       skelBtn.className = "stage-btn";
       skelBtn.textContent = `Color ${i} Skel`;
@@ -3514,12 +3524,12 @@ function addColorStageButtons() {
   }
 }
 function displayProcessingStage(stage) {
-  const image = processedImages.get(stage);
+  const image = state.processedImages.get(stage);
   if (!image) {
     showStatus(`Stage ${stage} not available`, true);
     return;
   }
-  currentStage = stage;
+  state.currentStage = stage;
   document.querySelectorAll(".stage-btn").forEach((btn) => btn.classList.remove("active"));
   if (typeof stage === "string" && stage.startsWith("color_")) {
     const btn = Array.from(document.querySelectorAll(".stage-btn")).find(
@@ -3586,16 +3596,16 @@ function displayProcessingStage(stage) {
     image.height
   );
   processCtx.putImageData(imageData, 0, 0);
-  if (!processViewInitialized) {
+  if (!state.processViewInitialized) {
     processFitToScreen();
-    processViewInitialized = true;
+    state.processViewInitialized = true;
   } else {
     updateProcessTransform();
   }
   showStatus(`Viewing: ${stage} (${image.width}\xD7${image.height})`);
 }
 function processFitToScreen() {
-  const image = processedImages.get(currentStage);
+  const image = state.processedImages.get(state.currentStage);
   if (!image) return;
   const containerWidth = processCanvasContainer.clientWidth;
   const containerHeight = processCanvasContainer.clientHeight;
@@ -3603,21 +3613,21 @@ function processFitToScreen() {
   const imageHeight = image.height;
   const scaleX = containerWidth / imageWidth;
   const scaleY = containerHeight / imageHeight;
-  processZoom = Math.min(scaleX, scaleY) * 0.9;
-  processPanX = (containerWidth - imageWidth * processZoom) / 2;
-  processPanY = (containerHeight - imageHeight * processZoom) / 2;
+  state.processZoom = Math.min(scaleX, scaleY) * 0.9;
+  state.processPanX = (containerWidth - imageWidth * state.processZoom) / 2;
+  state.processPanY = (containerHeight - imageHeight * state.processZoom) / 2;
   updateProcessZoom();
   updateProcessTransform();
 }
 function updateProcessZoom() {
-  processZoomLevel.textContent = `${Math.round(processZoom * 100)}%`;
+  processZoomLevel.textContent = `${Math.round(state.processZoom * 100)}%`;
 }
 function updateProcessTransform() {
-  const transform = `translate(${processPanX}px, ${processPanY}px) scale(${processZoom})`;
+  const transform = `translate(${state.processPanX}px, ${state.processPanY}px) scale(${state.processZoom})`;
   processCanvas.style.transform = transform;
   processCanvas.style.transformOrigin = "0 0";
   processCanvas.style.willChange = "transform";
-  if (processZoom >= 1) {
+  if (state.processZoom >= 1) {
     processCanvas.style.imageRendering = "pixelated";
   } else {
     processCanvas.style.imageRendering = "auto";
@@ -3682,7 +3692,7 @@ async function refreshFileList() {
   for (const file of files) {
     const item = document.createElement("div");
     item.className = "file-card";
-    if (file.id === currentFileId) {
+    if (file.id === state.currentFileId) {
       item.classList.add("active");
     }
     const thumbnail = document.createElement("div");
@@ -3715,10 +3725,10 @@ async function refreshFileList() {
       e.stopPropagation();
       if (confirm(`Delete ${file.name}?`)) {
         await deleteFile(file.id);
-        if (file.id === currentFileId) {
-          currentFileId = null;
-          currentPdfData = null;
-          currentImage = null;
+        if (file.id === state.currentFileId) {
+          state.currentFileId = null;
+          state.currentPdfData = null;
+          state.currentImage = null;
           setMode("upload");
         }
         await refreshFileList();
@@ -3739,7 +3749,7 @@ async function loadStoredFile(id) {
     showStatus("File not found", true);
     return;
   }
-  currentFileId = id;
+  state.currentFileId = id;
   const data = new Uint8Array(stored.data);
   const blob = new Blob([data], { type: stored.type });
   const file = new File([blob], stored.name, { type: stored.type });
@@ -3747,7 +3757,7 @@ async function loadStoredFile(id) {
   await handleFileUpload(file);
 }
 function renderPaletteUI() {
-  console.log("renderPaletteUI called, userPalette length:", userPalette.length);
+  console.log("renderPaletteUI called, state.userPalette length:", state.userPalette.length);
   const paletteDisplay = document.getElementById("paletteDisplay");
   console.log("paletteDisplay element:", paletteDisplay);
   if (!paletteDisplay) {
@@ -3755,7 +3765,7 @@ function renderPaletteUI() {
     return;
   }
   paletteDisplay.innerHTML = "";
-  userPalette.forEach((color, index) => {
+  state.userPalette.forEach((color, index) => {
     const item = document.createElement("div");
     item.style.cssText = "display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem; border-bottom: 1px solid #3a3a3a; cursor: pointer; transition: background 0.2s;";
     item.onmouseover = () => item.style.background = "#333";
@@ -3797,7 +3807,7 @@ var colorEditorIndex = null;
 var eyedropperMode = null;
 function openColorEditor(index) {
   colorEditorIndex = index;
-  const color = userPalette[index];
+  const color = state.userPalette[index];
   let modal = document.getElementById("colorEditorModal");
   if (!modal) {
     modal = document.createElement("div");
@@ -3902,16 +3912,16 @@ function openColorEditor(index) {
       alert("Invalid output color format. Use #RRGGBB");
       return;
     }
-    userPalette[index].inputColor = inputColor;
+    state.userPalette[index].inputColor = inputColor;
     if (selectedMode === "remove") {
-      userPalette[index].mapToBg = true;
-      userPalette[index].outputColor = inputColor;
+      state.userPalette[index].mapToBg = true;
+      state.userPalette[index].outputColor = inputColor;
     } else if (selectedMode === "different") {
-      userPalette[index].mapToBg = false;
-      userPalette[index].outputColor = outputColor;
+      state.userPalette[index].mapToBg = false;
+      state.userPalette[index].outputColor = outputColor;
     } else {
-      userPalette[index].mapToBg = false;
-      userPalette[index].outputColor = inputColor;
+      state.userPalette[index].mapToBg = false;
+      state.userPalette[index].outputColor = inputColor;
     }
     renderPaletteUI();
     closeColorEditor();
@@ -3920,7 +3930,7 @@ function openColorEditor(index) {
   if (deleteBtn) {
     deleteBtn.addEventListener("click", () => {
       if (index !== 0 && confirm("Delete this color?")) {
-        userPalette.splice(index, 1);
+        state.userPalette.splice(index, 1);
         renderPaletteUI();
         closeColorEditor();
       }
@@ -3939,13 +3949,13 @@ function closeColorEditor() {
   eyedropperMode = null;
 }
 function addPaletteColor() {
-  console.log("Add palette color clicked, current length:", userPalette.length);
-  if (userPalette.length >= 16) {
+  console.log("Add palette color clicked, current length:", state.userPalette.length);
+  if (state.userPalette.length >= 16) {
     showStatus("Maximum 16 colors allowed", true);
     return;
   }
-  const newIndex = userPalette.length;
-  userPalette.push({
+  const newIndex = state.userPalette.length;
+  state.userPalette.push({
     inputColor: "#808080",
     outputColor: "#808080",
     mapToBg: false
@@ -3954,9 +3964,9 @@ function addPaletteColor() {
   openColorEditor(newIndex);
 }
 function resetPaletteToDefault() {
-  userPalette.length = 0;
+  state.userPalette.length = 0;
   Array.from(DEFAULT_PALETTE).forEach((color) => {
-    userPalette.push({
+    state.userPalette.push({
       inputColor: u32ToHex(color),
       outputColor: u32ToHex(color),
       mapToBg: false
@@ -3967,7 +3977,7 @@ function resetPaletteToDefault() {
 }
 var eyedropperActive = false;
 function activateEyedropper() {
-  if (!currentImage) {
+  if (!state.currentImage) {
     showStatus("No image loaded", true);
     return;
   }
@@ -3983,27 +3993,27 @@ function deactivateEyedropper() {
   showStatus("Eyedropper cancelled");
 }
 function pickColorFromCanvas(x, y) {
-  if (!currentImage) return;
+  if (!state.currentImage) return;
   const rect = mainCanvas.getBoundingClientRect();
-  const scaleX = currentImage.width / rect.width;
-  const scaleY = currentImage.height / rect.height;
+  const scaleX = state.currentImage.width / rect.width;
+  const scaleY = state.currentImage.height / rect.height;
   const imgX = Math.floor((x - rect.left) * scaleX);
   const imgY = Math.floor((y - rect.top) * scaleY);
-  if (imgX < 0 || imgX >= currentImage.width || imgY < 0 || imgY >= currentImage.height) {
+  if (imgX < 0 || imgX >= state.currentImage.width || imgY < 0 || imgY >= state.currentImage.height) {
     return;
   }
-  const pixelIndex = (imgY * currentImage.width + imgX) * 4;
-  const r = currentImage.data[pixelIndex];
-  const g = currentImage.data[pixelIndex + 1];
-  const b = currentImage.data[pixelIndex + 2];
+  const pixelIndex = (imgY * state.currentImage.width + imgX) * 4;
+  const r = state.currentImage.data[pixelIndex];
+  const g = state.currentImage.data[pixelIndex + 1];
+  const b = state.currentImage.data[pixelIndex + 2];
   const hex = `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
   deactivateEyedropper();
   if (colorEditorIndex !== null && eyedropperMode) {
     if (eyedropperMode === "input") {
-      userPalette[colorEditorIndex].inputColor = hex;
+      state.userPalette[colorEditorIndex].inputColor = hex;
     } else if (eyedropperMode === "output") {
-      userPalette[colorEditorIndex].outputColor = hex;
-      userPalette[colorEditorIndex].mapToBg = false;
+      state.userPalette[colorEditorIndex].outputColor = hex;
+      state.userPalette[colorEditorIndex].mapToBg = false;
     }
     openColorEditor(colorEditorIndex);
     showStatus(`Picked ${hex.toUpperCase()}`);
@@ -4013,11 +4023,11 @@ function pickColorFromCanvas(x, y) {
   }
 }
 function addColorToPalette(hex) {
-  if (userPalette.length >= 16) {
+  if (state.userPalette.length >= 16) {
     showStatus("Maximum 16 colors - remove one first", true);
     return;
   }
-  userPalette.push({
+  state.userPalette.push({
     inputColor: hex,
     outputColor: hex,
     mapToBg: false
@@ -4027,16 +4037,16 @@ function addColorToPalette(hex) {
 }
 function buildPaletteRGBA() {
   const palette = new Uint8ClampedArray(16 * 4);
-  for (let i = 0; i < userPalette.length && i < 16; i++) {
-    const color = userPalette[i];
+  for (let i = 0; i < state.userPalette.length && i < 16; i++) {
+    const color = state.userPalette[i];
     const [r, g, b, a] = hexToRGBA(color.inputColor);
     palette[i * 4] = r;
     palette[i * 4 + 1] = g;
     palette[i * 4 + 2] = b;
     palette[i * 4 + 3] = a;
   }
-  for (let i = userPalette.length; i < 16; i++) {
-    const [r, g, b, a] = hexToRGBA(userPalette[0].inputColor);
+  for (let i = state.userPalette.length; i < 16; i++) {
+    const [r, g, b, a] = hexToRGBA(state.userPalette[0].inputColor);
     palette[i * 4] = r;
     palette[i * 4 + 1] = g;
     palette[i * 4 + 2] = b;
