@@ -49,8 +49,33 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
     return count;
   };
   
-  // First pass: create vertices only at key points
+  // Check if a pixel is a corner (has 2 neighbors but they're not opposite)
+  const isCorner = (x: number, y: number): boolean => {
+    const neighbors: Array<[number, number]> = [];
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx >= 0 && nx < width && ny >= 0 && ny < height && isPixelSet(binary, nx, ny)) {
+          neighbors.push([dx, dy]);
+        }
+      }
+    }
+    
+    if (neighbors.length !== 2) return false;
+    
+    // Check if neighbors are opposite (would make it a straight line, not a corner)
+    const [dx1, dy1] = neighbors[0];
+    const [dx2, dy2] = neighbors[1];
+    
+    // Opposite if both deltas are negatives of each other
+    return !(dx1 === -dx2 && dy1 === -dy2);
+  };
+  
+  // First pass: create vertices at key points
   // - Endpoints (1 neighbor)
+  // - Corners (2 neighbors that aren't opposite)
   // - Junctions (3+ neighbors)
   const vertices = new Map<number, Vertex>();
   let vertexCount = 0;
@@ -60,8 +85,8 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
       if (isPixelSet(binary, x, y)) {
         const neighborCount = countNeighbors(x, y);
         
-        // Create vertex at endpoints and junctions
-        if (neighborCount === 1 || neighborCount >= 3) {
+        // Create vertex at endpoints, corners, and junctions
+        if (neighborCount === 1 || neighborCount >= 3 || (neighborCount === 2 && isCorner(x, y))) {
           const id = getVertexId(x, y);
           vertices.set(id, {
             x,
@@ -89,31 +114,72 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
   console.log(`Vectorization: Created ${vertices.size} vertices at key points`);
   
   // Second pass: trace paths between vertices
+  // Prioritize cardinal directions to avoid diagonal shortcuts through stair-steps
   const paths: VectorPath[] = [];
   
   for (const startVertex of vertices.values()) {
-    // For each neighbor direction, trace to next vertex
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        if (dx === 0 && dy === 0) continue;
+    // Check cardinal directions first (N, E, S, W)
+    const cardinalOffsets = [[0, -1], [1, 0], [0, 1], [-1, 0]];
+    for (const [dx, dy] of cardinalOffsets) {
+      const nx = startVertex.x + dx;
+      const ny = startVertex.y + dy;
+      
+      if (nx >= 0 && nx < width && ny >= 0 && ny < height && isPixelSet(binary, nx, ny)) {
+        const path = tracePathBetweenVertices(binary, startVertex, nx, ny, vertices, width, height, getVertexId);
         
-        const nx = startVertex.x + dx;
-        const ny = startVertex.y + dy;
-        
-        if (nx >= 0 && nx < width && ny >= 0 && ny < height && isPixelSet(binary, nx, ny)) {
-          // Trace path from startVertex in this direction
-          const path = tracePathBetweenVertices(binary, startVertex, nx, ny, vertices, width, height, getVertexId);
+        if (path && path.vertices.length >= 2) {
+          const isDuplicate = paths.some(p => 
+            (p.vertices[0] === path.vertices[0] && p.vertices[p.vertices.length - 1] === path.vertices[path.vertices.length - 1]) ||
+            (p.vertices[0] === path.vertices[path.vertices.length - 1] && p.vertices[p.vertices.length - 1] === path.vertices[0])
+          );
           
-          if (path && path.vertices.length >= 2) {
-            // Check if we already have this path (or its reverse)
-            const isDuplicate = paths.some(p => 
-              (p.vertices[0] === path.vertices[0] && p.vertices[p.vertices.length - 1] === path.vertices[path.vertices.length - 1]) ||
-              (p.vertices[0] === path.vertices[path.vertices.length - 1] && p.vertices[p.vertices.length - 1] === path.vertices[0])
-            );
+          if (!isDuplicate) {
+            paths.push(path);
+          }
+        }
+      }
+    }
+    
+    // Then check diagonal directions (NW, NE, SW, SE)
+    // Only add diagonal paths if the target isn't already connected via cardinal stair-steps
+    const diagonalOffsets = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
+    for (const [dx, dy] of diagonalOffsets) {
+      const nx = startVertex.x + dx;
+      const ny = startVertex.y + dy;
+      
+      if (nx >= 0 && nx < width && ny >= 0 && ny < height && isPixelSet(binary, nx, ny)) {
+        // Check if there's a stair-step path (via cardinal neighbors) to this diagonal pixel
+        const hasStairStep = cardinalOffsets.some(([cdx, cdy]) => {
+          const cx = startVertex.x + cdx;
+          const cy = startVertex.y + cdy;
+          
+          // Check if cardinal neighbor exists and connects to the diagonal pixel
+          if (cx >= 0 && cx < width && cy >= 0 && cy < height && isPixelSet(binary, cx, cy)) {
+            // Check if this cardinal neighbor connects to the diagonal pixel
+            const dcx = nx - cx;
+            const dcy = ny - cy;
+            const cdx2 = nx - startVertex.x - cdx;
+            const cdy2 = ny - startVertex.y - cdy;
             
-            if (!isDuplicate) {
-              paths.push(path);
-            }
+            // If cardinal neighbor can reach diagonal pixel with one cardinal step, it's a stair-step
+            return (Math.abs(dcx) + Math.abs(dcy) === 1);
+          }
+          return false;
+        });
+        
+        // Skip diagonal if stair-step exists
+        if (hasStairStep) continue;
+        
+        const path = tracePathBetweenVertices(binary, startVertex, nx, ny, vertices, width, height, getVertexId);
+        
+        if (path && path.vertices.length >= 2) {
+          const isDuplicate = paths.some(p => 
+            (p.vertices[0] === path.vertices[0] && p.vertices[p.vertices.length - 1] === path.vertices[path.vertices.length - 1]) ||
+            (p.vertices[0] === path.vertices[path.vertices.length - 1] && p.vertices[p.vertices.length - 1] === path.vertices[0])
+          );
+          
+          if (!isDuplicate) {
+            paths.push(path);
           }
         }
       }
