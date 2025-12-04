@@ -3210,7 +3210,7 @@ function renderVectorizedToSVG(vectorized, svgElement) {
     circle.setAttribute("cx", (vertex.x + 0.5).toString());
     circle.setAttribute("cy", (vertex.y + 0.5).toString());
     circle.setAttribute("r", "0.5");
-    circle.setAttribute("fill", "blue");
+    circle.setAttribute("fill", "#00bb00");
     circle.setAttribute("vector-effect", "non-scaling-stroke");
     svgElement.appendChild(circle);
   }
