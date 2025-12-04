@@ -8,6 +8,7 @@ import type { PalettizedImage } from "../src/formats/palettized.ts";
 import type { BinaryImage } from "../src/formats/binary.ts";
 import { DEFAULT_PALETTE } from "../src/formats/palettized.ts";
 import type { ProcessingStage, PaletteColor } from "./types.ts";
+import type { VectorizedImage } from "./vectorize.ts";
 import { u32ToHex } from "./utils.ts";
 
 // UI State
@@ -22,6 +23,7 @@ export const state = {
   // Processing state
   currentStage: "cropped" as ProcessingStage,
   processedImages: new Map<ProcessingStage, RGBAImage | PalettizedImage | BinaryImage>(),
+  vectorizedImages: new Map<string, VectorizedImage>(), // e.g., "color_1_vec"
 
   // Palette configuration
   userPalette: Array.from(DEFAULT_PALETTE).map(color => ({
@@ -50,4 +52,8 @@ export const state = {
   lastProcessPanX: 0,
   lastProcessPanY: 0,
   processViewInitialized: false,
+  
+  // Vector overlay state
+  vectorOverlayEnabled: false,
+  vectorOverlayStage: null as string | null, // e.g., "color_1_vec"
 };

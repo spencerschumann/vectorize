@@ -13,6 +13,7 @@ export interface StoredFile {
   data: Uint8Array;
   uploadedAt: number;
   thumbnail?: string; // base64 data URL
+  palette?: string; // JSON serialized palette
 }
 
 let db: IDBDatabase | null = null;

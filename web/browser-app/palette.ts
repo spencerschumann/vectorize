@@ -5,6 +5,7 @@
 import { DEFAULT_PALETTE } from "../src/formats/palettized.ts";
 import { u32ToHex, hexToRGBA } from "./utils.ts";
 import { state } from "./state.ts";
+import { updateFile } from "./storage.ts";
 
 // Local state for color editor
 let colorEditorIndex: number | null = null;
@@ -14,6 +15,19 @@ let eyedropperActive = false;
 // Callbacks that must be provided by main.ts
 let showStatusCallback: (msg: string, isError?: boolean) => void = () => {};
 let mainCanvasRef: HTMLCanvasElement | null = null;
+
+// Auto-save palette to the current file's storage
+async function autosavePaletteToFile() {
+  if (state.currentFileId) {
+    try {
+      const palette = JSON.stringify(state.userPalette);
+      await updateFile(state.currentFileId, { palette });
+      console.log("Auto-saved palette to file storage");
+    } catch (err) {
+      console.error("Failed to auto-save palette:", err);
+    }
+  }
+}
 
 export function initPaletteModule(callbacks: {
   showStatus: (msg: string, isError?: boolean) => void;
@@ -329,6 +343,7 @@ function openColorEditor(index: number) {
     }
     
     renderPaletteUI();
+    autosavePaletteToFile();
     closeColorEditor();
   });
   
@@ -339,6 +354,7 @@ function openColorEditor(index: number) {
       if (index !== 0 && confirm("Delete this color?")) {
         state.userPalette.splice(index, 1);
         renderPaletteUI();
+        autosavePaletteToFile();
         closeColorEditor();
       }
     });
@@ -375,6 +391,7 @@ export function addPaletteColor() {
   });
   
   renderPaletteUI();
+  autosavePaletteToFile();
   
   // Immediately open editor for the new color
   openColorEditor(newIndex);
@@ -390,6 +407,7 @@ export function resetPaletteToDefault() {
     });
   });
   renderPaletteUI();
+  autosavePaletteToFile();
   showStatusCallback("Palette reset to default");
 }
 
@@ -452,6 +470,7 @@ export function pickColorFromCanvas(x: number, y: number) {
       state.userPalette[colorEditorIndex].outputColor = hex;
       state.userPalette[colorEditorIndex].mapToBg = false; // Ensure it's not set to remove
     }
+    autosavePaletteToFile();
     // Reopen the color editor with updated values
     openColorEditor(colorEditorIndex);
     showStatusCallback(`Picked ${hex.toUpperCase()}`);

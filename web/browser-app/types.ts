@@ -16,9 +16,10 @@ export type BaseProcessingStage =
   | "hue_median" 
   | "cleanup" 
   | "palettized" 
-  | "median";
+  | "median"
+  | "vectorized";
 
-// Dynamic stages: color_0, color_0_skel, color_1, color_1_skel, etc.
+// Dynamic stages: color_0, color_0_skel, color_1, color_1_skel, color_1_vec, etc.
 export type ProcessingStage = BaseProcessingStage | string;
 
 // Palette configuration

@@ -142,6 +142,7 @@
             <div class="processing-screen-layout">
                 <div class="canvas-container" id="processCanvasContainer">
                     <canvas id="processCanvas"></canvas>
+                    <svg id="processSvgOverlay" style="position: absolute; top: 0; left: 0; pointer-events: none; display: none;"></svg>
                 </div>
 
                 <div class="sidebar" id="processSidebar">
@@ -169,6 +170,9 @@
                     <button id="stagePalettizedBtn" class="stage-btn">Palettized</button>
                     <button id="stageMedianBtn" class="stage-btn">Median</button>
                     <div id="colorStagesContainer"></div>
+                    
+                    <div class="toolbar-section-title" style="margin-top: 1rem;">Vector Overlay</div>
+                    <div id="vectorOverlayContainer"></div>
                 </div>
                 </div>
             </div>

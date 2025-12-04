@@ -2293,6 +2293,8 @@ var state = {
   // Processing state
   currentStage: "cropped",
   processedImages: /* @__PURE__ */ new Map(),
+  vectorizedImages: /* @__PURE__ */ new Map(),
+  // e.g., "color_1_vec"
   // Palette configuration
   userPalette: Array.from(DEFAULT_PALETTE).map((color) => ({
     inputColor: u32ToHex(color),
@@ -2317,7 +2319,11 @@ var state = {
   isProcessPanning: false,
   lastProcessPanX: 0,
   lastProcessPanY: 0,
-  processViewInitialized: false
+  processViewInitialized: false,
+  // Vector overlay state
+  vectorOverlayEnabled: false,
+  vectorOverlayStage: null
+  // e.g., "color_1_vec"
 };
 
 // browser-app/canvas.ts
@@ -2595,6 +2601,17 @@ var eyedropperActive = false;
 var showStatusCallback = () => {
 };
 var mainCanvasRef = null;
+async function autosavePaletteToFile() {
+  if (state.currentFileId) {
+    try {
+      const palette = JSON.stringify(state.userPalette);
+      await updateFile(state.currentFileId, { palette });
+      console.log("Auto-saved palette to file storage");
+    } catch (err) {
+      console.error("Failed to auto-save palette:", err);
+    }
+  }
+}
 function initPaletteModule(callbacks) {
   showStatusCallback = callbacks.showStatus;
   mainCanvasRef = callbacks.mainCanvas;
@@ -2863,6 +2880,7 @@ function openColorEditor(index) {
       state.userPalette[index].outputColor = inputColor;
     }
     renderPaletteUI();
+    autosavePaletteToFile();
     closeColorEditor();
   });
   const deleteBtn = document.getElementById("deleteColor");
@@ -2871,6 +2889,7 @@ function openColorEditor(index) {
       if (index !== 0 && confirm("Delete this color?")) {
         state.userPalette.splice(index, 1);
         renderPaletteUI();
+        autosavePaletteToFile();
         closeColorEditor();
       }
     });
@@ -2899,6 +2918,7 @@ function addPaletteColor() {
     mapToBg: false
   });
   renderPaletteUI();
+  autosavePaletteToFile();
   openColorEditor(newIndex);
 }
 function resetPaletteToDefault() {
@@ -2911,6 +2931,7 @@ function resetPaletteToDefault() {
     });
   });
   renderPaletteUI();
+  autosavePaletteToFile();
   showStatusCallback("Palette reset to default");
 }
 function activateEyedropper() {
@@ -2957,6 +2978,7 @@ function pickColorFromCanvas(x, y) {
       state.userPalette[colorEditorIndex].outputColor = hex;
       state.userPalette[colorEditorIndex].mapToBg = false;
     }
+    autosavePaletteToFile();
     openColorEditor(colorEditorIndex);
     showStatusCallback(`Picked ${hex.toUpperCase()}`);
   } else {
@@ -3002,6 +3024,195 @@ function isEyedropperActive() {
 function forceDeactivateEyedropper() {
   if (eyedropperActive) {
     deactivateEyedropper();
+  }
+}
+
+// browser-app/vectorize.ts
+function vectorizeSkeleton(binary) {
+  const { width, height } = binary;
+  const getVertexId = (x, y) => y * width + x;
+  const countNeighbors = (x, y) => {
+    let count = 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx >= 0 && nx < width && ny >= 0 && ny < height && isPixelSet(binary, nx, ny)) {
+          count++;
+        }
+      }
+    }
+    return count;
+  };
+  const vertices = /* @__PURE__ */ new Map();
+  let vertexCount = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (isPixelSet(binary, x, y)) {
+        const neighborCount = countNeighbors(x, y);
+        if (neighborCount === 1 || neighborCount >= 3) {
+          const id = getVertexId(x, y);
+          vertices.set(id, {
+            x,
+            y,
+            id,
+            neighbors: []
+          });
+          vertexCount++;
+          if (vertexCount > 1e5) {
+            console.warn("Vectorization: Too many vertices (>100k), aborting");
+            return {
+              width,
+              height,
+              paths: [],
+              vertices: /* @__PURE__ */ new Map()
+            };
+          }
+        }
+      }
+    }
+  }
+  console.log(`Vectorization: Created ${vertices.size} vertices at key points`);
+  const paths = [];
+  for (const startVertex of vertices.values()) {
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        if (dx === 0 && dy === 0) continue;
+        const nx = startVertex.x + dx;
+        const ny = startVertex.y + dy;
+        if (nx >= 0 && nx < width && ny >= 0 && ny < height && isPixelSet(binary, nx, ny)) {
+          const path = tracePathBetweenVertices(binary, startVertex, nx, ny, vertices, width, height, getVertexId);
+          if (path && path.vertices.length >= 2) {
+            const isDuplicate = paths.some(
+              (p) => p.vertices[0] === path.vertices[0] && p.vertices[p.vertices.length - 1] === path.vertices[path.vertices.length - 1] || p.vertices[0] === path.vertices[path.vertices.length - 1] && p.vertices[p.vertices.length - 1] === path.vertices[0]
+            );
+            if (!isDuplicate) {
+              paths.push(path);
+            }
+          }
+        }
+      }
+    }
+  }
+  console.log(`Vectorization: Traced ${paths.length} paths`);
+  return {
+    width,
+    height,
+    paths,
+    vertices
+  };
+}
+function tracePathBetweenVertices(binary, startVertex, startX, startY, vertices, width, height, getVertexId) {
+  const pathVertices = [startVertex.id];
+  const visited = /* @__PURE__ */ new Set();
+  visited.add(startVertex.id);
+  let x = startX;
+  let y = startY;
+  let prevX = startVertex.x;
+  let prevY = startVertex.y;
+  let steps = 0;
+  const maxSteps = 1e4;
+  while (steps++ < maxSteps) {
+    const currentId = getVertexId(x, y);
+    if (vertices.has(currentId)) {
+      pathVertices.push(currentId);
+      return {
+        vertices: pathVertices,
+        closed: false
+      };
+    }
+    visited.add(currentId);
+    let nextX = -1;
+    let nextY = -1;
+    let found = false;
+    const cardinalOffsets = [[0, -1], [1, 0], [0, 1], [-1, 0]];
+    for (const [dx, dy] of cardinalOffsets) {
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx === prevX && ny === prevY) continue;
+      if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+        const nId = getVertexId(nx, ny);
+        if (isPixelSet(binary, nx, ny) && !visited.has(nId)) {
+          nextX = nx;
+          nextY = ny;
+          found = true;
+          break;
+        }
+      }
+    }
+    if (!found) {
+      const diagonalOffsets = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
+      for (const [dx, dy] of diagonalOffsets) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx === prevX && ny === prevY) continue;
+        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+          const nId = getVertexId(nx, ny);
+          if (isPixelSet(binary, nx, ny) && !visited.has(nId)) {
+            nextX = nx;
+            nextY = ny;
+            found = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!found) {
+      return null;
+    }
+    prevX = x;
+    prevY = y;
+    x = nextX;
+    y = nextY;
+  }
+  console.warn("Path tracing exceeded max steps");
+  return null;
+}
+function isPixelSet(binary, x, y) {
+  const pixelIndex = y * binary.width + x;
+  const byteIndex = Math.floor(pixelIndex / 8);
+  const bitIndex = 7 - pixelIndex % 8;
+  if (byteIndex >= binary.data.length) return false;
+  return (binary.data[byteIndex] & 1 << bitIndex) !== 0;
+}
+function renderVectorizedToSVG(vectorized, svgElement) {
+  const { width, height, paths, vertices } = vectorized;
+  svgElement.setAttribute("width", width.toString());
+  svgElement.setAttribute("height", height.toString());
+  svgElement.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svgElement.style.display = "block";
+  svgElement.innerHTML = "";
+  for (const path of paths) {
+    if (path.vertices.length === 0) continue;
+    const firstVertex = vertices.get(path.vertices[0]);
+    if (!firstVertex) continue;
+    let pathData = `M ${firstVertex.x + 0.5} ${firstVertex.y + 0.5}`;
+    for (let i = 1; i < path.vertices.length; i++) {
+      const vertex = vertices.get(path.vertices[i]);
+      if (vertex) {
+        pathData += ` L ${vertex.x + 0.5} ${vertex.y + 0.5}`;
+      }
+    }
+    if (path.closed) {
+      pathData += " Z";
+    }
+    const pathElement = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    pathElement.setAttribute("d", pathData);
+    pathElement.setAttribute("fill", "none");
+    pathElement.setAttribute("stroke", "red");
+    pathElement.setAttribute("stroke-width", "0.5");
+    pathElement.setAttribute("vector-effect", "non-scaling-stroke");
+    svgElement.appendChild(pathElement);
+  }
+  for (const vertex of vertices.values()) {
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", (vertex.x + 0.5).toString());
+    circle.setAttribute("cy", (vertex.y + 0.5).toString());
+    circle.setAttribute("r", "0.5");
+    circle.setAttribute("fill", "blue");
+    circle.setAttribute("vector-effect", "non-scaling-stroke");
+    svgElement.appendChild(circle);
   }
 }
 
@@ -3056,6 +3267,7 @@ var processingScreen = document.getElementById("processingScreen");
 var processCanvasContainer = document.getElementById("processCanvasContainer");
 var processCanvas = document.getElementById("processCanvas");
 var processCtx = processCanvas.getContext("2d");
+var processSvgOverlay = document.getElementById("processSvgOverlay");
 var processZoomInBtn = document.getElementById("processZoomInBtn");
 var processZoomOutBtn = document.getElementById("processZoomOutBtn");
 var processZoomLevel = document.getElementById("processZoomLevel");
@@ -3073,6 +3285,7 @@ var stageCleanupBtn = document.getElementById("stageCleanupBtn");
 var stagePalettizedBtn = document.getElementById("stagePalettizedBtn");
 var stageMedianBtn = document.getElementById("stageMedianBtn");
 var colorStagesContainer = document.getElementById("colorStagesContainer");
+var vectorOverlayContainer = document.getElementById("vectorOverlayContainer");
 initCanvasElements({
   canvasContainer: canvasContainer2,
   mainCanvas: mainCanvas2,
@@ -3317,8 +3530,19 @@ processCanvasContainer.addEventListener("wheel", (e) => {
     const rect = processCanvasContainer.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
+    let width = 0, height = 0;
     const image = state.processedImages.get(state.currentStage);
-    if (!image) return;
+    if (image) {
+      width = image.width;
+      height = image.height;
+    } else if (state.currentStage.endsWith("_vec")) {
+      const vectorized = state.vectorizedImages.get(state.currentStage);
+      if (vectorized) {
+        width = vectorized.width;
+        height = vectorized.height;
+      }
+    }
+    if (width === 0 || height === 0) return;
     const canvasX = (mouseX - state.processPanX) / state.processZoom;
     const canvasY = (mouseY - state.processPanY) / state.processZoom;
     const zoomSpeed = 5e-3;
@@ -3409,7 +3633,7 @@ function showStatus(message, isError = false) {
   }
   console.log(message);
 }
-initPaletteDB().then(() => loadDefaultPalette());
+initPaletteDB();
 async function handleFileUpload(file) {
   try {
     showStatus(`Loading: ${file.name}...`);
@@ -3417,6 +3641,7 @@ async function handleFileUpload(file) {
       try {
         state.currentFileId = await saveFile(file);
         console.log(`File saved with ID: ${state.currentFileId}`);
+        await loadDefaultPalette();
         await refreshFileList();
       } catch (err) {
         console.error("Error saving file:", err);
@@ -3686,13 +3911,29 @@ async function selectPdfPage(pageNum) {
     showStatus(`\u2713 Page ${pageNum} loaded: ${image.width}\xD7${image.height}`);
     if (state.currentFileId && state.currentImage) {
       const thumbnail = generateThumbnail(state.currentImage);
-      await updateFile(state.currentFileId, { thumbnail });
+      const palette = JSON.stringify(state.userPalette);
+      await updateFile(state.currentFileId, { thumbnail, palette });
       await refreshFileList();
     }
   } catch (error) {
     showStatus(`Error: ${error.message}`, true);
     console.error(error);
   }
+}
+function rgbaToBinary(rgba) {
+  const { width, height, data } = rgba;
+  const numPixels = width * height;
+  const byteCount = Math.ceil(numPixels / 8);
+  const binaryData = new Uint8Array(byteCount);
+  for (let pixelIndex = 0; pixelIndex < numPixels; pixelIndex++) {
+    const r = data[pixelIndex * 4];
+    if (r < 128) {
+      const bitByteIndex = Math.floor(pixelIndex / 8);
+      const bitIndex = 7 - pixelIndex % 8;
+      binaryData[bitByteIndex] |= 1 << bitIndex;
+    }
+  }
+  return { width, height, data: binaryData };
 }
 function extractColorFromPalettized(palettized, colorIndex) {
   const { width, height, data } = palettized;
@@ -3876,6 +4117,7 @@ async function startProcessing() {
 }
 function addColorStageButtons() {
   colorStagesContainer.innerHTML = "";
+  vectorOverlayContainer.innerHTML = "";
   for (let i = 1; i < state.userPalette.length && i < 16; i++) {
     const color = state.userPalette[i];
     if (color.mapToBg) continue;
@@ -3891,18 +4133,163 @@ function addColorStageButtons() {
       skelBtn.className = "stage-btn";
       skelBtn.textContent = `Color ${i} Skel`;
       skelBtn.style.borderLeft = `4px solid ${color.outputColor}`;
+      skelBtn.dataset.stage = `color_${i}_skel`;
       skelBtn.addEventListener("click", () => displayProcessingStage(`color_${i}_skel`));
       colorStagesContainer.appendChild(skelBtn);
+      const vecStage = `color_${i}_vec`;
+      const vecToggle = document.createElement("button");
+      vecToggle.className = "stage-btn";
+      vecToggle.textContent = `Color ${i} Vec`;
+      vecToggle.style.borderLeft = `4px solid ${color.outputColor}`;
+      vecToggle.dataset.stage = vecStage;
+      vecToggle.addEventListener("click", () => toggleVectorOverlay(vecStage));
+      vectorOverlayContainer.appendChild(vecToggle);
     }
   }
 }
+function toggleVectorOverlay(vecStage) {
+  if (state.vectorOverlayEnabled && state.vectorOverlayStage === vecStage) {
+    state.vectorOverlayEnabled = false;
+    state.vectorOverlayStage = null;
+    processSvgOverlay.style.display = "none";
+    updateVectorOverlayButtons();
+    showStatus("Vector overlay hidden");
+    return;
+  }
+  let vectorized = state.vectorizedImages.get(vecStage);
+  if (!vectorized) {
+    const skelStage = vecStage.replace("_vec", "_skel");
+    const skelImage = state.processedImages.get(skelStage);
+    if (!skelImage) {
+      showStatus(`Skeleton stage ${skelStage} not available`, true);
+      return;
+    }
+    let binaryImage;
+    const expectedBinaryLength = Math.ceil(skelImage.width * skelImage.height / 8);
+    if (skelImage.data instanceof Uint8ClampedArray && skelImage.data.length === skelImage.width * skelImage.height * 4) {
+      console.log(`Converting ${skelStage} from RGBA to binary format`);
+      binaryImage = rgbaToBinary(skelImage);
+    } else if (skelImage.data instanceof Uint8Array && skelImage.data.length === expectedBinaryLength) {
+      binaryImage = skelImage;
+    } else {
+      showStatus(`${skelStage} has unexpected format`, true);
+      return;
+    }
+    showStatus(`Vectorizing ${skelStage}...`);
+    const vectorizeStart = performance.now();
+    vectorized = vectorizeSkeleton(binaryImage);
+    state.vectorizedImages.set(vecStage, vectorized);
+    const vectorizeEnd = performance.now();
+    console.log(`Vectorized: ${vectorized.paths.length} paths, ${vectorized.vertices.size} vertices (${(vectorizeEnd - vectorizeStart).toFixed(1)}ms)`);
+  }
+  state.vectorOverlayEnabled = true;
+  state.vectorOverlayStage = vecStage;
+  const currentImage = state.processedImages.get(state.currentStage);
+  if (currentImage) {
+    renderVectorizedToSVG(vectorized, processSvgOverlay, currentImage.width, currentImage.height);
+    processSvgOverlay.style.display = "block";
+  }
+  updateVectorOverlayButtons();
+  showStatus(`Vector overlay: ${vectorized.paths.length} paths, ${vectorized.vertices.size} vertices`);
+}
+function updateVectorOverlayButtons() {
+  vectorOverlayContainer.querySelectorAll(".stage-btn").forEach((btn) => {
+    const btnStage = btn.dataset.stage;
+    if (btnStage === state.vectorOverlayStage && state.vectorOverlayEnabled) {
+      btn.classList.add("active");
+    } else {
+      btn.classList.remove("active");
+    }
+  });
+}
 function displayProcessingStage(stage) {
+  if (stage.endsWith("_vec")) {
+    let vectorized = state.vectorizedImages.get(stage);
+    if (!vectorized) {
+      const skelStage2 = stage.replace("_vec", "_skel");
+      const skelImage2 = state.processedImages.get(skelStage2);
+      if (!skelImage2) {
+        showStatus(`Skeleton stage ${skelStage2} not available`, true);
+        return;
+      }
+      let binaryImage;
+      const expectedBinaryLength = Math.ceil(skelImage2.width * skelImage2.height / 8);
+      if (skelImage2.data instanceof Uint8ClampedArray && skelImage2.data.length === skelImage2.width * skelImage2.height * 4) {
+        console.log(`Converting ${skelStage2} from RGBA to binary format`);
+        binaryImage = rgbaToBinary(skelImage2);
+      } else if (skelImage2.data instanceof Uint8Array && skelImage2.data.length === expectedBinaryLength) {
+        binaryImage = skelImage2;
+      } else {
+        showStatus(`${skelStage2} has unexpected format`, true);
+        console.error(`Unexpected format:`, {
+          dataType: skelImage2.data?.constructor?.name,
+          actualLength: skelImage2.data.length,
+          expectedRGBA: skelImage2.width * skelImage2.height * 4,
+          expectedBinary: expectedBinaryLength
+        });
+        return;
+      }
+      showStatus(`Vectorizing ${skelStage2}...`);
+      const vectorizeStart = performance.now();
+      vectorized = vectorizeSkeleton(binaryImage);
+      state.vectorizedImages.set(stage, vectorized);
+      const vectorizeEnd = performance.now();
+      showStatus(`Vectorized: ${vectorized.paths.length} paths, ${vectorized.vertices.size} vertices (${(vectorizeEnd - vectorizeStart).toFixed(1)}ms)`);
+    }
+    state.currentStage = stage;
+    document.querySelectorAll(".stage-btn").forEach((btn2) => btn2.classList.remove("active"));
+    const btn = Array.from(document.querySelectorAll(".stage-btn")).find(
+      (b) => b.dataset.stage === stage
+    );
+    btn?.classList.add("active");
+    const skelStage = stage.replace("_vec", "_skel");
+    const skelImage = state.processedImages.get(skelStage);
+    if (skelImage) {
+      processCanvas.width = skelImage.width;
+      processCanvas.height = skelImage.height;
+      let rgbaData2;
+      if (skelImage.data instanceof Uint8ClampedArray && skelImage.data.length === skelImage.width * skelImage.height * 4) {
+        rgbaData2 = skelImage.data;
+      } else {
+        const numPixels = skelImage.width * skelImage.height;
+        rgbaData2 = new Uint8ClampedArray(numPixels * 4);
+        for (let i = 0; i < numPixels; i++) {
+          const byteIndex = Math.floor(i / 8);
+          const bitIndex = 7 - i % 8;
+          const bit = skelImage.data[byteIndex] >> bitIndex & 1;
+          const value = bit ? 0 : 255;
+          rgbaData2[i * 4] = value;
+          rgbaData2[i * 4 + 1] = value;
+          rgbaData2[i * 4 + 2] = value;
+          rgbaData2[i * 4 + 3] = 255;
+        }
+      }
+      const imageData2 = new ImageData(rgbaData2, skelImage.width, skelImage.height);
+      processCtx.putImageData(imageData2, 0, 0);
+    }
+    renderVectorizedToSVG(vectorized, processSvgOverlay);
+    if (!state.processViewInitialized) {
+      processFitToScreen();
+      state.processViewInitialized = true;
+    } else {
+      updateProcessTransform();
+    }
+    showStatus(`Viewing: ${stage} (${vectorized.paths.length} paths, ${vectorized.vertices.size} vertices)`);
+    return;
+  }
   const image = state.processedImages.get(stage);
   if (!image) {
     showStatus(`Stage ${stage} not available`, true);
     return;
   }
   state.currentStage = stage;
+  if (state.vectorOverlayEnabled && state.vectorOverlayStage) {
+    const vectorized = state.vectorizedImages.get(state.vectorOverlayStage);
+    if (vectorized) {
+      renderVectorizedToSVG(vectorized, processSvgOverlay, image.width, image.height);
+      processSvgOverlay.style.display = "block";
+    }
+  }
   document.querySelectorAll(".stage-btn").forEach((btn) => btn.classList.remove("active"));
   if (typeof stage === "string" && stage.startsWith("color_")) {
     const btn = Array.from(document.querySelectorAll(".stage-btn")).find(
@@ -3978,12 +4365,21 @@ function displayProcessingStage(stage) {
   showStatus(`Viewing: ${stage} (${image.width}\xD7${image.height})`);
 }
 function processFitToScreen() {
+  let imageWidth = 0, imageHeight = 0;
   const image = state.processedImages.get(state.currentStage);
-  if (!image) return;
+  if (image) {
+    imageWidth = image.width;
+    imageHeight = image.height;
+  } else if (state.currentStage.endsWith("_vec")) {
+    const vectorized = state.vectorizedImages.get(state.currentStage);
+    if (vectorized) {
+      imageWidth = vectorized.width;
+      imageHeight = vectorized.height;
+    }
+  }
+  if (imageWidth === 0 || imageHeight === 0) return;
   const containerWidth = processCanvasContainer.clientWidth;
   const containerHeight = processCanvasContainer.clientHeight;
-  const imageWidth = image.width;
-  const imageHeight = image.height;
   const scaleX = containerWidth / imageWidth;
   const scaleY = containerHeight / imageHeight;
   state.processZoom = Math.min(scaleX, scaleY) * 0.9;
@@ -4000,6 +4396,9 @@ function updateProcessTransform() {
   processCanvas.style.transform = transform;
   processCanvas.style.transformOrigin = "0 0";
   processCanvas.style.willChange = "transform";
+  processSvgOverlay.style.transform = transform;
+  processSvgOverlay.style.transformOrigin = "0 0";
+  processSvgOverlay.style.willChange = "transform";
   if (state.processZoom >= 1) {
     processCanvas.style.imageRendering = "pixelated";
   } else {
@@ -4107,6 +4506,20 @@ async function loadStoredFile(id) {
     return;
   }
   state.currentFileId = id;
+  if (stored.palette) {
+    try {
+      const savedPalette = JSON.parse(stored.palette);
+      state.userPalette.length = 0;
+      state.userPalette.push(...savedPalette);
+      renderPaletteUI();
+      console.log("Restored saved palette with", savedPalette.length, "colors");
+    } catch (err) {
+      console.error("Failed to restore palette:", err);
+      await loadDefaultPalette();
+    }
+  } else {
+    await loadDefaultPalette();
+  }
   const data = new Uint8Array(stored.data);
   const blob = new Blob([data], { type: stored.type });
   const file = new File([blob], stored.name, { type: stored.type });

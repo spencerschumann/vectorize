@@ -50,6 +50,11 @@ import {
   isEyedropperActive,
   forceDeactivateEyedropper,
 } from "./palette.ts";
+import {
+  vectorizeSkeleton,
+  vectorizedToSVG,
+  renderVectorizedToSVG,
+} from "./vectorize.ts";
 
 // Browser canvas backend for PDF rendering
 const browserCanvasBackend: CanvasBackend = {
@@ -118,6 +123,7 @@ const processingScreen = document.getElementById("processingScreen") as HTMLDivE
 const processCanvasContainer = document.getElementById("processCanvasContainer") as HTMLDivElement;
 const processCanvas = document.getElementById("processCanvas") as HTMLCanvasElement;
 const processCtx = processCanvas.getContext("2d")!;
+const processSvgOverlay = document.getElementById("processSvgOverlay") as SVGSVGElement;
 const processZoomInBtn = document.getElementById("processZoomInBtn") as HTMLButtonElement;
 const processZoomOutBtn = document.getElementById("processZoomOutBtn") as HTMLButtonElement;
 const processZoomLevel = document.getElementById("processZoomLevel") as HTMLDivElement;
@@ -136,6 +142,7 @@ const stageCleanupBtn = document.getElementById("stageCleanupBtn") as HTMLButton
 const stagePalettizedBtn = document.getElementById("stagePalettizedBtn") as HTMLButtonElement;
 const stageMedianBtn = document.getElementById("stageMedianBtn") as HTMLButtonElement;
 const colorStagesContainer = document.getElementById("colorStagesContainer") as HTMLDivElement;
+const vectorOverlayContainer = document.getElementById("vectorOverlayContainer") as HTMLDivElement;
 
 // Initialize canvas and palette modules
 initCanvasElements({
@@ -447,13 +454,26 @@ processCanvasContainer.addEventListener("wheel", (e) => {
   const isPinchZoom = e.ctrlKey;
   
   if (isPinchZoom) {
-    // Pinch to state.zoom
+    // Pinch to zoom
     const rect = processCanvasContainer.getBoundingClientRect();
     const mouseX = e.clientX - rect.left;
     const mouseY = e.clientY - rect.top;
     
+    // Get dimensions from either processed image or vectorized image
+    let width = 0, height = 0;
     const image = state.processedImages.get(state.currentStage);
-    if (!image) return;
+    if (image) {
+      width = image.width;
+      height = image.height;
+    } else if (state.currentStage.endsWith("_vec")) {
+      const vectorized = state.vectorizedImages.get(state.currentStage);
+      if (vectorized) {
+        width = vectorized.width;
+        height = vectorized.height;
+      }
+    }
+    
+    if (width === 0 || height === 0) return;
     
     const canvasX = (mouseX - state.processPanX) / state.processZoom;
     const canvasY = (mouseY - state.processPanY) / state.processZoom;
@@ -575,8 +595,8 @@ function showStatus(message: string, isError = false) {
 
 
 
-// Initialize default palette on load
-initPaletteDB().then(() => loadDefaultPalette());
+// Initialize palette DB (default palette will be loaded only if no file is selected)
+initPaletteDB();
 
 
 async function handleFileUpload(file: File) {
@@ -588,6 +608,8 @@ async function handleFileUpload(file: File) {
       try {
         state.currentFileId = await saveFile(file);
         console.log(`File saved with ID: ${state.currentFileId}`);
+        // Load default palette for new uploads
+        await loadDefaultPalette();
         await refreshFileList();
       } catch (err) {
         console.error("Error saving file:", err);
@@ -934,10 +956,11 @@ async function selectPdfPage(pageNum: number) {
     await loadImage(image, showStatus);
     showStatus(`✓ Page ${pageNum} loaded: ${image.width}×${image.height}`);
     
-    // Update thumbnail in storage
+    // Update thumbnail and palette in storage
     if (state.currentFileId && state.currentImage) {
       const thumbnail = generateThumbnail(state.currentImage);
-      await updateFile(state.currentFileId, { thumbnail });
+      const palette = JSON.stringify(state.userPalette);
+      await updateFile(state.currentFileId, { thumbnail, palette });
       await refreshFileList();
     }
   } catch (error) {
@@ -951,6 +974,28 @@ async function selectPdfPage(pageNum: number) {
 
 
 
+
+// Helper: Convert RGBA skeleton (grayscale) to binary format
+function rgbaToBinary(rgba: RGBAImage): BinaryImage {
+  const { width, height, data } = rgba;
+  const numPixels = width * height;
+  const byteCount = Math.ceil(numPixels / 8);
+  const binaryData = new Uint8Array(byteCount);
+  
+  // Convert: white (255) = 0, black (0) = 1
+  for (let pixelIndex = 0; pixelIndex < numPixels; pixelIndex++) {
+    const r = data[pixelIndex * 4];
+    
+    // If pixel is black (or dark), set bit to 1
+    if (r < 128) {
+      const bitByteIndex = Math.floor(pixelIndex / 8);
+      const bitIndex = 7 - (pixelIndex % 8); // MSB-first
+      binaryData[bitByteIndex] |= (1 << bitIndex);
+    }
+  }
+  
+  return { width, height, data: binaryData };
+}
 
 // Crop management functions
 
@@ -1225,6 +1270,7 @@ async function startProcessing() {
 function addColorStageButtons() {
   // Clear existing color buttons
   colorStagesContainer.innerHTML = "";
+  vectorOverlayContainer.innerHTML = "";
   
   // Add a button for each non-background, non-removed color
   for (let i = 1; i < state.userPalette.length && i < 16; i++) {
@@ -1248,13 +1294,198 @@ function addColorStageButtons() {
       skelBtn.className = "stage-btn";
       skelBtn.textContent = `Color ${i} Skel`;
       skelBtn.style.borderLeft = `4px solid ${color.outputColor}`;
+      skelBtn.dataset.stage = `color_${i}_skel`;
       skelBtn.addEventListener("click", () => displayProcessingStage(`color_${i}_skel`));
       colorStagesContainer.appendChild(skelBtn);
+      
+      // Vector overlay toggle button
+      const vecStage = `color_${i}_vec`;
+      const vecToggle = document.createElement("button");
+      vecToggle.className = "stage-btn";
+      vecToggle.textContent = `Color ${i} Vec`;
+      vecToggle.style.borderLeft = `4px solid ${color.outputColor}`;
+      vecToggle.dataset.stage = vecStage;
+      vecToggle.addEventListener("click", () => toggleVectorOverlay(vecStage));
+      vectorOverlayContainer.appendChild(vecToggle);
     }
   }
 }
 
+function toggleVectorOverlay(vecStage: string) {
+  // If clicking the same overlay, toggle it off
+  if (state.vectorOverlayEnabled && state.vectorOverlayStage === vecStage) {
+    state.vectorOverlayEnabled = false;
+    state.vectorOverlayStage = null;
+    processSvgOverlay.style.display = "none";
+    updateVectorOverlayButtons();
+    showStatus("Vector overlay hidden");
+    return;
+  }
+  
+  // Check if we need to vectorize
+  let vectorized = state.vectorizedImages.get(vecStage);
+  
+  if (!vectorized) {
+    // Vectorize on-demand
+    const skelStage = vecStage.replace("_vec", "_skel") as ProcessingStage;
+    const skelImage = state.processedImages.get(skelStage);
+    
+    if (!skelImage) {
+      showStatus(`Skeleton stage ${skelStage} not available`, true);
+      return;
+    }
+    
+    // Convert skeleton to binary format if needed
+    let binaryImage: BinaryImage;
+    const expectedBinaryLength = Math.ceil(skelImage.width * skelImage.height / 8);
+    
+    if (skelImage.data instanceof Uint8ClampedArray && skelImage.data.length === skelImage.width * skelImage.height * 4) {
+      console.log(`Converting ${skelStage} from RGBA to binary format`);
+      binaryImage = rgbaToBinary(skelImage as RGBAImage);
+    } else if (skelImage.data instanceof Uint8Array && skelImage.data.length === expectedBinaryLength) {
+      binaryImage = skelImage as BinaryImage;
+    } else {
+      showStatus(`${skelStage} has unexpected format`, true);
+      return;
+    }
+    
+    showStatus(`Vectorizing ${skelStage}...`);
+    const vectorizeStart = performance.now();
+    vectorized = vectorizeSkeleton(binaryImage);
+    state.vectorizedImages.set(vecStage, vectorized);
+    const vectorizeEnd = performance.now();
+    console.log(`Vectorized: ${vectorized.paths.length} paths, ${vectorized.vertices.size} vertices (${(vectorizeEnd - vectorizeStart).toFixed(1)}ms)`);
+  }
+  
+  // Enable overlay
+  state.vectorOverlayEnabled = true;
+  state.vectorOverlayStage = vecStage;
+  
+  // Render SVG overlay
+  const currentImage = state.processedImages.get(state.currentStage);
+  if (currentImage) {
+    renderVectorizedToSVG(vectorized, processSvgOverlay, currentImage.width, currentImage.height);
+    processSvgOverlay.style.display = "block";
+  }
+  
+  updateVectorOverlayButtons();
+  showStatus(`Vector overlay: ${vectorized.paths.length} paths, ${vectorized.vertices.size} vertices`);
+}
+
+function updateVectorOverlayButtons() {
+  vectorOverlayContainer.querySelectorAll(".stage-btn").forEach(btn => {
+    const btnStage = (btn as HTMLElement).dataset.stage;
+    if (btnStage === state.vectorOverlayStage && state.vectorOverlayEnabled) {
+      btn.classList.add("active");
+    } else {
+      btn.classList.remove("active");
+    }
+  });
+}
+
 function displayProcessingStage(stage: ProcessingStage) {
+  // Check if this is a vectorized stage
+  if (stage.endsWith("_vec")) {
+    // Check if we already have it vectorized
+    let vectorized = state.vectorizedImages.get(stage);
+    
+    if (!vectorized) {
+      // Need to vectorize on-demand
+      const skelStage = stage.replace("_vec", "_skel") as ProcessingStage;
+      const skelImage = state.processedImages.get(skelStage);
+      
+      if (!skelImage) {
+        showStatus(`Skeleton stage ${skelStage} not available`, true);
+        return;
+      }
+      
+      // Convert skeleton to binary format if needed
+      let binaryImage: BinaryImage;
+      const expectedBinaryLength = Math.ceil(skelImage.width * skelImage.height / 8);
+      
+      if (skelImage.data instanceof Uint8ClampedArray && skelImage.data.length === skelImage.width * skelImage.height * 4) {
+        // RGBA format - convert to binary
+        console.log(`Converting ${skelStage} from RGBA to binary format`);
+        binaryImage = rgbaToBinary(skelImage as RGBAImage);
+      } else if (skelImage.data instanceof Uint8Array && skelImage.data.length === expectedBinaryLength) {
+        // Already binary format
+        binaryImage = skelImage as BinaryImage;
+      } else {
+        showStatus(`${skelStage} has unexpected format`, true);
+        console.error(`Unexpected format:`, {
+          dataType: skelImage.data?.constructor?.name,
+          actualLength: skelImage.data.length,
+          expectedRGBA: skelImage.width * skelImage.height * 4,
+          expectedBinary: expectedBinaryLength
+        });
+        return;
+      }
+      
+      // Vectorize now
+      showStatus(`Vectorizing ${skelStage}...`);
+      const vectorizeStart = performance.now();
+      vectorized = vectorizeSkeleton(binaryImage);
+      state.vectorizedImages.set(stage, vectorized);
+      const vectorizeEnd = performance.now();
+      showStatus(`Vectorized: ${vectorized.paths.length} paths, ${vectorized.vertices.size} vertices (${(vectorizeEnd - vectorizeStart).toFixed(1)}ms)`);
+    }
+    
+    state.currentStage = stage;
+    
+    // Update stage button states
+    document.querySelectorAll(".stage-btn").forEach(btn => btn.classList.remove("active"));
+    const btn = Array.from(document.querySelectorAll(".stage-btn")).find(
+      b => (b as HTMLElement).dataset.stage === stage
+    );
+    btn?.classList.add("active");
+    
+    // First, display the skeleton image on canvas
+    const skelStage = stage.replace("_vec", "_skel") as ProcessingStage;
+    const skelImage = state.processedImages.get(skelStage);
+    if (skelImage) {
+      // Render skeleton to canvas
+      processCanvas.width = skelImage.width;
+      processCanvas.height = skelImage.height;
+      
+      // Convert to RGBA for display
+      let rgbaData: Uint8ClampedArray;
+      if (skelImage.data instanceof Uint8ClampedArray && skelImage.data.length === skelImage.width * skelImage.height * 4) {
+        rgbaData = skelImage.data;
+      } else {
+        // Convert binary to RGBA
+        const numPixels = skelImage.width * skelImage.height;
+        rgbaData = new Uint8ClampedArray(numPixels * 4);
+        for (let i = 0; i < numPixels; i++) {
+          const byteIndex = Math.floor(i / 8);
+          const bitIndex = 7 - (i % 8);
+          const bit = (skelImage.data[byteIndex] >> bitIndex) & 1;
+          const value = bit ? 0 : 255;
+          rgbaData[i * 4] = value;
+          rgbaData[i * 4 + 1] = value;
+          rgbaData[i * 4 + 2] = value;
+          rgbaData[i * 4 + 3] = 255;
+        }
+      }
+      
+      const imageData = new ImageData(rgbaData, skelImage.width, skelImage.height);
+      processCtx.putImageData(imageData, 0, 0);
+    }
+    
+    // Then overlay the vectorized paths as SVG
+    renderVectorizedToSVG(vectorized, processSvgOverlay);
+    
+    // Fit to screen on first display
+    if (!state.processViewInitialized) {
+      processFitToScreen();
+      state.processViewInitialized = true;
+    } else {
+      updateProcessTransform();
+    }
+    
+    showStatus(`Viewing: ${stage} (${vectorized.paths.length} paths, ${vectorized.vertices.size} vertices)`);
+    return;
+  }
+  
   const image = state.processedImages.get(stage);
   if (!image) {
     showStatus(`Stage ${stage} not available`, true);
@@ -1262,6 +1493,15 @@ function displayProcessingStage(stage: ProcessingStage) {
   }
   
   state.currentStage = stage;
+  
+  // Re-render vector overlay if it's enabled (over the new stage)
+  if (state.vectorOverlayEnabled && state.vectorOverlayStage) {
+    const vectorized = state.vectorizedImages.get(state.vectorOverlayStage);
+    if (vectorized) {
+      renderVectorizedToSVG(vectorized, processSvgOverlay, image.width, image.height);
+      processSvgOverlay.style.display = "block";
+    }
+  }
   
   // Update stage button states
   document.querySelectorAll(".stage-btn").forEach(btn => btn.classList.remove("active"));
@@ -1365,13 +1605,24 @@ function displayProcessingStage(stage: ProcessingStage) {
 }
 
 function processFitToScreen() {
+  // Get dimensions from either processed image or vectorized image
+  let imageWidth = 0, imageHeight = 0;
   const image = state.processedImages.get(state.currentStage);
-  if (!image) return;
+  if (image) {
+    imageWidth = image.width;
+    imageHeight = image.height;
+  } else if (state.currentStage.endsWith("_vec")) {
+    const vectorized = state.vectorizedImages.get(state.currentStage);
+    if (vectorized) {
+      imageWidth = vectorized.width;
+      imageHeight = vectorized.height;
+    }
+  }
+  
+  if (imageWidth === 0 || imageHeight === 0) return;
   
   const containerWidth = processCanvasContainer.clientWidth;
   const containerHeight = processCanvasContainer.clientHeight;
-  const imageWidth = image.width;
-  const imageHeight = image.height;
   
   const scaleX = containerWidth / imageWidth;
   const scaleY = containerHeight / imageHeight;
@@ -1393,6 +1644,11 @@ function updateProcessTransform() {
   processCanvas.style.transform = transform;
   processCanvas.style.transformOrigin = "0 0";
   processCanvas.style.willChange = "transform";
+  
+  // Apply same transform to SVG overlay
+  processSvgOverlay.style.transform = transform;
+  processSvgOverlay.style.transformOrigin = "0 0";
+  processSvgOverlay.style.willChange = "transform";
   
   if (state.processZoom >= 1) {
     processCanvas.style.imageRendering = "pixelated";
@@ -1556,6 +1812,24 @@ async function loadStoredFile(id: string) {
   }
   
   state.currentFileId = id;
+  
+  // Restore palette if saved, otherwise load default
+  if (stored.palette) {
+    try {
+      const savedPalette = JSON.parse(stored.palette);
+      state.userPalette.length = 0;
+      state.userPalette.push(...savedPalette);
+      renderPaletteUI();
+      console.log("Restored saved palette with", savedPalette.length, "colors");
+    } catch (err) {
+      console.error("Failed to restore palette:", err);
+      await loadDefaultPalette();
+    }
+  } else {
+    // No saved palette, load default
+    await loadDefaultPalette();
+  }
+  
   const data = new Uint8Array(stored.data);
   const blob = new Blob([data], { type: stored.type });
   const file = new File([blob], stored.name, { type: stored.type });
