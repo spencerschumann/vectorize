@@ -122,17 +122,25 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
   };
   
   // Iterate through all pixels to find paths
+  // Optimize by checking entire bytes at once
   let totalPixels = 0;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (isPixelSet(binary, x, y)) totalPixels++;
-    }
-  }
   
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (!isPixelSet(binary, x, y)) continue;
+  for (let byteIdx = 0; byteIdx < binary.data.length; byteIdx++) {
+    const byte = binary.data[byteIdx];
+    if (byte === 0) continue; // Skip empty bytes
+    
+    // Check each bit in this byte
+    const startPixelIdx = byteIdx * 8;
+    for (let bitIdx = 0; bitIdx < 8; bitIdx++) {
+      if ((byte & (1 << (7 - bitIdx))) === 0) continue;
       
+      const pixelIdx = startPixelIdx + bitIdx;
+      const x = pixelIdx % width;
+      const y = Math.floor(pixelIdx / width);
+      
+      if (y >= height) break; // Past end of image
+      
+      totalPixels++;
       const id = getVertexId(x, y);
       if (visited.has(id)) continue;
       
@@ -162,7 +170,7 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
   // Simplify paths using Douglas-Peucker
   // Use threshold 0.7 to remove stair-step vertices (which are ~0.28-0.56 pixels from diagonal)
   // while preserving real corners
-  const simplifiedPaths = paths.map(path => douglasPeucker(path, vertices, 1.1));
+  const simplifiedPaths = paths.map(path => douglasPeucker(path, vertices, 0.9));
   
   // Count vertices before and after simplification
   const totalVerticesBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);

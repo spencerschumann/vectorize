@@ -3095,14 +3095,17 @@ function vectorizeSkeleton(binary) {
     }
   };
   let totalPixels = 0;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (isPixelSet(binary, x, y)) totalPixels++;
-    }
-  }
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (!isPixelSet(binary, x, y)) continue;
+  for (let byteIdx = 0; byteIdx < binary.data.length; byteIdx++) {
+    const byte = binary.data[byteIdx];
+    if (byte === 0) continue;
+    const startPixelIdx = byteIdx * 8;
+    for (let bitIdx = 0; bitIdx < 8; bitIdx++) {
+      if ((byte & 1 << 7 - bitIdx) === 0) continue;
+      const pixelIdx = startPixelIdx + bitIdx;
+      const x = pixelIdx % width;
+      const y = Math.floor(pixelIdx / width);
+      if (y >= height) break;
+      totalPixels++;
       const id = getVertexId(x, y);
       if (visited.has(id)) continue;
       const pathVertices = [id];
@@ -3119,7 +3122,7 @@ function vectorizeSkeleton(binary) {
     }
   }
   console.log(`Vectorization: ${totalPixels} skeleton pixels, visited ${visited.size}, traced ${paths.length} paths`);
-  const simplifiedPaths = paths.map((path) => douglasPeucker(path, vertices, 1.1));
+  const simplifiedPaths = paths.map((path) => douglasPeucker(path, vertices, 0.9));
   const totalVerticesBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);
   const totalVerticesAfter = simplifiedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
   console.log(`Vectorization: Simplified from ${totalVerticesBefore} to ${totalVerticesAfter} path vertices (${((1 - totalVerticesAfter / totalVerticesBefore) * 100).toFixed(1)}% reduction)`);
