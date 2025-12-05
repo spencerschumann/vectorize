@@ -3031,187 +3031,148 @@ function forceDeactivateEyedropper() {
 function vectorizeSkeleton(binary) {
   const { width, height } = binary;
   const getVertexId = (x, y) => y * width + x;
-  const countNeighbors = (x, y) => {
-    let count = 0;
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        if (dx === 0 && dy === 0) continue;
-        const nx = x + dx;
-        const ny = y + dy;
-        if (nx >= 0 && nx < width && ny >= 0 && ny < height && isPixelSet(binary, nx, ny)) {
-          count++;
-        }
-      }
-    }
-    return count;
-  };
-  const isCorner = (x, y) => {
-    const neighbors = [];
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        if (dx === 0 && dy === 0) continue;
-        const nx = x + dx;
-        const ny = y + dy;
-        if (nx >= 0 && nx < width && ny >= 0 && ny < height && isPixelSet(binary, nx, ny)) {
-          neighbors.push([dx, dy]);
-        }
-      }
-    }
-    if (neighbors.length !== 2) return false;
-    const [dx1, dy1] = neighbors[0];
-    const [dx2, dy2] = neighbors[1];
-    return !(dx1 === -dx2 && dy1 === -dy2);
-  };
-  const vertices = /* @__PURE__ */ new Map();
-  let vertexCount = 0;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (isPixelSet(binary, x, y)) {
-        const neighborCount = countNeighbors(x, y);
-        if (neighborCount === 1 || neighborCount >= 3 || neighborCount === 2 && isCorner(x, y)) {
-          const id = getVertexId(x, y);
-          vertices.set(id, {
-            x,
-            y,
-            id,
-            neighbors: []
-          });
-          vertexCount++;
-          if (vertexCount > 1e5) {
-            console.warn("Vectorization: Too many vertices (>100k), aborting");
-            return {
-              width,
-              height,
-              paths: [],
-              vertices: /* @__PURE__ */ new Map()
-            };
-          }
-        }
-      }
-    }
-  }
-  console.log(`Vectorization: Created ${vertices.size} vertices at key points`);
   const paths = [];
-  for (const startVertex of vertices.values()) {
+  const visited = /* @__PURE__ */ new Set();
+  const vertices = /* @__PURE__ */ new Map();
+  const getUnvisitedNeighbors = (x, y) => {
+    const neighbors = [];
     const cardinalOffsets = [[0, -1], [1, 0], [0, 1], [-1, 0]];
     for (const [dx, dy] of cardinalOffsets) {
-      const nx = startVertex.x + dx;
-      const ny = startVertex.y + dy;
-      if (nx >= 0 && nx < width && ny >= 0 && ny < height && isPixelSet(binary, nx, ny)) {
-        const path = tracePathBetweenVertices(binary, startVertex, nx, ny, vertices, width, height, getVertexId);
-        if (path && path.vertices.length >= 2) {
-          const isDuplicate = paths.some(
-            (p) => p.vertices[0] === path.vertices[0] && p.vertices[p.vertices.length - 1] === path.vertices[path.vertices.length - 1] || p.vertices[0] === path.vertices[path.vertices.length - 1] && p.vertices[p.vertices.length - 1] === path.vertices[0]
-          );
-          if (!isDuplicate) {
-            paths.push(path);
-          }
+      const nx = x + dx;
+      const ny = y + dy;
+      if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+        const nId = getVertexId(nx, ny);
+        if (isPixelSet(binary, nx, ny) && !visited.has(nId)) {
+          neighbors.push([nx, ny]);
         }
       }
     }
     const diagonalOffsets = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
     for (const [dx, dy] of diagonalOffsets) {
-      const nx = startVertex.x + dx;
-      const ny = startVertex.y + dy;
-      if (nx >= 0 && nx < width && ny >= 0 && ny < height && isPixelSet(binary, nx, ny)) {
-        const hasStairStep = cardinalOffsets.some(([cdx, cdy]) => {
-          const cx = startVertex.x + cdx;
-          const cy = startVertex.y + cdy;
-          if (cx >= 0 && cx < width && cy >= 0 && cy < height && isPixelSet(binary, cx, cy)) {
-            const dcx = nx - cx;
-            const dcy = ny - cy;
-            const cdx2 = nx - startVertex.x - cdx;
-            const cdy2 = ny - startVertex.y - cdy;
-            return Math.abs(dcx) + Math.abs(dcy) === 1;
-          }
-          return false;
-        });
-        if (hasStairStep) continue;
-        const path = tracePathBetweenVertices(binary, startVertex, nx, ny, vertices, width, height, getVertexId);
-        if (path && path.vertices.length >= 2) {
-          const isDuplicate = paths.some(
-            (p) => p.vertices[0] === path.vertices[0] && p.vertices[p.vertices.length - 1] === path.vertices[path.vertices.length - 1] || p.vertices[0] === path.vertices[path.vertices.length - 1] && p.vertices[p.vertices.length - 1] === path.vertices[0]
-          );
-          if (!isDuplicate) {
-            paths.push(path);
-          }
-        }
-      }
-    }
-  }
-  console.log(`Vectorization: Traced ${paths.length} paths`);
-  return {
-    width,
-    height,
-    paths,
-    vertices
-  };
-}
-function tracePathBetweenVertices(binary, startVertex, startX, startY, vertices, width, height, getVertexId) {
-  const pathVertices = [startVertex.id];
-  const visited = /* @__PURE__ */ new Set();
-  visited.add(startVertex.id);
-  let x = startX;
-  let y = startY;
-  let prevX = startVertex.x;
-  let prevY = startVertex.y;
-  let steps = 0;
-  const maxSteps = 1e4;
-  while (steps++ < maxSteps) {
-    const currentId = getVertexId(x, y);
-    if (vertices.has(currentId)) {
-      pathVertices.push(currentId);
-      return {
-        vertices: pathVertices,
-        closed: false
-      };
-    }
-    visited.add(currentId);
-    let nextX = -1;
-    let nextY = -1;
-    let found = false;
-    const cardinalOffsets = [[0, -1], [1, 0], [0, 1], [-1, 0]];
-    for (const [dx, dy] of cardinalOffsets) {
       const nx = x + dx;
       const ny = y + dy;
-      if (nx === prevX && ny === prevY) continue;
       if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
         const nId = getVertexId(nx, ny);
         if (isPixelSet(binary, nx, ny) && !visited.has(nId)) {
-          nextX = nx;
-          nextY = ny;
-          found = true;
-          break;
-        }
-      }
-    }
-    if (!found) {
-      const diagonalOffsets = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
-      for (const [dx, dy] of diagonalOffsets) {
-        const nx = x + dx;
-        const ny = y + dy;
-        if (nx === prevX && ny === prevY) continue;
-        if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-          const nId = getVertexId(nx, ny);
-          if (isPixelSet(binary, nx, ny) && !visited.has(nId)) {
-            nextX = nx;
-            nextY = ny;
-            found = true;
-            break;
+          const hasStairStep = cardinalOffsets.some(([cdx, cdy]) => {
+            const cx = x + cdx;
+            const cy = y + cdy;
+            if (cx >= 0 && cx < width && cy >= 0 && cy < height && isPixelSet(binary, cx, cy)) {
+              const dcx = nx - cx;
+              const dcy = ny - cy;
+              return Math.abs(dcx) + Math.abs(dcy) === 1;
+            }
+            return false;
+          });
+          if (!hasStairStep) {
+            neighbors.push([nx, ny]);
           }
         }
       }
     }
-    if (!found) {
-      return null;
+    return neighbors;
+  };
+  const extendPath = (pathVertices, forward) => {
+    while (true) {
+      const currentId = forward ? pathVertices[pathVertices.length - 1] : pathVertices[0];
+      const currentVertex = vertices.get(currentId);
+      if (!currentVertex) break;
+      const neighbors = getUnvisitedNeighbors(currentVertex.x, currentVertex.y);
+      if (neighbors.length === 0) break;
+      const [nx, ny] = neighbors[0];
+      const nextId = getVertexId(nx, ny);
+      if (!vertices.has(nextId)) {
+        vertices.set(nextId, { x: nx, y: ny, id: nextId, neighbors: [] });
+      }
+      visited.add(nextId);
+      if (forward) {
+        pathVertices.push(nextId);
+      } else {
+        pathVertices.unshift(nextId);
+      }
+      const nextNeighbors = getUnvisitedNeighbors(nx, ny);
+      if (nextNeighbors.length > 1) break;
     }
-    prevX = x;
-    prevY = y;
-    x = nextX;
-    y = nextY;
+  };
+  let totalPixels = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (isPixelSet(binary, x, y)) totalPixels++;
+    }
   }
-  console.warn("Path tracing exceeded max steps");
-  return null;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (!isPixelSet(binary, x, y)) continue;
+      const id = getVertexId(x, y);
+      if (visited.has(id)) continue;
+      const pathVertices = [id];
+      visited.add(id);
+      if (!vertices.has(id)) {
+        vertices.set(id, { x, y, id, neighbors: [] });
+      }
+      extendPath(pathVertices, true);
+      extendPath(pathVertices, false);
+      paths.push({
+        vertices: pathVertices,
+        closed: false
+      });
+    }
+  }
+  console.log(`Vectorization: ${totalPixels} skeleton pixels, visited ${visited.size}, traced ${paths.length} paths`);
+  const simplifiedPaths = paths.map((path) => douglasPeucker(path, vertices, 1.1));
+  const totalVerticesBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);
+  const totalVerticesAfter = simplifiedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
+  console.log(`Vectorization: Simplified from ${totalVerticesBefore} to ${totalVerticesAfter} path vertices (${((1 - totalVerticesAfter / totalVerticesBefore) * 100).toFixed(1)}% reduction)`);
+  return {
+    width,
+    height,
+    paths: simplifiedPaths,
+    vertices
+  };
+}
+function douglasPeucker(path, vertices, epsilon) {
+  if (path.vertices.length <= 2) {
+    return path;
+  }
+  const vertexCoords = path.vertices.map((id) => vertices.get(id));
+  const simplified = douglasPeuckerRecursive(vertexCoords, epsilon);
+  return {
+    vertices: simplified.map((v) => v.id),
+    closed: path.closed
+  };
+}
+function douglasPeuckerRecursive(points, epsilon) {
+  if (points.length <= 2) {
+    return points;
+  }
+  let maxDistance = 0;
+  let maxIndex = 0;
+  const start = points[0];
+  const end = points[points.length - 1];
+  for (let i = 1; i < points.length - 1; i++) {
+    const distance = perpendicularDistance(points[i], start, end);
+    if (distance > maxDistance) {
+      maxDistance = distance;
+      maxIndex = i;
+    }
+  }
+  if (maxDistance > epsilon) {
+    const left = douglasPeuckerRecursive(points.slice(0, maxIndex + 1), epsilon);
+    const right = douglasPeuckerRecursive(points.slice(maxIndex), epsilon);
+    return [...left.slice(0, -1), ...right];
+  } else {
+    return [start, end];
+  }
+}
+function perpendicularDistance(point, lineStart, lineEnd) {
+  const dx = lineEnd.x - lineStart.x;
+  const dy = lineEnd.y - lineStart.y;
+  if (dx === 0 && dy === 0) {
+    return Math.sqrt((point.x - lineStart.x) ** 2 + (point.y - lineStart.y) ** 2);
+  }
+  const numerator = Math.abs(dy * point.x - dx * point.y + lineEnd.x * lineStart.y - lineEnd.y * lineStart.x);
+  const denominator = Math.sqrt(dx * dx + dy * dy);
+  return numerator / denominator;
 }
 function isPixelSet(binary, x, y) {
   const pixelIndex = y * binary.width + x;
@@ -3249,7 +3210,15 @@ function renderVectorizedToSVG(vectorized, svgElement) {
     pathElement.setAttribute("vector-effect", "non-scaling-stroke");
     svgElement.appendChild(pathElement);
   }
-  for (const vertex of vertices.values()) {
+  const usedVertexIds = /* @__PURE__ */ new Set();
+  for (const path of paths) {
+    for (const vid of path.vertices) {
+      usedVertexIds.add(vid);
+    }
+  }
+  for (const vertexId of usedVertexIds) {
+    const vertex = vertices.get(vertexId);
+    if (!vertex) continue;
     const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
     circle.setAttribute("cx", (vertex.x + 0.5).toString());
     circle.setAttribute("cy", (vertex.y + 0.5).toString());
