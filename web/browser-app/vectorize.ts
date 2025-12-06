@@ -170,19 +170,154 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
   // Simplify paths using Douglas-Peucker
   // Use threshold 0.7 to remove stair-step vertices (which are ~0.28-0.56 pixels from diagonal)
   // while preserving real corners
-  const simplifiedPaths = paths.map(path => douglasPeucker(path, vertices, 0.9));
+  const simplifiedPaths = paths.map(path => douglasPeucker(path, vertices, 0.1));
+
+  // Sharpen 90-degree corners before simplification
+  const sharpenedPaths = simplifiedPaths.map(path => sharpenRightAngleCorners(path, vertices));
+  const totalCornersBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);
+  const totalCornersAfter = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
+  console.log(`Vectorization: Corner sharpening changed ${totalCornersBefore} to ${totalCornersAfter} vertices`);
   
   // Count vertices before and after simplification
-  const totalVerticesBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);
+  const totalVerticesBefore = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
   const totalVerticesAfter = simplifiedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
   console.log(`Vectorization: Simplified from ${totalVerticesBefore} to ${totalVerticesAfter} path vertices (${((1 - totalVerticesAfter/totalVerticesBefore) * 100).toFixed(1)}% reduction)`);
   
   return {
     width,
     height,
-    paths: simplifiedPaths,
+    paths: sharpenedPaths,
     vertices,
   };
+}
+
+/**
+ * Sharpen right-angle corners by detecting near-horizontal/vertical segments
+ * and extending them to their intersection point
+ */
+function sharpenRightAngleCorners(path: VectorPath, vertices: Map<number, Vertex>): VectorPath {
+  if (path.vertices.length < 3) return path;
+  
+  const MIN_SEGMENT_LENGTH = 10; // pixels
+  const CLUSTER_RADIUS = 2; // pixels
+  let cornersSharpened = 0;
+  
+  // Find long horizontal/vertical segments in the path
+  const segments: Array<{ start: number, end: number, axis: 'h' | 'v', length: number }> = [];
+  
+  for (let i = 0; i < path.vertices.length - 1; i++) {
+    const v1 = vertices.get(path.vertices[i])!;
+    const v2 = vertices.get(path.vertices[i + 1])!;
+    const dx = Math.abs(v2.x - v1.x);
+    const dy = Math.abs(v2.y - v1.y);
+    
+    // Check if this segment is axis-aligned and long enough
+    if (dy === 0 && dx >= MIN_SEGMENT_LENGTH) {
+      segments.push({ start: i, end: i + 1, axis: 'h', length: dx });
+    } else if (dx === 0 && dy >= MIN_SEGMENT_LENGTH) {
+      segments.push({ start: i, end: i + 1, axis: 'v', length: dy });
+    }
+  }
+  
+  if (segments.length < 2) return path; // Need at least 2 segments to form a corner
+  
+  // Look for pairs of perpendicular segments with a small cluster between them
+  const newVertices: number[] = [...path.vertices];
+  const verticesToRemove = new Set<number>();
+  
+  for (let i = 0; i < segments.length - 1; i++) {
+    for (let j = i + 1; j < segments.length; j++) {
+      const seg1 = segments[i];
+      const seg2 = segments[j];
+      
+      // Must be perpendicular
+      if (seg1.axis === seg2.axis) continue;
+      
+      // Check if they're close enough to potentially form a corner
+      const gapStart = seg1.end;
+      const gapEnd = seg2.start;
+      if (gapEnd <= gapStart) continue; // seg2 must come after seg1
+      
+      // Get the vertices at segment endpoints and in the gap
+      const v1Start = vertices.get(path.vertices[seg1.start])!;
+      const v1End = vertices.get(path.vertices[seg1.end])!;
+      const v2Start = vertices.get(path.vertices[seg2.start])!;
+      const v2End = vertices.get(path.vertices[seg2.end])!;
+      
+      // Find intersection of the two infinite lines
+      const intersection = findLineIntersection(v1Start, v1End, v2Start, v2End);
+      if (!intersection) continue;
+      
+      // Check if all vertices between the segments are clustered near the intersection
+      let allInCluster = true;
+      for (let k = seg1.end; k <= seg2.start; k++) {
+        const v = vertices.get(path.vertices[k])!;
+        const dist = Math.hypot(v.x - intersection.x, v.y - intersection.y);
+        if (dist > CLUSTER_RADIUS) {
+          allInCluster = false;
+          break;
+        }
+      }
+      
+      if (!allInCluster) continue;
+      
+      // Found a valid corner! Replace the cluster with the intersection point
+      const intersectionId = Math.floor(intersection.y) * 100000 + Math.floor(intersection.x);
+      vertices.set(intersectionId, {
+        x: intersection.x,
+        y: intersection.y,
+        id: intersectionId,
+        neighbors: [],
+      });
+      
+      // Mark vertices in the cluster for removal
+      for (let k = seg1.end; k <= seg2.start; k++) {
+        verticesToRemove.add(k);
+      }
+      
+      // Insert intersection vertex
+      newVertices[seg1.end] = intersectionId;
+      cornersSharpened++;
+    }
+  }
+  
+  // Build final vertex list, removing marked vertices
+  const finalVertices: number[] = [];
+  for (let i = 0; i < newVertices.length; i++) {
+    if (!verticesToRemove.has(i) || newVertices[i] !== path.vertices[i]) {
+      finalVertices.push(newVertices[i]);
+    }
+  }
+  
+  if (cornersSharpened > 0) {
+    console.log(`Sharpened ${cornersSharpened} corners in path`);
+  }
+  
+  return {
+    vertices: finalVertices,
+    closed: path.closed,
+  };
+}
+
+// Helper: find intersection of two infinite lines
+function findLineIntersection(
+  p1: Vertex,
+  p2: Vertex,
+  p3: Vertex,
+  p4: Vertex
+): { x: number; y: number } | null {
+  const x1 = p1.x, y1 = p1.y;
+  const x2 = p2.x, y2 = p2.y;
+  const x3 = p3.x, y3 = p3.y;
+  const x4 = p4.x, y4 = p4.y;
+  
+  const denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+  if (Math.abs(denom) < 0.0001) return null; // Parallel lines
+  
+  const x = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / denom;
+  const y = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / denom;
+  
+  return { x, y };
 }
 
 /**

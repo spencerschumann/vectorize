@@ -3122,16 +3122,103 @@ function vectorizeSkeleton(binary) {
     }
   }
   console.log(`Vectorization: ${totalPixels} skeleton pixels, visited ${visited.size}, traced ${paths.length} paths`);
-  const simplifiedPaths = paths.map((path) => douglasPeucker(path, vertices, 0.9));
-  const totalVerticesBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);
+  const simplifiedPaths = paths.map((path) => douglasPeucker(path, vertices, 0.1));
+  const sharpenedPaths = simplifiedPaths.map((path) => sharpenRightAngleCorners(path, vertices));
+  const totalCornersBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);
+  const totalCornersAfter = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
+  console.log(`Vectorization: Corner sharpening changed ${totalCornersBefore} to ${totalCornersAfter} vertices`);
+  const totalVerticesBefore = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
   const totalVerticesAfter = simplifiedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
   console.log(`Vectorization: Simplified from ${totalVerticesBefore} to ${totalVerticesAfter} path vertices (${((1 - totalVerticesAfter / totalVerticesBefore) * 100).toFixed(1)}% reduction)`);
   return {
     width,
     height,
-    paths: simplifiedPaths,
+    paths: sharpenedPaths,
     vertices
   };
+}
+function sharpenRightAngleCorners(path, vertices) {
+  if (path.vertices.length < 3) return path;
+  const MIN_SEGMENT_LENGTH = 10;
+  const CLUSTER_RADIUS = 2;
+  let cornersSharpened = 0;
+  const segments = [];
+  for (let i = 0; i < path.vertices.length - 1; i++) {
+    const v1 = vertices.get(path.vertices[i]);
+    const v2 = vertices.get(path.vertices[i + 1]);
+    const dx = Math.abs(v2.x - v1.x);
+    const dy = Math.abs(v2.y - v1.y);
+    if (dy === 0 && dx >= MIN_SEGMENT_LENGTH) {
+      segments.push({ start: i, end: i + 1, axis: "h", length: dx });
+    } else if (dx === 0 && dy >= MIN_SEGMENT_LENGTH) {
+      segments.push({ start: i, end: i + 1, axis: "v", length: dy });
+    }
+  }
+  if (segments.length < 2) return path;
+  const newVertices = [...path.vertices];
+  const verticesToRemove = /* @__PURE__ */ new Set();
+  for (let i = 0; i < segments.length - 1; i++) {
+    for (let j = i + 1; j < segments.length; j++) {
+      const seg1 = segments[i];
+      const seg2 = segments[j];
+      if (seg1.axis === seg2.axis) continue;
+      const gapStart = seg1.end;
+      const gapEnd = seg2.start;
+      if (gapEnd <= gapStart) continue;
+      const v1Start = vertices.get(path.vertices[seg1.start]);
+      const v1End = vertices.get(path.vertices[seg1.end]);
+      const v2Start = vertices.get(path.vertices[seg2.start]);
+      const v2End = vertices.get(path.vertices[seg2.end]);
+      const intersection = findLineIntersection(v1Start, v1End, v2Start, v2End);
+      if (!intersection) continue;
+      let allInCluster = true;
+      for (let k = seg1.end; k <= seg2.start; k++) {
+        const v = vertices.get(path.vertices[k]);
+        const dist = Math.hypot(v.x - intersection.x, v.y - intersection.y);
+        if (dist > CLUSTER_RADIUS) {
+          allInCluster = false;
+          break;
+        }
+      }
+      if (!allInCluster) continue;
+      const intersectionId = Math.floor(intersection.y) * 1e5 + Math.floor(intersection.x);
+      vertices.set(intersectionId, {
+        x: intersection.x,
+        y: intersection.y,
+        id: intersectionId,
+        neighbors: []
+      });
+      for (let k = seg1.end; k <= seg2.start; k++) {
+        verticesToRemove.add(k);
+      }
+      newVertices[seg1.end] = intersectionId;
+      cornersSharpened++;
+    }
+  }
+  const finalVertices = [];
+  for (let i = 0; i < newVertices.length; i++) {
+    if (!verticesToRemove.has(i) || newVertices[i] !== path.vertices[i]) {
+      finalVertices.push(newVertices[i]);
+    }
+  }
+  if (cornersSharpened > 0) {
+    console.log(`Sharpened ${cornersSharpened} corners in path`);
+  }
+  return {
+    vertices: finalVertices,
+    closed: path.closed
+  };
+}
+function findLineIntersection(p1, p2, p3, p4) {
+  const x1 = p1.x, y1 = p1.y;
+  const x2 = p2.x, y2 = p2.y;
+  const x3 = p3.x, y3 = p3.y;
+  const x4 = p4.x, y4 = p4.y;
+  const denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+  if (Math.abs(denom) < 1e-4) return null;
+  const x = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / denom;
+  const y = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / denom;
+  return { x, y };
 }
 function douglasPeucker(path, vertices, epsilon) {
   if (path.vertices.length <= 2) {
