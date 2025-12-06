@@ -3122,13 +3122,32 @@ function vectorizeSkeleton(binary) {
     }
   }
   console.log(`Vectorization: ${totalPixels} skeleton pixels, visited ${visited.size}, traced ${paths.length} paths`);
+  for (const path of paths) {
+    if (path.vertices.length >= 3) {
+      const startV = vertices.get(path.vertices[0]);
+      const endV = vertices.get(path.vertices[path.vertices.length - 1]);
+      if (Math.abs(startV.x - endV.x) <= 1 && Math.abs(startV.y - endV.y) <= 1) {
+        path.closed = true;
+        if (startV.x !== endV.x || startV.y !== endV.y) {
+          path.vertices.push(path.vertices[0]);
+        }
+      }
+    }
+  }
   const simplifiedPaths = paths.map((path) => douglasPeucker(path, vertices, 0.1));
+  for (const path of simplifiedPaths) {
+    const pathCoords = path.vertices.map((id) => {
+      const v = vertices.get(id);
+      return `(${v.x},${v.y})`;
+    }).join(" -> ");
+    console.log(`Path: closed=${path.closed}, vertices=${pathCoords}`);
+  }
   const sharpenedPaths = simplifiedPaths.map((path) => sharpenRightAngleCorners(path, vertices));
   const totalCornersBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);
   const totalCornersAfter = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
   console.log(`Vectorization: Corner sharpening changed ${totalCornersBefore} to ${totalCornersAfter} vertices`);
-  const totalVerticesBefore = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
-  const totalVerticesAfter = simplifiedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
+  const totalVerticesBefore = simplifiedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
+  const totalVerticesAfter = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
   console.log(`Vectorization: Simplified from ${totalVerticesBefore} to ${totalVerticesAfter} path vertices (${((1 - totalVerticesAfter / totalVerticesBefore) * 100).toFixed(1)}% reduction)`);
   return {
     width,
@@ -3193,6 +3212,59 @@ function sharpenRightAngleCorners(path, vertices) {
       }
       newVertices[seg1.end] = intersectionId;
       cornersSharpened++;
+    }
+  }
+  if (path.closed) {
+    const firstIdx = 0;
+    const lastIdx = segments.length - 1;
+    if (lastIdx >= 0) {
+      const firstSeg = segments[firstIdx];
+      const lastSeg = segments[lastIdx];
+      if (firstSeg.axis !== lastSeg.axis && firstSeg.length >= MIN_SEGMENT_LENGTH && lastSeg.length >= MIN_SEGMENT_LENGTH) {
+        const v1Start = vertices.get(path.vertices[firstSeg.start]);
+        const v1End = vertices.get(path.vertices[firstSeg.end]);
+        const v2Start = vertices.get(path.vertices[lastSeg.start]);
+        const v2End = vertices.get(path.vertices[lastSeg.end]);
+        const intersection = findLineIntersection(v1Start, v1End, v2Start, v2End);
+        if (intersection) {
+          let allInCluster = true;
+          for (let k = lastSeg.end; k < path.vertices.length; k++) {
+            const v = vertices.get(path.vertices[k]);
+            const dist = Math.hypot(v.x - intersection.x, v.y - intersection.y);
+            if (dist > CLUSTER_RADIUS) {
+              allInCluster = false;
+              break;
+            }
+          }
+          if (allInCluster) {
+            for (let k = 0; k <= firstSeg.start; k++) {
+              const v = vertices.get(path.vertices[k]);
+              const dist = Math.hypot(v.x - intersection.x, v.y - intersection.y);
+              if (dist > CLUSTER_RADIUS) {
+                allInCluster = false;
+                break;
+              }
+            }
+          }
+          if (allInCluster) {
+            const intersectionId = Math.floor(intersection.y) * 1e5 + Math.floor(intersection.x);
+            vertices.set(intersectionId, {
+              x: intersection.x,
+              y: intersection.y,
+              id: intersectionId,
+              neighbors: []
+            });
+            for (let k = lastSeg.end; k < path.vertices.length; k++) {
+              verticesToRemove.add(k);
+            }
+            for (let k = 0; k <= firstSeg.start; k++) {
+              verticesToRemove.add(k);
+            }
+            newVertices[lastSeg.end] = intersectionId;
+            cornersSharpened++;
+          }
+        }
+      }
     }
   }
   const finalVertices = [];

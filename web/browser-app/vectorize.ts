@@ -167,20 +167,42 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
   
   console.log(`Vectorization: ${totalPixels} skeleton pixels, visited ${visited.size}, traced ${paths.length} paths`);
   
-  // Simplify paths using Douglas-Peucker
-  // Use threshold 0.7 to remove stair-step vertices (which are ~0.28-0.56 pixels from diagonal)
-  // while preserving real corners
+  // Mark paths as closed if endpoints are within 1 pixel
+  for (const path of paths) {
+    if (path.vertices.length >= 3) {
+      const startV = vertices.get(path.vertices[0])!;
+      const endV = vertices.get(path.vertices[path.vertices.length - 1])!;
+      if (Math.abs(startV.x - endV.x) <= 1 && Math.abs(startV.y - endV.y) <= 1) {
+        path.closed = true;
+        if (startV.x !== endV.x || startV.y !== endV.y) {
+          // If endpoints are different but close, connect them
+          path.vertices.push(path.vertices[0]);
+        }
+      }
+    }
+  }
+  
+  // Simplify paths using a very light Douglas-Peucker pass
   const simplifiedPaths = paths.map(path => douglasPeucker(path, vertices, 0.1));
 
-  // Sharpen 90-degree corners before simplification
+  for (const path of simplifiedPaths) {
+    // debug log each path
+    const pathCoords = path.vertices.map(id => {
+       const v = vertices.get(id)!;
+       return `(${v.x},${v.y})`;
+    }).join(" -> ");
+    console.log(`Path: closed=${path.closed}, vertices=${pathCoords}`);
+  }
+
+  // Sharpen 90-degree corners
   const sharpenedPaths = simplifiedPaths.map(path => sharpenRightAngleCorners(path, vertices));
   const totalCornersBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);
   const totalCornersAfter = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
   console.log(`Vectorization: Corner sharpening changed ${totalCornersBefore} to ${totalCornersAfter} vertices`);
   
   // Count vertices before and after simplification
-  const totalVerticesBefore = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
-  const totalVerticesAfter = simplifiedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
+  const totalVerticesBefore = simplifiedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
+  const totalVerticesAfter = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
   console.log(`Vectorization: Simplified from ${totalVerticesBefore} to ${totalVerticesAfter} path vertices (${((1 - totalVerticesAfter/totalVerticesBefore) * 100).toFixed(1)}% reduction)`);
   
   return {
@@ -278,6 +300,76 @@ function sharpenRightAngleCorners(path: VectorPath, vertices: Map<number, Vertex
       // Insert intersection vertex
       newVertices[seg1.end] = intersectionId;
       cornersSharpened++;
+    }
+  }
+  
+  // Check endpoints for closed paths
+  if (path.closed) {
+    const firstIdx = 0;
+    const lastIdx = segments.length - 1;
+    
+    if (lastIdx >= 0) {
+      const firstSeg = segments[firstIdx];
+      const lastSeg = segments[lastIdx];
+      
+      // Check if first and last segments are perpendicular
+      if (firstSeg.axis !== lastSeg.axis && firstSeg.length >= MIN_SEGMENT_LENGTH && lastSeg.length >= MIN_SEGMENT_LENGTH) {
+        const v1Start = vertices.get(path.vertices[firstSeg.start])!;
+        const v1End = vertices.get(path.vertices[firstSeg.end])!;
+        const v2Start = vertices.get(path.vertices[lastSeg.start])!;
+        const v2End = vertices.get(path.vertices[lastSeg.end])!;
+        
+        const intersection = findLineIntersection(v1Start, v1End, v2Start, v2End);
+        if (intersection) {
+          // Check if vertices at path endpoints are clustered near intersection
+          let allInCluster = true;
+          
+          // Check from lastSeg.end to end of path
+          for (let k = lastSeg.end; k < path.vertices.length; k++) {
+            const v = vertices.get(path.vertices[k])!;
+            const dist = Math.hypot(v.x - intersection.x, v.y - intersection.y);
+            if (dist > CLUSTER_RADIUS) {
+              allInCluster = false;
+              break;
+            }
+          }
+          
+          // Check from start of path to firstSeg.start
+          if (allInCluster) {
+            for (let k = 0; k <= firstSeg.start; k++) {
+              const v = vertices.get(path.vertices[k])!;
+              const dist = Math.hypot(v.x - intersection.x, v.y - intersection.y);
+              if (dist > CLUSTER_RADIUS) {
+                allInCluster = false;
+                break;
+              }
+            }
+          }
+          
+          if (allInCluster) {
+            // Create intersection vertex
+            const intersectionId = Math.floor(intersection.y) * 100000 + Math.floor(intersection.x);
+            vertices.set(intersectionId, {
+              x: intersection.x,
+              y: intersection.y,
+              id: intersectionId,
+              neighbors: [],
+            });
+            
+            // Mark vertices at endpoints for removal
+            for (let k = lastSeg.end; k < path.vertices.length; k++) {
+              verticesToRemove.add(k);
+            }
+            for (let k = 0; k <= firstSeg.start; k++) {
+              verticesToRemove.add(k);
+            }
+            
+            // Insert intersection vertex at the wrap point
+            newVertices[lastSeg.end] = intersectionId;
+            cornersSharpened++;
+          }
+        }
+      }
     }
   }
   
