@@ -3146,14 +3146,68 @@ function vectorizeSkeleton(binary) {
   const totalCornersBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);
   const totalCornersAfter = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
   console.log(`Vectorization: Corner sharpening changed ${totalCornersBefore} to ${totalCornersAfter} vertices`);
-  const totalVerticesBefore = simplifiedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
-  const totalVerticesAfter = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
-  console.log(`Vectorization: Simplified from ${totalVerticesBefore} to ${totalVerticesAfter} path vertices (${((1 - totalVerticesAfter / totalVerticesBefore) * 100).toFixed(1)}% reduction)`);
+  const mergedPaths = sharpenedPaths.map((path) => mergeAdjacentVertices(path, vertices));
+  const totalMergedBefore = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
+  const totalMergedAfter = mergedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
+  console.log(`Vectorization: Adjacent vertex merging changed ${totalMergedBefore} to ${totalMergedAfter} vertices`);
+  const finalPaths = mergedPaths.map((path) => douglasPeucker(path, vertices, 0.5));
   return {
     width,
     height,
-    paths: sharpenedPaths,
+    paths: finalPaths,
     vertices
+  };
+}
+function mergeAdjacentVertices(path, vertices) {
+  if (path.vertices.length < 2) return path;
+  const newVertices = [];
+  let i = 0;
+  while (i < path.vertices.length) {
+    const v1 = vertices.get(path.vertices[i]);
+    if (i + 1 < path.vertices.length) {
+      const v2 = vertices.get(path.vertices[i + 1]);
+      const dx = Math.abs(v2.x - v1.x);
+      const dy = Math.abs(v2.y - v1.y);
+      if (dx <= 1 && dy <= 1 && (dx > 0 || dy > 0)) {
+        const midX = (v1.x + v2.x) / 2;
+        const midY = (v1.y + v2.y) / 2;
+        const midId = Math.floor(midY) * 1e5 + Math.floor(midX);
+        vertices.set(midId, {
+          x: midX,
+          y: midY,
+          id: midId,
+          neighbors: []
+        });
+        newVertices.push(midId);
+        i += 2;
+        continue;
+      }
+    }
+    newVertices.push(path.vertices[i]);
+    i++;
+  }
+  if (path.closed && newVertices.length >= 2) {
+    const first = vertices.get(newVertices[0]);
+    const last = vertices.get(newVertices[newVertices.length - 1]);
+    const dx = Math.abs(last.x - first.x);
+    const dy = Math.abs(last.y - first.y);
+    if (dx <= 1 && dy <= 1 && (dx > 0 || dy > 0)) {
+      const midX = (first.x + last.x) / 2;
+      const midY = (first.y + last.y) / 2;
+      const midId = Math.floor(midY) * 1e5 + Math.floor(midX);
+      vertices.set(midId, {
+        x: midX,
+        y: midY,
+        id: midId,
+        neighbors: []
+      });
+      newVertices.pop();
+      newVertices[0] = midId;
+    }
+  }
+  return {
+    vertices: newVertices,
+    closed: path.closed
   };
 }
 function sharpenRightAngleCorners(path, vertices) {

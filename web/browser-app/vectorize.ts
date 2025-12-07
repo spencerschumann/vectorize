@@ -200,16 +200,96 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
   const totalCornersAfter = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
   console.log(`Vectorization: Corner sharpening changed ${totalCornersBefore} to ${totalCornersAfter} vertices`);
   
-  // Count vertices before and after simplification
-  const totalVerticesBefore = simplifiedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
-  const totalVerticesAfter = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
-  console.log(`Vectorization: Simplified from ${totalVerticesBefore} to ${totalVerticesAfter} path vertices (${((1 - totalVerticesAfter/totalVerticesBefore) * 100).toFixed(1)}% reduction)`);
-  
+  // Merge adjacent vertices (stair-step cleanup)
+  const mergedPaths = sharpenedPaths.map(path => mergeAdjacentVertices(path, vertices));
+  const totalMergedBefore = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
+  const totalMergedAfter = mergedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
+  console.log(`Vectorization: Adjacent vertex merging changed ${totalMergedBefore} to ${totalMergedAfter} vertices`);
+
+  // Run another DP pass
+    const finalPaths = mergedPaths.map(path => douglasPeucker(path, vertices, 0.5));
+
   return {
     width,
     height,
-    paths: sharpenedPaths,
+    paths: finalPaths,
     vertices,
+  };
+}
+
+/**
+ * Merge adjacent vertices (directly or diagonally adjacent) into a single vertex at their midpoint
+ * This cleans up stair-step artifacts
+ */
+function mergeAdjacentVertices(path: VectorPath, vertices: Map<number, Vertex>): VectorPath {
+  if (path.vertices.length < 2) return path;
+  
+  const newVertices: number[] = [];
+  let i = 0;
+  
+  while (i < path.vertices.length) {
+    const v1 = vertices.get(path.vertices[i])!;
+    
+    // Look ahead to see if next vertex is adjacent (within 1 pixel in both x and y)
+    if (i + 1 < path.vertices.length) {
+      const v2 = vertices.get(path.vertices[i + 1])!;
+      const dx = Math.abs(v2.x - v1.x);
+      const dy = Math.abs(v2.y - v1.y);
+      
+      // If adjacent (cardinal or diagonal), merge them
+      if (dx <= 1 && dy <= 1 && (dx > 0 || dy > 0)) {
+        // Create a new vertex at the midpoint
+        const midX = (v1.x + v2.x) / 2;
+        const midY = (v1.y + v2.y) / 2;
+        const midId = Math.floor(midY) * 100000 + Math.floor(midX); // Temporary unique ID
+        
+        vertices.set(midId, {
+          x: midX,
+          y: midY,
+          id: midId,
+          neighbors: [],
+        });
+        
+        newVertices.push(midId);
+        i += 2; // Skip both vertices
+        continue;
+      }
+    }
+    
+    // Not adjacent, keep the vertex
+    newVertices.push(path.vertices[i]);
+    i++;
+  }
+  
+  // For closed paths, check if last and first vertices should be merged
+  if (path.closed && newVertices.length >= 2) {
+    const first = vertices.get(newVertices[0])!;
+    const last = vertices.get(newVertices[newVertices.length - 1])!;
+    const dx = Math.abs(last.x - first.x);
+    const dy = Math.abs(last.y - first.y);
+    
+    if (dx <= 1 && dy <= 1 && (dx > 0 || dy > 0)) {
+      // Merge last and first
+      const midX = (first.x + last.x) / 2;
+      const midY = (first.y + last.y) / 2;
+      const midId = Math.floor(midY) * 100000 + Math.floor(midX);
+      
+      vertices.set(midId, {
+        x: midX,
+        y: midY,
+        id: midId,
+        neighbors: [],
+      });
+      
+      // Remove last vertex and update first
+      newVertices.pop();
+      newVertices[0] = midId;
+    }
+  }
+  
+  return {
+    vertices: newVertices,
+    closed: path.closed,
   };
 }
 
