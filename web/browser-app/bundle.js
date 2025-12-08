@@ -3036,7 +3036,10 @@ function vectorizeSkeleton(binary) {
   const vertices = /* @__PURE__ */ new Map();
   const getUnvisitedNeighbors = (x, y) => {
     const neighbors = [];
-    const cardinalOffsets = [[0, -1], [1, 0], [0, 1], [-1, 0]];
+    const cardinalOffsets = [[0, -1], [1, 0], [0, 1], [
+      -1,
+      0
+    ]];
     for (const [dx, dy] of cardinalOffsets) {
       const nx = x + dx;
       const ny = y + dy;
@@ -3047,7 +3050,10 @@ function vectorizeSkeleton(binary) {
         }
       }
     }
-    const diagonalOffsets = [[-1, -1], [1, -1], [-1, 1], [1, 1]];
+    const diagonalOffsets = [[-1, -1], [1, -1], [
+      -1,
+      1
+    ], [1, 1]];
     for (const [dx, dy] of diagonalOffsets) {
       const nx = x + dx;
       const ny = y + dy;
@@ -3121,7 +3127,9 @@ function vectorizeSkeleton(binary) {
       });
     }
   }
-  console.log(`Vectorization: ${totalPixels} skeleton pixels, visited ${visited.size}, traced ${paths.length} paths`);
+  console.log(
+    `Vectorization: ${totalPixels} skeleton pixels, visited ${visited.size}, traced ${paths.length} paths`
+  );
   for (const path of paths) {
     if (path.vertices.length >= 3) {
       const startV = vertices.get(path.vertices[0]);
@@ -3134,217 +3142,246 @@ function vectorizeSkeleton(binary) {
       }
     }
   }
-  const simplifiedPaths = paths.map((path) => douglasPeucker(path, vertices, 0.1));
-  for (const path of simplifiedPaths) {
-    const pathCoords = path.vertices.map((id) => {
+  const dpPaths = paths.map((path) => douglasPeucker(path, vertices, 0.1));
+  const totalDPBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);
+  const totalDPAfter = dpPaths.reduce((sum, p) => sum + p.vertices.length, 0);
+  console.log(
+    `Vectorization: DP pass simplified from ${totalDPBefore} to ${totalDPAfter} vertices`
+  );
+  const simplifiedPaths = dpPaths.map(
+    (path) => segmentedLinearRegression(path, vertices, width, 0.75)
+  );
+  const totalVerticesBefore = dpPaths.reduce(
+    (sum, p) => sum + p.vertices.length,
+    0
+  );
+  const totalVerticesAfter = simplifiedPaths.reduce(
+    (sum, p) => sum + p.vertices.length,
+    0
+  );
+  console.log(
+    `Vectorization: SLR simplified from ${totalVerticesBefore} to ${totalVerticesAfter} vertices (${((1 - totalVerticesAfter / totalVerticesBefore) * 100).toFixed(1)}% reduction)`
+  );
+  const finalPaths = simplifiedPaths.map((path) => ({
+    points: path.vertices.map((id) => {
       const v = vertices.get(id);
-      return `(${v.x},${v.y})`;
-    }).join(" -> ");
-    console.log(`Path: closed=${path.closed}, vertices=${pathCoords}`);
-  }
-  const sharpenedPaths = simplifiedPaths.map((path) => sharpenRightAngleCorners(path, vertices));
-  const totalCornersBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);
-  const totalCornersAfter = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
-  console.log(`Vectorization: Corner sharpening changed ${totalCornersBefore} to ${totalCornersAfter} vertices`);
-  const mergedPaths = sharpenedPaths.map((path) => mergeAdjacentVertices(path, vertices));
-  const totalMergedBefore = sharpenedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
-  const totalMergedAfter = mergedPaths.reduce((sum, p) => sum + p.vertices.length, 0);
-  console.log(`Vectorization: Adjacent vertex merging changed ${totalMergedBefore} to ${totalMergedAfter} vertices`);
-  const finalPaths = mergedPaths.map((path) => douglasPeucker(path, vertices, 0.5));
+      return v ? { x: v.x, y: v.y } : { x: 0, y: 0 };
+    }),
+    closed: path.closed
+  }));
   return {
     width,
     height,
-    paths: finalPaths,
-    vertices
+    paths: finalPaths
   };
 }
-function mergeAdjacentVertices(path, vertices) {
-  if (path.vertices.length < 2) return path;
-  const newVertices = [];
-  let i = 0;
-  while (i < path.vertices.length) {
-    const v1 = vertices.get(path.vertices[i]);
-    if (i + 1 < path.vertices.length) {
-      const v2 = vertices.get(path.vertices[i + 1]);
-      const dx = Math.abs(v2.x - v1.x);
-      const dy = Math.abs(v2.y - v1.y);
-      if (dx <= 1 && dy <= 1 && (dx > 0 || dy > 0)) {
-        const midX = (v1.x + v2.x) / 2;
-        const midY = (v1.y + v2.y) / 2;
-        const midId = Math.floor(midY) * 1e5 + Math.floor(midX);
-        vertices.set(midId, {
-          x: midX,
-          y: midY,
-          id: midId,
-          neighbors: []
-        });
-        newVertices.push(midId);
-        i += 2;
-        continue;
-      }
-    }
-    newVertices.push(path.vertices[i]);
-    i++;
+function segmentedLinearRegression(path, vertices, width, epsilon) {
+  if (path.vertices.length <= 2) {
+    return path;
   }
-  if (path.closed && newVertices.length >= 2) {
-    const first = vertices.get(newVertices[0]);
-    const last = vertices.get(newVertices[newVertices.length - 1]);
-    const dx = Math.abs(last.x - first.x);
-    const dy = Math.abs(last.y - first.y);
-    if (dx <= 1 && dy <= 1 && (dx > 0 || dy > 0)) {
-      const midX = (first.x + last.x) / 2;
-      const midY = (first.y + last.y) / 2;
-      const midId = Math.floor(midY) * 1e5 + Math.floor(midX);
-      vertices.set(midId, {
-        x: midX,
-        y: midY,
-        id: midId,
-        neighbors: []
-      });
-      newVertices.pop();
-      newVertices[0] = midId;
+  let coords = path.vertices.map((id) => vertices.get(id));
+  let wasClosed = path.closed;
+  if (wasClosed && coords.length > 2) {
+    const first = coords[0];
+    const last = coords[coords.length - 1];
+    if (first.x === last.x && first.y === last.y) {
+      coords = coords.slice(0, -1);
     }
+  }
+  const simplified = slrRecursive(coords, epsilon, width, wasClosed);
+  for (const vertex of simplified) {
+    if (!vertices.has(vertex.id)) {
+      vertices.set(vertex.id, vertex);
+    }
+  }
+  const resultVertices = simplified.map((v) => v.id);
+  if (wasClosed && simplified.length > 0) {
+    resultVertices.push(simplified[0].id);
   }
   return {
-    vertices: newVertices,
-    closed: path.closed
+    vertices: resultVertices,
+    closed: wasClosed
   };
 }
-function sharpenRightAngleCorners(path, vertices) {
-  if (path.vertices.length < 3) return path;
-  const MIN_SEGMENT_LENGTH = 10;
-  const CLUSTER_RADIUS = 2;
-  let cornersSharpened = 0;
-  const segments = [];
-  for (let i = 0; i < path.vertices.length - 1; i++) {
-    const v1 = vertices.get(path.vertices[i]);
-    const v2 = vertices.get(path.vertices[i + 1]);
-    const dx = Math.abs(v2.x - v1.x);
-    const dy = Math.abs(v2.y - v1.y);
-    if (dy === 0 && dx >= MIN_SEGMENT_LENGTH) {
-      segments.push({ start: i, end: i + 1, axis: "h", length: dx });
-    } else if (dx === 0 && dy >= MIN_SEGMENT_LENGTH) {
-      segments.push({ start: i, end: i + 1, axis: "v", length: dy });
+function slrRecursive(points, epsilon, width, isClosed = false) {
+  if (points.length <= 2) {
+    return points;
+  }
+  const { direction, centroid, maxError } = fitLineToSegments(points);
+  if (maxError <= epsilon) {
+    const start2 = points[0];
+    const end2 = points[points.length - 1];
+    const projStart = projectOntoLine(start2, centroid, direction);
+    const projEnd = projectOntoLine(end2, centroid, direction);
+    console.log(
+      `
+=== SLR: Good fit (error ${maxError.toFixed(2)} <= ${epsilon}) ===`
+    );
+    console.log(`Points: ${points.map((p) => `(${p.x},${p.y})`).join(", ")}`);
+    console.log(
+      `Centroid: (${centroid.x.toFixed(2)}, ${centroid.y.toFixed(2)})`
+    );
+    console.log(
+      `Direction: (${direction.x.toFixed(3)}, ${direction.y.toFixed(3)})`
+    );
+    console.log(
+      `Projected start: (${projStart.x.toFixed(2)}, ${projStart.y.toFixed(2)})`
+    );
+    console.log(
+      `Projected end: (${projEnd.x.toFixed(2)}, ${projEnd.y.toFixed(2)})`
+    );
+    const startId = projStart.y * width + projStart.x;
+    const endId = projEnd.y * width + projEnd.x;
+    return [
+      { ...projStart, id: startId, neighbors: [] },
+      { ...projEnd, id: endId, neighbors: [] }
+    ];
+  }
+  const start = points[0];
+  const end = points[points.length - 1];
+  let maxDist = 0;
+  let maxDistIndex = 1;
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lineLen = Math.sqrt(dx * dx + dy * dy);
+  if (lineLen < 1e-10) {
+    return [start, end];
+  }
+  for (let i = 1; i < points.length - 1; i++) {
+    const p = points[i];
+    const dist = Math.abs(
+      (end.y - start.y) * p.x - (end.x - start.x) * p.y + end.x * start.y - end.y * start.x
+    ) / lineLen;
+    if (dist > maxDist) {
+      maxDist = dist;
+      maxDistIndex = i;
     }
   }
-  if (segments.length < 2) return path;
-  const newVertices = [...path.vertices];
-  const verticesToRemove = /* @__PURE__ */ new Set();
-  for (let i = 0; i < segments.length - 1; i++) {
-    for (let j = i + 1; j < segments.length; j++) {
-      const seg1 = segments[i];
-      const seg2 = segments[j];
-      if (seg1.axis === seg2.axis) continue;
-      const gapStart = seg1.end;
-      const gapEnd = seg2.start;
-      if (gapEnd <= gapStart) continue;
-      const v1Start = vertices.get(path.vertices[seg1.start]);
-      const v1End = vertices.get(path.vertices[seg1.end]);
-      const v2Start = vertices.get(path.vertices[seg2.start]);
-      const v2End = vertices.get(path.vertices[seg2.end]);
-      const intersection = findLineIntersection(v1Start, v1End, v2Start, v2End);
-      if (!intersection) continue;
-      let allInCluster = true;
-      for (let k = seg1.end; k <= seg2.start; k++) {
-        const v = vertices.get(path.vertices[k]);
-        const dist = Math.hypot(v.x - intersection.x, v.y - intersection.y);
-        if (dist > CLUSTER_RADIUS) {
-          allInCluster = false;
-          break;
-        }
-      }
-      if (!allInCluster) continue;
-      const intersectionId = Math.floor(intersection.y) * 1e5 + Math.floor(intersection.x);
-      vertices.set(intersectionId, {
-        x: intersection.x,
-        y: intersection.y,
-        id: intersectionId,
-        neighbors: []
-      });
-      for (let k = seg1.end; k <= seg2.start; k++) {
-        verticesToRemove.add(k);
-      }
-      newVertices[seg1.end] = intersectionId;
-      cornersSharpened++;
+  const left = slrRecursive(
+    points.slice(0, maxDistIndex + 1),
+    epsilon,
+    width,
+    false
+  );
+  const right = slrRecursive(points.slice(maxDistIndex), epsilon, width, false);
+  if (left.length > 1 && right.length > 1) {
+    const intersection = findLineIntersection(
+      left[left.length - 2],
+      left[left.length - 1],
+      right[0],
+      right[1]
+    );
+    if (intersection) {
+      const intId = intersection.y * width + intersection.x;
+      const intVertex = { ...intersection, id: intId, neighbors: [] };
+      return [
+        ...left.slice(0, -1),
+        intVertex,
+        ...right.slice(1)
+      ];
     }
   }
-  if (path.closed) {
-    const firstIdx = 0;
-    const lastIdx = segments.length - 1;
-    if (lastIdx >= 0) {
-      const firstSeg = segments[firstIdx];
-      const lastSeg = segments[lastIdx];
-      if (firstSeg.axis !== lastSeg.axis && firstSeg.length >= MIN_SEGMENT_LENGTH && lastSeg.length >= MIN_SEGMENT_LENGTH) {
-        const v1Start = vertices.get(path.vertices[firstSeg.start]);
-        const v1End = vertices.get(path.vertices[firstSeg.end]);
-        const v2Start = vertices.get(path.vertices[lastSeg.start]);
-        const v2End = vertices.get(path.vertices[lastSeg.end]);
-        const intersection = findLineIntersection(v1Start, v1End, v2Start, v2End);
-        if (intersection) {
-          let allInCluster = true;
-          for (let k = lastSeg.end; k < path.vertices.length; k++) {
-            const v = vertices.get(path.vertices[k]);
-            const dist = Math.hypot(v.x - intersection.x, v.y - intersection.y);
-            if (dist > CLUSTER_RADIUS) {
-              allInCluster = false;
-              break;
-            }
-          }
-          if (allInCluster) {
-            for (let k = 0; k <= firstSeg.start; k++) {
-              const v = vertices.get(path.vertices[k]);
-              const dist = Math.hypot(v.x - intersection.x, v.y - intersection.y);
-              if (dist > CLUSTER_RADIUS) {
-                allInCluster = false;
-                break;
-              }
-            }
-          }
-          if (allInCluster) {
-            const intersectionId = Math.floor(intersection.y) * 1e5 + Math.floor(intersection.x);
-            vertices.set(intersectionId, {
-              x: intersection.x,
-              y: intersection.y,
-              id: intersectionId,
-              neighbors: []
-            });
-            for (let k = lastSeg.end; k < path.vertices.length; k++) {
-              verticesToRemove.add(k);
-            }
-            for (let k = 0; k <= firstSeg.start; k++) {
-              verticesToRemove.add(k);
-            }
-            newVertices[lastSeg.end] = intersectionId;
-            cornersSharpened++;
-          }
-        }
-      }
+  return [...left.slice(0, -1), ...right];
+}
+function fitLineToSegments(points) {
+  let totalLength = 0;
+  let weightedCx = 0;
+  let weightedCy = 0;
+  for (let i = 0; i < points.length - 1; i++) {
+    const A = points[i];
+    const B = points[i + 1];
+    const dx2 = B.x - A.x;
+    const dy2 = B.y - A.y;
+    const L = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+    const segmentCentroid = {
+      x: (A.x + B.x) / 2,
+      y: (A.y + B.y) / 2
+    };
+    totalLength += L;
+    weightedCx += L * segmentCentroid.x;
+    weightedCy += L * segmentCentroid.y;
+  }
+  const centroid = {
+    x: weightedCx / totalLength,
+    y: weightedCy / totalLength
+  };
+  let covXX = 0;
+  let covXY = 0;
+  let covYY = 0;
+  for (let i = 0; i < points.length - 1; i++) {
+    const A = points[i];
+    const B = points[i + 1];
+    const dx2 = B.x - A.x;
+    const dy2 = B.y - A.y;
+    const L = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+    const Ax = A.x - centroid.x;
+    const Ay = A.y - centroid.y;
+    const Bx = B.x - centroid.x;
+    const By = B.y - centroid.y;
+    covXX += L / 3 * (Ax * Ax + Ax * Bx + Bx * Bx);
+    covXY += L / 3 * (Ax * Ay + Ax * By + Bx * By);
+    covYY += L / 3 * (Ay * Ay + Ay * By + By * By);
+  }
+  const trace = covXX + covYY;
+  const det = covXX * covYY - covXY * covXY;
+  const lambda1 = trace / 2 + Math.sqrt(Math.max(0, trace * trace / 4 - det));
+  let dx, dy;
+  if (Math.abs(covXY) > 1e-10) {
+    dx = lambda1 - covYY;
+    dy = covXY;
+  } else if (covXX > covYY) {
+    dx = 1;
+    dy = 0;
+  } else {
+    dx = 0;
+    dy = 1;
+  }
+  const dirLength = Math.sqrt(dx * dx + dy * dy);
+  dx /= dirLength;
+  dy /= dirLength;
+  const direction = { x: dx, y: dy };
+  let maxError = 0;
+  let maxErrorIndex = 1;
+  for (let i = 1; i < points.length - 1; i++) {
+    const p = points[i];
+    const vx = p.x - centroid.x;
+    const vy = p.y - centroid.y;
+    const error = Math.abs(vx * dy - vy * dx);
+    if (error > maxError) {
+      maxError = error;
+      maxErrorIndex = i;
     }
   }
-  const finalVertices = [];
-  for (let i = 0; i < newVertices.length; i++) {
-    if (!verticesToRemove.has(i) || newVertices[i] !== path.vertices[i]) {
-      finalVertices.push(newVertices[i]);
-    }
-  }
-  if (cornersSharpened > 0) {
-    console.log(`Sharpened ${cornersSharpened} corners in path`);
-  }
+  return { direction, centroid, maxError, maxErrorIndex };
+}
+function projectOntoLine(point, linePoint, direction) {
+  const vx = point.x - linePoint.x;
+  const vy = point.y - linePoint.y;
+  const t = vx * direction.x + vy * direction.y;
   return {
-    vertices: finalVertices,
-    closed: path.closed
+    x: linePoint.x + t * direction.x,
+    y: linePoint.y + t * direction.y
   };
 }
-function findLineIntersection(p1, p2, p3, p4) {
-  const x1 = p1.x, y1 = p1.y;
-  const x2 = p2.x, y2 = p2.y;
-  const x3 = p3.x, y3 = p3.y;
-  const x4 = p4.x, y4 = p4.y;
-  const denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
-  if (Math.abs(denom) < 1e-4) return null;
-  const x = ((x1 * y2 - y1 * x2) * (x3 - x4) - (x1 - x2) * (x3 * y4 - y3 * x4)) / denom;
-  const y = ((x1 * y2 - y1 * x2) * (y3 - y4) - (y1 - y2) * (x3 * y4 - y3 * x4)) / denom;
-  return { x, y };
+function findLineIntersection(a1, a2, b1, b2) {
+  const dx1 = a2.x - a1.x;
+  const dy1 = a2.y - a1.y;
+  const dx2 = b2.x - b1.x;
+  const dy2 = b2.y - b1.y;
+  const denom = dx1 * dy2 - dy1 * dx2;
+  if (Math.abs(denom) < 1e-10) {
+    return {
+      x: Math.round((a2.x + b1.x) / 2),
+      y: Math.round((a2.y + b1.y) / 2)
+    };
+  }
+  const dx3 = b1.x - a1.x;
+  const dy3 = b1.y - a1.y;
+  const t = (dx3 * dy2 - dy3 * dx2) / denom;
+  return {
+    x: Math.round(a1.x + t * dx1),
+    y: Math.round(a1.y + t * dy1)
+  };
 }
 function douglasPeucker(path, vertices, epsilon) {
   if (path.vertices.length <= 2) {
@@ -3373,7 +3410,10 @@ function douglasPeuckerRecursive(points, epsilon) {
     }
   }
   if (maxDistance > epsilon) {
-    const left = douglasPeuckerRecursive(points.slice(0, maxIndex + 1), epsilon);
+    const left = douglasPeuckerRecursive(
+      points.slice(0, maxIndex + 1),
+      epsilon
+    );
     const right = douglasPeuckerRecursive(points.slice(maxIndex), epsilon);
     return [...left.slice(0, -1), ...right];
   } else {
@@ -3384,9 +3424,13 @@ function perpendicularDistance(point, lineStart, lineEnd) {
   const dx = lineEnd.x - lineStart.x;
   const dy = lineEnd.y - lineStart.y;
   if (dx === 0 && dy === 0) {
-    return Math.sqrt((point.x - lineStart.x) ** 2 + (point.y - lineStart.y) ** 2);
+    return Math.sqrt(
+      (point.x - lineStart.x) ** 2 + (point.y - lineStart.y) ** 2
+    );
   }
-  const numerator = Math.abs(dy * point.x - dx * point.y + lineEnd.x * lineStart.y - lineEnd.y * lineStart.x);
+  const numerator = Math.abs(
+    dy * point.x - dx * point.y + lineEnd.x * lineStart.y - lineEnd.y * lineStart.x
+  );
   const denominator = Math.sqrt(dx * dx + dy * dy);
   return numerator / denominator;
 }
@@ -3398,27 +3442,27 @@ function isPixelSet(binary, x, y) {
   return (binary.data[byteIndex] & 1 << bitIndex) !== 0;
 }
 function renderVectorizedToSVG(vectorized, svgElement) {
-  const { width, height, paths, vertices } = vectorized;
+  const { width, height, paths } = vectorized;
   svgElement.setAttribute("width", width.toString());
   svgElement.setAttribute("height", height.toString());
   svgElement.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svgElement.style.display = "block";
   svgElement.innerHTML = "";
   for (const path of paths) {
-    if (path.vertices.length === 0) continue;
-    const firstVertex = vertices.get(path.vertices[0]);
-    if (!firstVertex) continue;
-    let pathData = `M ${firstVertex.x + 0.5} ${firstVertex.y + 0.5}`;
-    for (let i = 1; i < path.vertices.length; i++) {
-      const vertex = vertices.get(path.vertices[i]);
-      if (vertex) {
-        pathData += ` L ${vertex.x + 0.5} ${vertex.y + 0.5}`;
-      }
+    if (path.points.length === 0) continue;
+    const firstPoint = path.points[0];
+    let pathData = `M ${firstPoint.x + 0.5} ${firstPoint.y + 0.5}`;
+    for (let i = 1; i < path.points.length; i++) {
+      const point = path.points[i];
+      pathData += ` L ${point.x + 0.5} ${point.y + 0.5}`;
     }
     if (path.closed) {
       pathData += " Z";
     }
-    const pathElement = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    const pathElement = document.createElementNS(
+      "http://www.w3.org/2000/svg",
+      "path"
+    );
     pathElement.setAttribute("d", pathData);
     pathElement.setAttribute("fill", "none");
     pathElement.setAttribute("stroke", "red");
@@ -3426,22 +3470,19 @@ function renderVectorizedToSVG(vectorized, svgElement) {
     pathElement.setAttribute("vector-effect", "non-scaling-stroke");
     svgElement.appendChild(pathElement);
   }
-  const usedVertexIds = /* @__PURE__ */ new Set();
   for (const path of paths) {
-    for (const vid of path.vertices) {
-      usedVertexIds.add(vid);
+    for (const point of path.points) {
+      const circle = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "circle"
+      );
+      circle.setAttribute("cx", (point.x + 0.5).toString());
+      circle.setAttribute("cy", (point.y + 0.5).toString());
+      circle.setAttribute("r", "0.5");
+      circle.setAttribute("fill", "#00aa00");
+      circle.setAttribute("vector-effect", "non-scaling-stroke");
+      svgElement.appendChild(circle);
     }
-  }
-  for (const vertexId of usedVertexIds) {
-    const vertex = vertices.get(vertexId);
-    if (!vertex) continue;
-    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    circle.setAttribute("cx", (vertex.x + 0.5).toString());
-    circle.setAttribute("cy", (vertex.y + 0.5).toString());
-    circle.setAttribute("r", "0.5");
-    circle.setAttribute("fill", "blue");
-    circle.setAttribute("vector-effect", "non-scaling-stroke");
-    svgElement.appendChild(circle);
   }
 }
 
@@ -3454,18 +3495,30 @@ var browserCanvasBackend = {
     return canvas;
   }
 };
-var uploadFileList = document.getElementById("uploadFileList");
+var uploadFileList = document.getElementById(
+  "uploadFileList"
+);
 var uploadBtn = document.getElementById("uploadBtn");
 var clearAllBtn = document.getElementById("clearAllBtn");
 var fileInput = document.getElementById("fileInput");
 var uploadScreen = document.getElementById("uploadScreen");
-var pageSelectionScreen = document.getElementById("pageSelectionScreen");
-var pdfFileName = document.getElementById("pdfFileName");
+var pageSelectionScreen = document.getElementById(
+  "pageSelectionScreen"
+);
+var pdfFileName = document.getElementById(
+  "pdfFileName"
+);
 var pageGrid = document.getElementById("pageGrid");
-var pageStatusText = document.getElementById("pageStatusText");
-var backToFilesBtn = document.getElementById("backToFilesBtn");
+var pageStatusText = document.getElementById(
+  "pageStatusText"
+);
+var backToFilesBtn = document.getElementById(
+  "backToFilesBtn"
+);
 var cropScreen = document.getElementById("cropScreen");
-var canvasContainer2 = document.getElementById("canvasContainer");
+var canvasContainer2 = document.getElementById(
+  "canvasContainer"
+);
 var mainCanvas2 = document.getElementById("mainCanvas");
 var ctx2 = mainCanvas2.getContext("2d");
 var cropOverlay2 = document.getElementById("cropOverlay");
@@ -3473,48 +3526,118 @@ var cropCtx2 = cropOverlay2.getContext("2d");
 var zoomInBtn = document.getElementById("zoomInBtn");
 var zoomOutBtn = document.getElementById("zoomOutBtn");
 var zoomLevel2 = document.getElementById("zoomLevel");
-var fitToScreenBtn = document.getElementById("fitToScreenBtn");
-var clearCropBtn = document.getElementById("clearCropBtn");
+var fitToScreenBtn = document.getElementById(
+  "fitToScreenBtn"
+);
+var clearCropBtn = document.getElementById(
+  "clearCropBtn"
+);
 var cropInfo2 = document.getElementById("cropInfo");
 var processBtn = document.getElementById("processBtn");
 var statusText = document.getElementById("statusText");
-var resultsContainer = document.getElementById("resultsContainer");
+var resultsContainer = document.getElementById(
+  "resultsContainer"
+);
 var navStepFile = document.getElementById("navStepFile");
 var navStepPage = document.getElementById("navStepPage");
-var navStepConfigure = document.getElementById("navStepConfigure");
-var toggleToolbarBtn = document.getElementById("toggleToolbarBtn");
+var navStepConfigure = document.getElementById(
+  "navStepConfigure"
+);
+var toggleToolbarBtn = document.getElementById(
+  "toggleToolbarBtn"
+);
 var cropSidebar = document.getElementById("cropSidebar");
-var processSidebar = document.getElementById("processSidebar");
+var processSidebar = document.getElementById(
+  "processSidebar"
+);
 var paletteName = document.getElementById("paletteName");
-var addPaletteColorBtn = document.getElementById("addPaletteColorBtn");
-var resetPaletteBtn = document.getElementById("resetPaletteBtn");
-var savePaletteBtn = document.getElementById("savePaletteBtn");
-var loadPaletteBtn = document.getElementById("loadPaletteBtn");
-var setDefaultPaletteBtn = document.getElementById("setDefaultPaletteBtn");
-console.log("Palette buttons:", { addPaletteColorBtn, resetPaletteBtn, savePaletteBtn, loadPaletteBtn, setDefaultPaletteBtn });
-var processingScreen = document.getElementById("processingScreen");
-var processCanvasContainer = document.getElementById("processCanvasContainer");
-var processCanvas = document.getElementById("processCanvas");
+var addPaletteColorBtn = document.getElementById(
+  "addPaletteColorBtn"
+);
+var resetPaletteBtn = document.getElementById(
+  "resetPaletteBtn"
+);
+var savePaletteBtn = document.getElementById(
+  "savePaletteBtn"
+);
+var loadPaletteBtn = document.getElementById(
+  "loadPaletteBtn"
+);
+var setDefaultPaletteBtn = document.getElementById(
+  "setDefaultPaletteBtn"
+);
+console.log("Palette buttons:", {
+  addPaletteColorBtn,
+  resetPaletteBtn,
+  savePaletteBtn,
+  loadPaletteBtn,
+  setDefaultPaletteBtn
+});
+var processingScreen = document.getElementById(
+  "processingScreen"
+);
+var processCanvasContainer = document.getElementById(
+  "processCanvasContainer"
+);
+var processCanvas = document.getElementById(
+  "processCanvas"
+);
 var processCtx = processCanvas.getContext("2d");
-var processSvgOverlay = document.getElementById("processSvgOverlay");
-var processZoomInBtn = document.getElementById("processZoomInBtn");
-var processZoomOutBtn = document.getElementById("processZoomOutBtn");
-var processZoomLevel = document.getElementById("processZoomLevel");
-var processFitToScreenBtn = document.getElementById("processFitToScreenBtn");
-var processStatusText = document.getElementById("processStatusText");
-var stageCroppedBtn = document.getElementById("stageCroppedBtn");
-var stageExtractBlackBtn = document.getElementById("stageExtractBlackBtn");
-var stageSubtractBlackBtn = document.getElementById("stageSubtractBlackBtn");
-var stageValueBtn = document.getElementById("stageValueBtn");
-var stageSaturationBtn = document.getElementById("stageSaturationBtn");
-var stageSaturationMedianBtn = document.getElementById("stageSaturationMedianBtn");
+var processSvgOverlay = document.getElementById(
+  "processSvgOverlay"
+);
+var processZoomInBtn = document.getElementById(
+  "processZoomInBtn"
+);
+var processZoomOutBtn = document.getElementById(
+  "processZoomOutBtn"
+);
+var processZoomLevel = document.getElementById(
+  "processZoomLevel"
+);
+var processFitToScreenBtn = document.getElementById(
+  "processFitToScreenBtn"
+);
+var processStatusText = document.getElementById(
+  "processStatusText"
+);
+var stageCroppedBtn = document.getElementById(
+  "stageCroppedBtn"
+);
+var stageExtractBlackBtn = document.getElementById(
+  "stageExtractBlackBtn"
+);
+var stageSubtractBlackBtn = document.getElementById(
+  "stageSubtractBlackBtn"
+);
+var stageValueBtn = document.getElementById(
+  "stageValueBtn"
+);
+var stageSaturationBtn = document.getElementById(
+  "stageSaturationBtn"
+);
+var stageSaturationMedianBtn = document.getElementById(
+  "stageSaturationMedianBtn"
+);
 var stageHueBtn = document.getElementById("stageHueBtn");
-var stageHueMedianBtn = document.getElementById("stageHueMedianBtn");
-var stageCleanupBtn = document.getElementById("stageCleanupBtn");
-var stagePalettizedBtn = document.getElementById("stagePalettizedBtn");
-var stageMedianBtn = document.getElementById("stageMedianBtn");
-var colorStagesContainer = document.getElementById("colorStagesContainer");
-var vectorOverlayContainer = document.getElementById("vectorOverlayContainer");
+var stageHueMedianBtn = document.getElementById(
+  "stageHueMedianBtn"
+);
+var stageCleanupBtn = document.getElementById(
+  "stageCleanupBtn"
+);
+var stagePalettizedBtn = document.getElementById(
+  "stagePalettizedBtn"
+);
+var stageMedianBtn = document.getElementById(
+  "stageMedianBtn"
+);
+var colorStagesContainer = document.getElementById(
+  "colorStagesContainer"
+);
+var vectorOverlayContainer = document.getElementById(
+  "vectorOverlayContainer"
+);
 initCanvasElements({
   canvasContainer: canvasContainer2,
   mainCanvas: mainCanvas2,
@@ -3528,17 +3651,44 @@ initPaletteModule({
   showStatus,
   mainCanvas: mainCanvas2
 });
-stageCroppedBtn.addEventListener("click", () => displayProcessingStage("cropped"));
-stageExtractBlackBtn.addEventListener("click", () => displayProcessingStage("extract_black"));
-stageSubtractBlackBtn.addEventListener("click", () => displayProcessingStage("subtract_black"));
+stageCroppedBtn.addEventListener(
+  "click",
+  () => displayProcessingStage("cropped")
+);
+stageExtractBlackBtn.addEventListener(
+  "click",
+  () => displayProcessingStage("extract_black")
+);
+stageSubtractBlackBtn.addEventListener(
+  "click",
+  () => displayProcessingStage("subtract_black")
+);
 stageValueBtn.addEventListener("click", () => displayProcessingStage("value"));
-stageSaturationBtn.addEventListener("click", () => displayProcessingStage("saturation"));
-stageSaturationMedianBtn.addEventListener("click", () => displayProcessingStage("saturation_median"));
+stageSaturationBtn.addEventListener(
+  "click",
+  () => displayProcessingStage("saturation")
+);
+stageSaturationMedianBtn.addEventListener(
+  "click",
+  () => displayProcessingStage("saturation_median")
+);
 stageHueBtn.addEventListener("click", () => displayProcessingStage("hue"));
-stageHueMedianBtn.addEventListener("click", () => displayProcessingStage("hue_median"));
-stageCleanupBtn.addEventListener("click", () => displayProcessingStage("cleanup"));
-stagePalettizedBtn.addEventListener("click", () => displayProcessingStage("palettized"));
-stageMedianBtn.addEventListener("click", () => displayProcessingStage("median"));
+stageHueMedianBtn.addEventListener(
+  "click",
+  () => displayProcessingStage("hue_median")
+);
+stageCleanupBtn.addEventListener(
+  "click",
+  () => displayProcessingStage("cleanup")
+);
+stagePalettizedBtn.addEventListener(
+  "click",
+  () => displayProcessingStage("palettized")
+);
+stageMedianBtn.addEventListener(
+  "click",
+  () => displayProcessingStage("median")
+);
 processZoomInBtn.addEventListener("click", () => {
   state.processZoom = Math.min(10, state.processZoom * 1.2);
   updateProcessZoom();
@@ -3689,7 +3839,11 @@ canvasContainer2.addEventListener("mouseup", () => {
     state.isDraggingCropHandle = false;
     state.activeCropHandle = null;
     if (state.currentImage && state.cropRegion) {
-      saveCropSettings(state.currentImage.width, state.currentImage.height, state.cropRegion);
+      saveCropSettings(
+        state.currentImage.width,
+        state.currentImage.height,
+        state.cropRegion
+      );
       updateCropInfo();
     }
   }
@@ -3826,15 +3980,30 @@ function setMode(mode) {
     case "upload":
       uploadScreen.classList.add("active");
       console.log("Upload screen activated");
-      console.log("uploadScreen display:", globalThis.getComputedStyle(uploadScreen).display);
-      console.log("uploadScreen hasClass active:", uploadScreen.classList.contains("active"));
+      console.log(
+        "uploadScreen display:",
+        globalThis.getComputedStyle(uploadScreen).display
+      );
+      console.log(
+        "uploadScreen hasClass active:",
+        uploadScreen.classList.contains("active")
+      );
       break;
     case "pageSelection":
       pageSelectionScreen.classList.add("active");
       pageSelectionScreen.style.display = "flex";
-      console.log("Page selection screen activated, pageGrid children:", pageGrid.children.length);
-      console.log("pageSelectionScreen display:", globalThis.getComputedStyle(pageSelectionScreen).display);
-      console.log("pageSelectionScreen visibility:", globalThis.getComputedStyle(pageSelectionScreen).visibility);
+      console.log(
+        "Page selection screen activated, pageGrid children:",
+        pageGrid.children.length
+      );
+      console.log(
+        "pageSelectionScreen display:",
+        globalThis.getComputedStyle(pageSelectionScreen).display
+      );
+      console.log(
+        "pageSelectionScreen visibility:",
+        globalThis.getComputedStyle(pageSelectionScreen).visibility
+      );
       break;
     case "crop":
       cropScreen.classList.add("active");
@@ -3879,7 +4048,9 @@ async function handleFileUpload(file) {
     if (file.type === "application/pdf") {
       console.log("handleFileUpload: Detected PDF, calling loadPdf");
       await loadPdf(file);
-      console.log("handleFileUpload: loadPdf complete, switching to pageSelection mode");
+      console.log(
+        "handleFileUpload: loadPdf complete, switching to pageSelection mode"
+      );
       setMode("pageSelection");
     } else {
       console.log("handleFileUpload: Detected image, loading directly");
@@ -3920,10 +4091,16 @@ async function loadPdf(file) {
     console.log("loadPdf: pageGrid element:", pageGrid);
     const existingCards = pageGrid.children.length;
     if (existingCards > 0) {
-      console.log(`[THUMBNAIL] PURGING ${existingCards} existing thumbnail cards from cache`);
+      console.log(
+        `[THUMBNAIL] PURGING ${existingCards} existing thumbnail cards from cache`
+      );
     }
     pageGrid.innerHTML = "";
-    console.log("loadPdf: pageGrid cleared, adding", state.pdfPageCount, "cards");
+    console.log(
+      "loadPdf: pageGrid cleared, adding",
+      state.pdfPageCount,
+      "cards"
+    );
     const pageDimensions = [];
     let pageLabels = null;
     try {
@@ -3965,7 +4142,10 @@ async function loadPdf(file) {
     const thumbnailsToRender = Math.min(state.pdfPageCount, MAX_THUMBNAILS);
     state.cancelThumbnailLoading = false;
     (async () => {
-      const pagesBySize = Array.from({ length: state.pdfPageCount }, (_, i) => i).sort((a, b) => {
+      const pagesBySize = Array.from(
+        { length: state.pdfPageCount },
+        (_, i) => i
+      ).sort((a, b) => {
         const areaA = pageDimensions[a].width * pageDimensions[a].height;
         const areaB = pageDimensions[b].width * pageDimensions[b].height;
         return areaB - areaA;
@@ -3974,7 +4154,9 @@ async function loadPdf(file) {
       const addedPages = /* @__PURE__ */ new Set();
       let sequentialIndex = 0;
       let largestIndex = 0;
-      console.log(`[THUMBNAIL] Building render queue for ${thumbnailsToRender} thumbnails out of ${state.pdfPageCount} pages`);
+      console.log(
+        `[THUMBNAIL] Building render queue for ${thumbnailsToRender} thumbnails out of ${state.pdfPageCount} pages`
+      );
       while (renderQueue.length < thumbnailsToRender && (sequentialIndex < state.pdfPageCount || largestIndex < pagesBySize.length)) {
         if (sequentialIndex < state.pdfPageCount && renderQueue.length < thumbnailsToRender) {
           if (!addedPages.has(sequentialIndex)) {
@@ -3999,17 +4181,22 @@ async function loadPdf(file) {
           }
         }
       }
-      console.log(`[THUMBNAIL] Render queue built with ${renderQueue.length} pages:`, renderQueue.map((idx) => {
-        const pageNum = idx + 1;
-        const label = pageDimensions[idx]?.pageLabel || `Page ${pageNum}`;
-        return `${pageNum}(${label})`;
-      }).join(", "));
+      console.log(
+        `[THUMBNAIL] Render queue built with ${renderQueue.length} pages:`,
+        renderQueue.map((idx) => {
+          const pageNum = idx + 1;
+          const label = pageDimensions[idx]?.pageLabel || `Page ${pageNum}`;
+          return `${pageNum}(${label})`;
+        }).join(", ")
+      );
       const batchSize = 3;
       let completed = 0;
       const allCards = Array.from(pageGrid.children);
       for (let i = 0; i < renderQueue.length; i += batchSize) {
         if (state.cancelThumbnailLoading) {
-          console.log(`[THUMBNAIL] Loading cancelled after ${completed} thumbnails`);
+          console.log(
+            `[THUMBNAIL] Loading cancelled after ${completed} thumbnails`
+          );
           showStatus(`Thumbnail loading cancelled`);
           return;
         }
@@ -4021,26 +4208,38 @@ async function loadPdf(file) {
           const pageLabel = pageDimensions[pageIndex]?.pageLabel || `Page ${pageNum}`;
           if (pageIndex < allCards.length) {
             const card = allCards[pageIndex];
-            const imageDiv = card.querySelector(".page-card-image");
+            const imageDiv = card.querySelector(
+              ".page-card-image"
+            );
             if (imageDiv) {
               batchInfo.push(`${pageNum}(${pageLabel})`);
               batch.push(generatePageThumbnail(pageNum, pageLabel, imageDiv));
             } else {
-              console.warn(`[THUMBNAIL] No imageDiv found for page ${pageNum}(${pageLabel}) at index ${pageIndex}`);
+              console.warn(
+                `[THUMBNAIL] No imageDiv found for page ${pageNum}(${pageLabel}) at index ${pageIndex}`
+              );
             }
           } else {
-            console.warn(`[THUMBNAIL] Page index ${pageIndex} out of bounds (cards.length=${allCards.length}) for page ${pageNum}`);
+            console.warn(
+              `[THUMBNAIL] Page index ${pageIndex} out of bounds (cards.length=${allCards.length}) for page ${pageNum}`
+            );
           }
         }
         if (batch.length > 0) {
-          console.log(`[THUMBNAIL] Batch ${Math.floor(i / batchSize) + 1}: Rendering ${batchInfo.join(", ")}`);
+          console.log(
+            `[THUMBNAIL] Batch ${Math.floor(i / batchSize) + 1}: Rendering ${batchInfo.join(", ")}`
+          );
           await Promise.all(batch);
           completed += batch.length;
-          console.log(`[THUMBNAIL] Batch complete. Total: ${completed}/${renderQueue.length}`);
+          console.log(
+            `[THUMBNAIL] Batch complete. Total: ${completed}/${renderQueue.length}`
+          );
           const statusMsg = thumbnailsToRender < state.pdfPageCount ? `Loading thumbnails: ${completed}/${thumbnailsToRender} (${state.pdfPageCount} pages total)` : `Loading thumbnails: ${completed}/${state.pdfPageCount}`;
           showStatus(statusMsg);
         } else {
-          console.warn(`[THUMBNAIL] Batch ${Math.floor(i / batchSize) + 1}: No valid thumbnails to render`);
+          console.warn(
+            `[THUMBNAIL] Batch ${Math.floor(i / batchSize) + 1}: No valid thumbnails to render`
+          );
         }
       }
       const finalMsg = thumbnailsToRender < state.pdfPageCount ? `PDF loaded: ${state.pdfPageCount} pages (showing ${thumbnailsToRender} thumbnails)` : `PDF loaded: ${state.pdfPageCount} pages`;
@@ -4065,7 +4264,9 @@ async function generatePageThumbnail(pageNum, pageLabel, container) {
       browserCanvasBackend,
       pdfjsLib
     );
-    console.log(`[THUMBNAIL] RENDERED page ${pageNum}(${pageLabel}): ${image.width}x${image.height}`);
+    console.log(
+      `[THUMBNAIL] RENDERED page ${pageNum}(${pageLabel}): ${image.width}x${image.height}`
+    );
     const aspectRatio = image.width / image.height;
     container.style.aspectRatio = aspectRatio.toString();
     container.style.width = 250 * aspectRatio + "px";
@@ -4084,10 +4285,15 @@ async function generatePageThumbnail(pageNum, pageLabel, container) {
       img.src = canvas.toDataURL();
       container.innerHTML = "";
       container.appendChild(img);
-      console.log(`[THUMBNAIL] COMPLETE page ${pageNum}(${pageLabel}) - image inserted into DOM`);
+      console.log(
+        `[THUMBNAIL] COMPLETE page ${pageNum}(${pageLabel}) - image inserted into DOM`
+      );
     }
   } catch (err) {
-    console.error(`[THUMBNAIL] ERROR generating thumbnail for page ${pageNum}(${pageLabel}):`, err);
+    console.error(
+      `[THUMBNAIL] ERROR generating thumbnail for page ${pageNum}(${pageLabel}):`,
+      err
+    );
   }
 }
 async function selectPdfPage(pageNum) {
@@ -4119,7 +4325,9 @@ async function selectPdfPage(pageNum) {
     let progressDots = 0;
     const progressInterval = setInterval(() => {
       progressDots = (progressDots + 1) % 4;
-      showStatus(`\u23F3 Rendering page ${pageNum} at 200 DPI${".".repeat(progressDots)}`);
+      showStatus(
+        `\u23F3 Rendering page ${pageNum} at 200 DPI${".".repeat(progressDots)}`
+      );
     }, 300);
     console.log("selectPdfPage: Creating copy");
     const pdfDataCopy = state.currentPdfData.slice();
@@ -4221,7 +4429,9 @@ async function startProcessing() {
     const extractBlackStart = performance.now();
     const extractedBlack = await extractBlackGPU(processImage, 0.2);
     const extractBlackEnd = performance.now();
-    showStatus(`Extract black: ${(extractBlackEnd - extractBlackStart).toFixed(1)}ms`);
+    showStatus(
+      `Extract black: ${(extractBlackEnd - extractBlackStart).toFixed(1)}ms`
+    );
     state.processedImages.set("extract_black", extractedBlack);
     displayProcessingStage("extract_black");
     const color1Buffer = await binaryToGPUBuffer(extractedBlack);
@@ -4254,7 +4464,10 @@ async function startProcessing() {
     showStatus(`Cleanup: ${(t2 - t1).toFixed(1)}ms`);
     state.processedImages.set("value", cleanupResults.value);
     state.processedImages.set("saturation", cleanupResults.saturation);
-    state.processedImages.set("saturation_median", cleanupResults.saturationMedian);
+    state.processedImages.set(
+      "saturation_median",
+      cleanupResults.saturationMedian
+    );
     state.processedImages.set("hue", cleanupResults.hue);
     state.processedImages.set("hue_median", cleanupResults.hueMedian);
     showStatus("Recombining channels...");
@@ -4295,7 +4508,11 @@ async function startProcessing() {
       outputPalette[i * 4 + 3] = a;
     }
     const outputPaletteU32 = new Uint32Array(16);
-    const outputView = new DataView(outputPalette.buffer, outputPalette.byteOffset, outputPalette.byteLength);
+    const outputView = new DataView(
+      outputPalette.buffer,
+      outputPalette.byteOffset,
+      outputPalette.byteLength
+    );
     for (let i = 0; i < 16; i++) {
       outputPaletteU32[i] = outputView.getUint32(i * 4, true);
     }
@@ -4355,7 +4572,10 @@ function addColorStageButtons() {
     colorBtn.className = "stage-btn";
     colorBtn.textContent = `Color ${i}`;
     colorBtn.style.borderLeft = `4px solid ${color.outputColor}`;
-    colorBtn.addEventListener("click", () => displayProcessingStage(`color_${i}`));
+    colorBtn.addEventListener(
+      "click",
+      () => displayProcessingStage(`color_${i}`)
+    );
     colorStagesContainer.appendChild(colorBtn);
     if (state.processedImages.has(`color_${i}_skel`)) {
       const skelBtn = document.createElement("button");
@@ -4363,7 +4583,10 @@ function addColorStageButtons() {
       skelBtn.textContent = `Color ${i} Skel`;
       skelBtn.style.borderLeft = `4px solid ${color.outputColor}`;
       skelBtn.dataset.stage = `color_${i}_skel`;
-      skelBtn.addEventListener("click", () => displayProcessingStage(`color_${i}_skel`));
+      skelBtn.addEventListener(
+        "click",
+        () => displayProcessingStage(`color_${i}_skel`)
+      );
       colorStagesContainer.appendChild(skelBtn);
       const vecStage = `color_${i}_vec`;
       const vecToggle = document.createElement("button");
@@ -4394,7 +4617,9 @@ function toggleVectorOverlay(vecStage) {
       return;
     }
     let binaryImage;
-    const expectedBinaryLength = Math.ceil(skelImage.width * skelImage.height / 8);
+    const expectedBinaryLength = Math.ceil(
+      skelImage.width * skelImage.height / 8
+    );
     if (skelImage.data instanceof Uint8ClampedArray && skelImage.data.length === skelImage.width * skelImage.height * 4) {
       console.log(`Converting ${skelStage} from RGBA to binary format`);
       binaryImage = rgbaToBinary(skelImage);
@@ -4409,17 +4634,34 @@ function toggleVectorOverlay(vecStage) {
     vectorized = vectorizeSkeleton(binaryImage);
     state.vectorizedImages.set(vecStage, vectorized);
     const vectorizeEnd = performance.now();
-    console.log(`Vectorized: ${vectorized.paths.length} paths, ${vectorized.vertices.size} vertices (${(vectorizeEnd - vectorizeStart).toFixed(1)}ms)`);
+    const totalPoints2 = vectorized.paths.reduce(
+      (sum, p) => sum + p.points.length,
+      0
+    );
+    console.log(
+      `Vectorized: ${vectorized.paths.length} paths, ${totalPoints2} points (${(vectorizeEnd - vectorizeStart).toFixed(1)}ms)`
+    );
   }
   state.vectorOverlayEnabled = true;
   state.vectorOverlayStage = vecStage;
   const currentImage = state.processedImages.get(state.currentStage);
   if (currentImage) {
-    renderVectorizedToSVG(vectorized, processSvgOverlay, currentImage.width, currentImage.height);
+    renderVectorizedToSVG(
+      vectorized,
+      processSvgOverlay,
+      currentImage.width,
+      currentImage.height
+    );
     processSvgOverlay.style.display = "block";
   }
   updateVectorOverlayButtons();
-  showStatus(`Vector overlay: ${vectorized.paths.length} paths, ${vectorized.vertices.size} vertices`);
+  const totalPoints = vectorized.paths.reduce(
+    (sum, p) => sum + p.points.length,
+    0
+  );
+  showStatus(
+    `Vector overlay: ${vectorized.paths.length} paths, ${totalPoints} points`
+  );
 }
 function updateVectorOverlayButtons() {
   vectorOverlayContainer.querySelectorAll(".stage-btn").forEach((btn) => {
@@ -4442,7 +4684,9 @@ function displayProcessingStage(stage) {
         return;
       }
       let binaryImage;
-      const expectedBinaryLength = Math.ceil(skelImage2.width * skelImage2.height / 8);
+      const expectedBinaryLength = Math.ceil(
+        skelImage2.width * skelImage2.height / 8
+      );
       if (skelImage2.data instanceof Uint8ClampedArray && skelImage2.data.length === skelImage2.width * skelImage2.height * 4) {
         console.log(`Converting ${skelStage2} from RGBA to binary format`);
         binaryImage = rgbaToBinary(skelImage2);
@@ -4463,10 +4707,18 @@ function displayProcessingStage(stage) {
       vectorized = vectorizeSkeleton(binaryImage);
       state.vectorizedImages.set(stage, vectorized);
       const vectorizeEnd = performance.now();
-      showStatus(`Vectorized: ${vectorized.paths.length} paths, ${vectorized.vertices.size} vertices (${(vectorizeEnd - vectorizeStart).toFixed(1)}ms)`);
+      const totalPoints2 = vectorized.paths.reduce(
+        (sum, p) => sum + p.points.length,
+        0
+      );
+      showStatus(
+        `Vectorized: ${vectorized.paths.length} paths, ${totalPoints2} points (${(vectorizeEnd - vectorizeStart).toFixed(1)}ms)`
+      );
     }
     state.currentStage = stage;
-    document.querySelectorAll(".stage-btn").forEach((btn2) => btn2.classList.remove("active"));
+    document.querySelectorAll(".stage-btn").forEach(
+      (btn2) => btn2.classList.remove("active")
+    );
     const btn = Array.from(document.querySelectorAll(".stage-btn")).find(
       (b) => b.dataset.stage === stage
     );
@@ -4493,7 +4745,11 @@ function displayProcessingStage(stage) {
           rgbaData2[i * 4 + 3] = 255;
         }
       }
-      const imageData2 = new ImageData(rgbaData2, skelImage.width, skelImage.height);
+      const imageData2 = new ImageData(
+        rgbaData2,
+        skelImage.width,
+        skelImage.height
+      );
       processCtx.putImageData(imageData2, 0, 0);
     }
     renderVectorizedToSVG(vectorized, processSvgOverlay);
@@ -4503,7 +4759,13 @@ function displayProcessingStage(stage) {
     } else {
       updateProcessTransform();
     }
-    showStatus(`Viewing: ${stage} (${vectorized.paths.length} paths, ${vectorized.vertices.size} vertices)`);
+    const totalPoints = vectorized.paths.reduce(
+      (sum, p) => sum + p.points.length,
+      0
+    );
+    showStatus(
+      `Viewing: ${stage} (${vectorized.paths.length} paths, ${totalPoints} points)`
+    );
     return;
   }
   const image = state.processedImages.get(stage);
@@ -4515,11 +4777,18 @@ function displayProcessingStage(stage) {
   if (state.vectorOverlayEnabled && state.vectorOverlayStage) {
     const vectorized = state.vectorizedImages.get(state.vectorOverlayStage);
     if (vectorized) {
-      renderVectorizedToSVG(vectorized, processSvgOverlay, image.width, image.height);
+      renderVectorizedToSVG(
+        vectorized,
+        processSvgOverlay,
+        image.width,
+        image.height
+      );
       processSvgOverlay.style.display = "block";
     }
   }
-  document.querySelectorAll(".stage-btn").forEach((btn) => btn.classList.remove("active"));
+  document.querySelectorAll(".stage-btn").forEach(
+    (btn) => btn.classList.remove("active")
+  );
   if (typeof stage === "string" && stage.startsWith("color_")) {
     const btn = Array.from(document.querySelectorAll(".stage-btn")).find(
       (b) => b.textContent?.toLowerCase().replace(" ", "_").includes(stage)
@@ -4673,7 +4942,9 @@ async function refreshFileList() {
     return;
   }
   uploadFileList.innerHTML = `<div class="files-grid"></div>`;
-  const filesGrid = uploadFileList.querySelector(".files-grid");
+  const filesGrid = uploadFileList.querySelector(
+    ".files-grid"
+  );
   for (const file of files) {
     const item = document.createElement("div");
     item.className = "file-card";
