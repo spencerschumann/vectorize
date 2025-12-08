@@ -3186,6 +3186,25 @@ function segmentedLinearRegression(path, vertices, width, epsilon) {
     const last = coords[coords.length - 1];
     if (first.x === last.x && first.y === last.y) {
       coords = coords.slice(0, -1);
+      if (coords.length > 2) {
+        const cx = coords.reduce((sum, p) => sum + p.x, 0) / coords.length;
+        const cy = coords.reduce((sum, p) => sum + p.y, 0) / coords.length;
+        let maxDist = 0;
+        let maxDistIndex = 0;
+        for (let i = 0; i < coords.length; i++) {
+          const dx = coords[i].x - cx;
+          const dy = coords[i].y - cy;
+          const dist = dx * dx + dy * dy;
+          if (dist > maxDist) {
+            maxDist = dist;
+            maxDistIndex = i;
+          }
+        }
+        coords = [
+          ...coords.slice(maxDistIndex),
+          ...coords.slice(0, maxDistIndex)
+        ];
+      }
     }
   }
   const simplified = slrRecursive(coords, epsilon, width, wasClosed);

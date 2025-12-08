@@ -267,11 +267,37 @@ export function segmentedLinearRegression(
   // For closed paths, remove the duplicate endpoint before processing
   let wasClosed = path.closed;
   if (wasClosed && coords.length > 2) {
-    // TODO: improve this by splitting at the point furthest from the start/end
     const first = coords[0];
     const last = coords[coords.length - 1];
     if (first.x === last.x && first.y === last.y) {
       coords = coords.slice(0, -1); // Remove duplicate endpoint
+
+      // Reorder the path to start at the point furthest from the centroid
+      // This provides a better split point for the recursive algorithm
+      if (coords.length > 2) {
+        const cx = coords.reduce((sum, p) => sum + p.x, 0) / coords.length;
+        const cy = coords.reduce((sum, p) => sum + p.y, 0) / coords.length;
+
+        let maxDist = 0;
+        let maxDistIndex = 0;
+
+        for (let i = 0; i < coords.length; i++) {
+          const dx = coords[i].x - cx;
+          const dy = coords[i].y - cy;
+          const dist = dx * dx + dy * dy; // No need for sqrt, just comparing
+
+          if (dist > maxDist) {
+            maxDist = dist;
+            maxDistIndex = i;
+          }
+        }
+
+        // Rotate the array so the furthest point is first
+        coords = [
+          ...coords.slice(maxDistIndex),
+          ...coords.slice(0, maxDistIndex),
+        ];
+      }
     }
   }
 
