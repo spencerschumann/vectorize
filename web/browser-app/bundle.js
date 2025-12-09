@@ -3027,6 +3027,112 @@ function forceDeactivateEyedropper() {
   }
 }
 
+// browser-app/primitives/circle.ts
+function detectCircle(path, vertices, epsilon) {
+  if (!path.closed || path.vertices.length < 4) {
+    return null;
+  }
+  const coords = path.vertices.map((id) => vertices.get(id));
+  let points = coords;
+  if (coords.length > 1) {
+    const first = coords[0];
+    const last = coords[coords.length - 1];
+    if (first.x === last.x && first.y === last.y) {
+      points = coords.slice(0, -1);
+    }
+  }
+  if (points.length < 4) {
+    return null;
+  }
+  const circle = fitCircleLeastSquares(points);
+  if (!circle) {
+    return null;
+  }
+  const distancesSquared = points.map((p) => {
+    const dx = p.x - circle.cx;
+    const dy = p.y - circle.cy;
+    return dx * dx + dy * dy;
+  });
+  const radiusSquared = circle.radius * circle.radius;
+  const minRadiusSquared = (circle.radius - epsilon) * (circle.radius - epsilon);
+  const maxRadiusSquared = (circle.radius + epsilon) * (circle.radius + epsilon);
+  const minRadiusSquared2x = (circle.radius - 2 * epsilon) * (circle.radius - 2 * epsilon);
+  const maxRadiusSquared2x = (circle.radius + 2 * epsilon) * (circle.radius + 2 * epsilon);
+  const withinEpsilon = distancesSquared.filter(
+    (d) => d >= minRadiusSquared && d <= maxRadiusSquared
+  ).length;
+  const allWithin2Epsilon = distancesSquared.every(
+    (d) => d >= minRadiusSquared2x && d <= maxRadiusSquared2x
+  );
+  const percentileThreshold = 0.9;
+  const isCircle = withinEpsilon / distancesSquared.length >= percentileThreshold && allWithin2Epsilon;
+  console.log(
+    `Circle detection: path with ${points.length} points, fitted radius ${circle.radius.toFixed(2)}, center (${circle.cx.toFixed(2)}, ${circle.cy.toFixed(2)}), ${(withinEpsilon / distancesSquared.length * 100).toFixed(1)}% within epsilon, all within 2x epsilon => ${isCircle ? "CIRCLE" : "not a circle"}`
+  );
+  if (isCircle) {
+    return {
+      cx: circle.cx + 0.5,
+      // Shift by 0.5 to align with pixel centers
+      cy: circle.cy + 0.5,
+      radius: circle.radius
+    };
+  }
+  return null;
+}
+function fitCircleLeastSquares(points) {
+  const n = points.length;
+  let mx = 0;
+  let my = 0;
+  for (const p of points) {
+    mx += p.x;
+    my += p.y;
+  }
+  mx /= n;
+  my /= n;
+  const centeredPoints = points.map((p) => ({
+    x: p.x - mx,
+    y: p.y - my
+  }));
+  let Sxx = 0, Sxy = 0, Syy = 0, Sx = 0, Sy = 0;
+  let Sxxx = 0, Sxyy = 0, Syyy = 0, Sxxy = 0;
+  for (const p of centeredPoints) {
+    const x = p.x;
+    const y = p.y;
+    const x2 = x * x;
+    const y2 = y * y;
+    Sxx += x2;
+    Sxy += x * y;
+    Syy += y2;
+    Sx += x;
+    Sy += y;
+    Sxxx += x * x2;
+    Sxyy += x * y2;
+    Syyy += y * y2;
+    Sxxy += x2 * y;
+  }
+  const b1 = Sxxx + Sxyy;
+  const b2 = Syyy + Sxxy;
+  const b3 = Sxx + Syy;
+  const det = Sxx * (Syy * n - Sy * Sy) - Sxy * (Sxy * n - Sx * Sy) + Sx * (Sxy * Sy - Syy * Sx);
+  if (Math.abs(det) < 1e-10) {
+    return null;
+  }
+  const detA = b1 * (Syy * n - Sy * Sy) - Sxy * (b2 * n - b3 * Sy) + Sx * (b2 * Sy - Syy * b3);
+  const a = detA / det / 2;
+  const detB = Sxx * (b2 * n - b3 * Sy) - b1 * (Sxy * n - Sx * Sy) + Sx * (Sxy * b3 - b2 * Sx);
+  const b = detB / det / 2;
+  const detC = Sxx * (Syy * b3 - Sy * b2) - Sxy * (Sxy * b3 - Sx * b2) + b1 * (Sxy * Sy - Syy * Sx);
+  const c = detC / det;
+  const cx = a + mx;
+  const cy = b + my;
+  const r2 = c + a * a + b * b;
+  if (r2 <= 0) {
+    return null;
+  }
+  const radius = Math.sqrt(r2);
+  return { cx, cy, radius };
+}
+
 // browser-app/vectorize.ts
 function vectorizeSkeleton(binary) {
   const { width, height } = binary;
@@ -3142,14 +3248,22 @@ function vectorizeSkeleton(binary) {
       }
     }
   }
-  const dpPaths = paths.map((path) => douglasPeucker(path, vertices, 0.1));
+  const circleEpsilon = 1.4;
+  const circleResults = paths.map(
+    (path) => detectCircle(path, vertices, circleEpsilon)
+  );
+  const circleCount = circleResults.filter((r) => r !== null).length;
+  console.log(`Vectorization: Detected ${circleCount} circles`);
+  const dpPaths = paths.map(
+    (path, i) => circleResults[i] ? path : douglasPeucker(path, vertices, 0.1)
+  );
   const totalDPBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);
   const totalDPAfter = dpPaths.reduce((sum, p) => sum + p.vertices.length, 0);
   console.log(
     `Vectorization: DP pass simplified from ${totalDPBefore} to ${totalDPAfter} vertices`
   );
   const simplifiedPaths = dpPaths.map(
-    (path) => segmentedLinearRegression(path, vertices, width, 0.75)
+    (path, i) => circleResults[i] ? path : segmentedLinearRegression(path, vertices, width, 0.75)
   );
   const totalVerticesBefore = dpPaths.reduce(
     (sum, p) => sum + p.vertices.length,
@@ -3162,13 +3276,17 @@ function vectorizeSkeleton(binary) {
   console.log(
     `Vectorization: SLR simplified from ${totalVerticesBefore} to ${totalVerticesAfter} vertices (${((1 - totalVerticesAfter / totalVerticesBefore) * 100).toFixed(1)}% reduction)`
   );
-  const finalPaths = simplifiedPaths.map((path) => ({
-    points: path.vertices.map((id) => {
-      const v = vertices.get(id);
-      return v ? { x: v.x, y: v.y } : { x: 0, y: 0 };
-    }),
-    closed: path.closed
-  }));
+  const finalPaths = simplifiedPaths.map((path, i) => {
+    const circle = circleResults[i];
+    return {
+      points: path.vertices.map((id) => {
+        const v = vertices.get(id);
+        return v ? { x: v.x, y: v.y } : { x: 0, y: 0 };
+      }),
+      closed: path.closed,
+      circle: circle || void 0
+    };
+  });
   return {
     width,
     height,
@@ -3232,23 +3350,25 @@ function slrRecursive(points, epsilon, width, isClosed = false) {
     const end2 = points[points.length - 1];
     const projStart = projectOntoLine(start2, centroid, direction);
     const projEnd = projectOntoLine(end2, centroid, direction);
-    console.log(
-      `
+    if (false) {
+      console.log(
+        `
 === SLR: Good fit (error ${maxError.toFixed(2)} <= ${epsilon}) ===`
-    );
-    console.log(`Points: ${points.map((p) => `(${p.x},${p.y})`).join(", ")}`);
-    console.log(
-      `Centroid: (${centroid.x.toFixed(2)}, ${centroid.y.toFixed(2)})`
-    );
-    console.log(
-      `Direction: (${direction.x.toFixed(3)}, ${direction.y.toFixed(3)})`
-    );
-    console.log(
-      `Projected start: (${projStart.x.toFixed(2)}, ${projStart.y.toFixed(2)})`
-    );
-    console.log(
-      `Projected end: (${projEnd.x.toFixed(2)}, ${projEnd.y.toFixed(2)})`
-    );
+      );
+      console.log(`Points: ${points.map((p) => `(${p.x},${p.y})`).join(", ")}`);
+      console.log(
+        `Centroid: (${centroid.x.toFixed(2)}, ${centroid.y.toFixed(2)})`
+      );
+      console.log(
+        `Direction: (${direction.x.toFixed(3)}, ${direction.y.toFixed(3)})`
+      );
+      console.log(
+        `Projected start: (${projStart.x.toFixed(2)}, ${projStart.y.toFixed(2)})`
+      );
+      console.log(
+        `Projected end: (${projEnd.x.toFixed(2)}, ${projEnd.y.toFixed(2)})`
+      );
+    }
     const startId = projStart.y * width + projStart.x;
     const endId = projEnd.y * width + projEnd.x;
     return [
@@ -3468,39 +3588,67 @@ function renderVectorizedToSVG(vectorized, svgElement) {
   svgElement.style.display = "block";
   svgElement.innerHTML = "";
   for (const path of paths) {
-    if (path.points.length === 0) continue;
-    const firstPoint = path.points[0];
-    let pathData = `M ${firstPoint.x + 0.5} ${firstPoint.y + 0.5}`;
-    for (let i = 1; i < path.points.length; i++) {
-      const point = path.points[i];
-      pathData += ` L ${point.x + 0.5} ${point.y + 0.5}`;
-    }
-    if (path.closed) {
-      pathData += " Z";
-    }
-    const pathElement = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "path"
-    );
-    pathElement.setAttribute("d", pathData);
-    pathElement.setAttribute("fill", "none");
-    pathElement.setAttribute("stroke", "red");
-    pathElement.setAttribute("stroke-width", "0.5");
-    pathElement.setAttribute("vector-effect", "non-scaling-stroke");
-    svgElement.appendChild(pathElement);
-  }
-  for (const path of paths) {
-    for (const point of path.points) {
-      const circle = document.createElementNS(
+    if (path.circle) {
+      const circleElement = document.createElementNS(
         "http://www.w3.org/2000/svg",
         "circle"
       );
-      circle.setAttribute("cx", (point.x + 0.5).toString());
-      circle.setAttribute("cy", (point.y + 0.5).toString());
-      circle.setAttribute("r", "0.5");
-      circle.setAttribute("fill", "#00aa00");
-      circle.setAttribute("vector-effect", "non-scaling-stroke");
-      svgElement.appendChild(circle);
+      circleElement.setAttribute("cx", path.circle.cx.toString());
+      circleElement.setAttribute("cy", path.circle.cy.toString());
+      circleElement.setAttribute("r", path.circle.radius.toString());
+      circleElement.setAttribute("fill", "none");
+      circleElement.setAttribute("stroke", "red");
+      circleElement.setAttribute("stroke-width", "0.5");
+      circleElement.setAttribute("vector-effect", "non-scaling-stroke");
+      svgElement.appendChild(circleElement);
+    } else {
+      if (path.points.length === 0) continue;
+      const firstPoint = path.points[0];
+      let pathData = `M ${firstPoint.x + 0.5} ${firstPoint.y + 0.5}`;
+      for (let i = 1; i < path.points.length; i++) {
+        const point = path.points[i];
+        pathData += ` L ${point.x + 0.5} ${point.y + 0.5}`;
+      }
+      if (path.closed) {
+        pathData += " Z";
+      }
+      const pathElement = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "path"
+      );
+      pathElement.setAttribute("d", pathData);
+      pathElement.setAttribute("fill", "none");
+      pathElement.setAttribute("stroke", "red");
+      pathElement.setAttribute("stroke-width", "0.5");
+      pathElement.setAttribute("vector-effect", "non-scaling-stroke");
+      svgElement.appendChild(pathElement);
+    }
+  }
+  for (const path of paths) {
+    if (path.circle) {
+      const centerDot = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "circle"
+      );
+      centerDot.setAttribute("cx", path.circle.cx.toString());
+      centerDot.setAttribute("cy", path.circle.cy.toString());
+      centerDot.setAttribute("r", "0.5");
+      centerDot.setAttribute("fill", "#00aa00");
+      centerDot.setAttribute("vector-effect", "non-scaling-stroke");
+      svgElement.appendChild(centerDot);
+    } else {
+      for (const point of path.points) {
+        const circle = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          "circle"
+        );
+        circle.setAttribute("cx", (point.x + 0.5).toString());
+        circle.setAttribute("cy", (point.y + 0.5).toString());
+        circle.setAttribute("r", "0.5");
+        circle.setAttribute("fill", "#00aa00");
+        circle.setAttribute("vector-effect", "non-scaling-stroke");
+        svgElement.appendChild(circle);
+      }
     }
   }
 }

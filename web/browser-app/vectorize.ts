@@ -3,6 +3,7 @@
  */
 
 import type { BinaryImage } from "../src/formats/binary.ts";
+import { detectCircle } from "./primitives/circle.ts";
 
 export interface Vertex {
   x: number;
@@ -16,9 +17,16 @@ export interface VectorPath {
   closed: boolean;
 }
 
+export interface Circle {
+  cx: number;
+  cy: number;
+  radius: number;
+}
+
 export interface SimplifiedPath {
   points: Array<{ x: number; y: number }>; // Just coordinates after simplification
   closed: boolean;
+  circle?: Circle; // If this path represents a circle
 }
 
 export interface VectorizedImage {
@@ -204,17 +212,29 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
     }
   }
 
-  // First, run a light Douglas-Peucker pass to simplify trivial cases
-  const dpPaths = paths.map((path) => douglasPeucker(path, vertices, 0.1));
+  // Detect circles before simplification
+  const circleEpsilon = 1.4;
+  const circleResults = paths.map((path) =>
+    detectCircle(path, vertices, circleEpsilon)
+  );
+  const circleCount = circleResults.filter((r) => r !== null).length;
+  console.log(`Vectorization: Detected ${circleCount} circles`);
+
+  // First, run a light Douglas-Peucker pass to simplify trivial cases (skip circles)
+  const dpPaths = paths.map((path, i) =>
+    circleResults[i] ? path : douglasPeucker(path, vertices, 0.1)
+  );
   const totalDPBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);
   const totalDPAfter = dpPaths.reduce((sum, p) => sum + p.vertices.length, 0);
   console.log(
     `Vectorization: DP pass simplified from ${totalDPBefore} to ${totalDPAfter} vertices`,
   );
 
-  // Apply segmented linear regression to simplify paths
-  const simplifiedPaths = dpPaths.map((path) =>
-    segmentedLinearRegression(path, vertices, width, 0.75)
+  // Apply segmented linear regression to simplify paths (skip circles)
+  const simplifiedPaths = dpPaths.map((path, i) =>
+    circleResults[i]
+      ? path
+      : segmentedLinearRegression(path, vertices, width, 0.75)
   );
 
   const totalVerticesBefore = dpPaths.reduce(
@@ -232,13 +252,17 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
   );
 
   // Convert to SimplifiedPath (just coordinates, no IDs)
-  const finalPaths: SimplifiedPath[] = simplifiedPaths.map((path) => ({
-    points: path.vertices.map((id) => {
-      const v = vertices.get(id);
-      return v ? { x: v.x, y: v.y } : { x: 0, y: 0 }; // Fallback for missing vertices
-    }),
-    closed: path.closed,
-  }));
+  const finalPaths: SimplifiedPath[] = simplifiedPaths.map((path, i) => {
+    const circle = circleResults[i];
+    return {
+      points: path.vertices.map((id) => {
+        const v = vertices.get(id);
+        return v ? { x: v.x, y: v.y } : { x: 0, y: 0 }; // Fallback for missing vertices
+      }),
+      closed: path.closed,
+      circle: circle || undefined,
+    };
+  });
 
   return {
     width,
@@ -345,22 +369,26 @@ function slrRecursive(
     const projEnd = projectOntoLine(end, centroid, direction);
 
     // debug output: show points, centroid, direction,
-    console.log(
-      `\n=== SLR: Good fit (error ${maxError.toFixed(2)} <= ${epsilon}) ===`,
-    );
-    console.log(`Points: ${points.map((p) => `(${p.x},${p.y})`).join(", ")}`);
-    console.log(
-      `Centroid: (${centroid.x.toFixed(2)}, ${centroid.y.toFixed(2)})`,
-    );
-    console.log(
-      `Direction: (${direction.x.toFixed(3)}, ${direction.y.toFixed(3)})`,
-    );
-    console.log(
-      `Projected start: (${projStart.x.toFixed(2)}, ${projStart.y.toFixed(2)})`,
-    );
-    console.log(
-      `Projected end: (${projEnd.x.toFixed(2)}, ${projEnd.y.toFixed(2)})`,
-    );
+    if (false) {
+      console.log(
+        `\n=== SLR: Good fit (error ${maxError.toFixed(2)} <= ${epsilon}) ===`,
+      );
+      console.log(`Points: ${points.map((p) => `(${p.x},${p.y})`).join(", ")}`);
+      console.log(
+        `Centroid: (${centroid.x.toFixed(2)}, ${centroid.y.toFixed(2)})`,
+      );
+      console.log(
+        `Direction: (${direction.x.toFixed(3)}, ${direction.y.toFixed(3)})`,
+      );
+      console.log(
+        `Projected start: (${projStart.x.toFixed(2)}, ${
+          projStart.y.toFixed(2)
+        })`,
+      );
+      console.log(
+        `Projected end: (${projEnd.x.toFixed(2)}, ${projEnd.y.toFixed(2)})`,
+      );
+    }
 
     // Create new vertices for projected endpoints
     const startId = projStart.y * width + projStart.x;
@@ -712,49 +740,81 @@ export function renderVectorizedToSVG(
   // Clear existing paths
   svgElement.innerHTML = "";
 
-  // Draw each path as an SVG path element
+  // Draw each path as an SVG path element or circle
   for (const path of paths) {
-    if (path.points.length === 0) continue;
-
-    const firstPoint = path.points[0];
-
-    // Shift by 0.5 pixels to align with pixel centers
-    let pathData = `M ${firstPoint.x + 0.5} ${firstPoint.y + 0.5}`;
-
-    for (let i = 1; i < path.points.length; i++) {
-      const point = path.points[i];
-      pathData += ` L ${point.x + 0.5} ${point.y + 0.5}`;
-    }
-
-    if (path.closed) {
-      pathData += " Z";
-    }
-
-    const pathElement = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "path",
-    );
-    pathElement.setAttribute("d", pathData);
-    pathElement.setAttribute("fill", "none");
-    pathElement.setAttribute("stroke", "red");
-    pathElement.setAttribute("stroke-width", "0.5");
-    pathElement.setAttribute("vector-effect", "non-scaling-stroke");
-    svgElement.appendChild(pathElement);
-  }
-
-  // Draw vertices as circles
-  for (const path of paths) {
-    for (const point of path.points) {
-      const circle = document.createElementNS(
+    if (path.circle) {
+      // Render as actual SVG circle
+      const circleElement = document.createElementNS(
         "http://www.w3.org/2000/svg",
         "circle",
       );
-      circle.setAttribute("cx", (point.x + 0.5).toString());
-      circle.setAttribute("cy", (point.y + 0.5).toString());
-      circle.setAttribute("r", "0.5");
-      circle.setAttribute("fill", "#00aa00");
-      circle.setAttribute("vector-effect", "non-scaling-stroke");
-      svgElement.appendChild(circle);
+      circleElement.setAttribute("cx", path.circle.cx.toString());
+      circleElement.setAttribute("cy", path.circle.cy.toString());
+      circleElement.setAttribute("r", path.circle.radius.toString());
+      circleElement.setAttribute("fill", "none");
+      circleElement.setAttribute("stroke", "red");
+      circleElement.setAttribute("stroke-width", "0.5");
+      circleElement.setAttribute("vector-effect", "non-scaling-stroke");
+      svgElement.appendChild(circleElement);
+    } else {
+      // Render as path
+      if (path.points.length === 0) continue;
+
+      const firstPoint = path.points[0];
+
+      // Shift by 0.5 pixels to align with pixel centers
+      let pathData = `M ${firstPoint.x + 0.5} ${firstPoint.y + 0.5}`;
+
+      for (let i = 1; i < path.points.length; i++) {
+        const point = path.points[i];
+        pathData += ` L ${point.x + 0.5} ${point.y + 0.5}`;
+      }
+
+      if (path.closed) {
+        pathData += " Z";
+      }
+
+      const pathElement = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "path",
+      );
+      pathElement.setAttribute("d", pathData);
+      pathElement.setAttribute("fill", "none");
+      pathElement.setAttribute("stroke", "red");
+      pathElement.setAttribute("stroke-width", "0.5");
+      pathElement.setAttribute("vector-effect", "non-scaling-stroke");
+      svgElement.appendChild(pathElement);
+    }
+  }
+
+  // Draw vertices as circles (skip for detected circles)
+  for (const path of paths) {
+    if (path.circle) {
+      // For circles, just draw the center point
+      const centerDot = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "circle",
+      );
+      centerDot.setAttribute("cx", path.circle.cx.toString());
+      centerDot.setAttribute("cy", path.circle.cy.toString());
+      centerDot.setAttribute("r", "0.5");
+      centerDot.setAttribute("fill", "#00aa00");
+      centerDot.setAttribute("vector-effect", "non-scaling-stroke");
+      svgElement.appendChild(centerDot);
+    } else {
+      // For paths, draw all vertices
+      for (const point of path.points) {
+        const circle = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          "circle",
+        );
+        circle.setAttribute("cx", (point.x + 0.5).toString());
+        circle.setAttribute("cy", (point.y + 0.5).toString());
+        circle.setAttribute("r", "0.5");
+        circle.setAttribute("fill", "#00aa00");
+        circle.setAttribute("vector-effect", "non-scaling-stroke");
+        svgElement.appendChild(circle);
+      }
     }
   }
 }
