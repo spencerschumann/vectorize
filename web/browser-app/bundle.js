@@ -3664,23 +3664,125 @@ function vectorizeSkeleton(binary) {
   const finalPaths = simplifiedPaths.map((path, i) => {
     const circle = circleResults[i];
     const pathSegments = segmentedPaths[i];
-    const points = path.vertices.map((id) => {
+    const originalPath = paths[i];
+    const originalSkeletonPoints = originalPath.vertices.map((id) => {
       const v = vertices.get(id);
       return v ? { x: v.x, y: v.y } : { x: 0, y: 0 };
     });
-    const adjustedSegments = pathSegments.segments.map((seg, segIdx) => {
-      return {
-        ...seg,
-        startIndex: segIdx,
-        endIndex: segIdx + 1
-      };
-    });
+    console.log(`
+=== PATH ${i} DEBUG ===`);
+    console.log(`Original skeleton: ${originalSkeletonPoints.length} pixels`);
     console.log(
-      `[Path ${i}] ${points.length} points, ${adjustedSegments.length} segments:`
+      `  Points: ${originalSkeletonPoints.slice(0, 10).map((p) => `(${p.x},${p.y})`).join(
+        " "
+      )}${originalSkeletonPoints.length > 10 ? "..." : ""}`
     );
-    adjustedSegments.forEach((seg, idx) => {
+    console.log(
+      `Segments from incremental segmentation: ${pathSegments.segments.length}`
+    );
+    pathSegments.segments.forEach((seg, idx) => {
+      const segPoints = originalSkeletonPoints.slice(
+        seg.startIndex,
+        seg.endIndex + 1
+      );
       console.log(
-        `  Segment ${idx}: [${seg.startIndex}-${seg.endIndex}] type=${seg.type}`
+        `  Seg ${idx}: [${seg.startIndex}-${seg.endIndex}] type=${seg.type}, ${segPoints.length} skeleton pixels`
+      );
+      console.log(
+        `    Skeleton: ${segPoints.map((p) => `(${p.x},${p.y})`).join(" ")}`
+      );
+      if (seg.projectedStart) {
+        console.log(
+          `    Projected start: (${seg.projectedStart.x.toFixed(2)}, ${seg.projectedStart.y.toFixed(2)})`
+        );
+      }
+      if (seg.projectedEnd) {
+        console.log(
+          `    Projected end: (${seg.projectedEnd.x.toFixed(2)}, ${seg.projectedEnd.y.toFixed(2)})`
+        );
+      }
+    });
+    const points = [];
+    const adjustedSegments = [];
+    for (let segIdx = 0; segIdx < pathSegments.segments.length; segIdx++) {
+      const seg = pathSegments.segments[segIdx];
+      const startIdx = points.length;
+      const skeletonPoints = originalPath.vertices.slice(
+        seg.startIndex,
+        seg.endIndex + 1
+      ).map((id) => {
+        const v = vertices.get(id);
+        return v ? { x: v.x, y: v.y } : { x: 0, y: 0 };
+      });
+      if (seg.type === "arc" || seg.type === "line") {
+        if (seg.projectedStart && seg.projectedEnd) {
+          if (points.length === 0) {
+            points.push(seg.projectedStart);
+            points.push(seg.projectedEnd);
+          } else {
+            const lastPoint = points[points.length - 1];
+            const startMatches = Math.abs(lastPoint.x - seg.projectedStart.x) < 0.01 && Math.abs(lastPoint.y - seg.projectedStart.y) < 0.01;
+            if (!startMatches) {
+              points.push(seg.projectedStart);
+            }
+            points.push(seg.projectedEnd);
+          }
+          adjustedSegments.push({
+            ...seg,
+            startIndex: startIdx,
+            endIndex: points.length - 1
+          });
+        } else {
+          if (points.length === 0) {
+            points.push(...skeletonPoints);
+          } else {
+            const lastPoint = points[points.length - 1];
+            const firstSkeletonPoint = skeletonPoints[0];
+            if (lastPoint.x === firstSkeletonPoint.x && lastPoint.y === firstSkeletonPoint.y) {
+              points.push(...skeletonPoints.slice(1));
+            } else {
+              points.push(...skeletonPoints);
+            }
+          }
+          adjustedSegments.push({
+            ...seg,
+            startIndex: startIdx,
+            endIndex: points.length - 1
+          });
+        }
+      } else {
+        if (points.length === 0) {
+          points.push(...skeletonPoints);
+        } else {
+          const lastPoint = points[points.length - 1];
+          const firstSkeletonPoint = skeletonPoints[0];
+          if (lastPoint.x === firstSkeletonPoint.x && lastPoint.y === firstSkeletonPoint.y) {
+            points.push(...skeletonPoints.slice(1));
+          } else {
+            points.push(...skeletonPoints);
+          }
+        }
+        adjustedSegments.push({
+          ...seg,
+          startIndex: startIdx,
+          endIndex: points.length - 1
+        });
+      }
+    }
+    console.log(`Final output points: ${points.length}`);
+    console.log(
+      `  Points: ${points.slice(0, 10).map((p) => `(${p.x.toFixed(2)},${p.y.toFixed(2)})`).join(" ")}${points.length > 10 ? "..." : ""}`
+    );
+    console.log(`Adjusted segments: ${adjustedSegments.length}`);
+    adjustedSegments.forEach((seg, idx) => {
+      const segPoints = points.slice(seg.startIndex, seg.endIndex + 1);
+      console.log(
+        `  Segment ${idx}: [${seg.startIndex}-${seg.endIndex}] type=${seg.type}, ${segPoints.length} points`
+      );
+      console.log(
+        `    Output: ${segPoints.map((p) => `(${p.x.toFixed(2)},${p.y.toFixed(2)})`).join(
+          " "
+        )}`
       );
     });
     return {
@@ -3738,7 +3840,6 @@ function renderVectorizedToSVG(vectorized, svgElement) {
         ` Path ${pathIdx}: ${path.segments.length} segments, ${path.closed ? "closed" : "open"} `
       );
       svgElement.appendChild(pathComment);
-      let currentPoint = path.segments[0].projectedStart || path.points[0];
       for (let segIdx = 0; segIdx < path.segments.length; segIdx++) {
         const segment = path.segments[segIdx];
         const segPoints = path.points.slice(
@@ -3746,18 +3847,21 @@ function renderVectorizedToSVG(vectorized, svgElement) {
           segment.endIndex + 1
         );
         if (segPoints.length === 0) continue;
-        let segmentPathData = `M ${currentPoint.x + 0.5} ${currentPoint.y + 0.5}`;
+        const startPoint = segPoints[0];
+        let segmentPathData = `M ${startPoint.x + 0.5} ${startPoint.y + 0.5}`;
         if (segment.type === "line" && segment.projectedEnd) {
-          segmentPathData += ` L ${segment.projectedEnd.x + 0.5} ${segment.projectedEnd.y + 0.5}`;
-          currentPoint = segment.projectedEnd;
+          if (segPoints.length > 1) {
+            const endPoint = segPoints[segPoints.length - 1];
+            segmentPathData += ` L ${endPoint.x + 0.5} ${endPoint.y + 0.5}`;
+          }
         } else if (segment.type === "arc" && segment.circleFit && segment.projectedStart && segment.projectedEnd) {
           const center = segment.circleFit.center;
           const radius = segment.circleFit.radius;
           const sweepAngle = segment.circleFit.sweepAngle;
           const clockwise = segment.circleFit.clockwise;
           const startAngle = Math.atan2(
-            segment.projectedStart.y - center.y,
-            segment.projectedStart.x - center.x
+            startPoint.y - center.y,
+            startPoint.x - center.x
           );
           const numPoints = Math.max(3, Math.ceil(sweepAngle / (Math.PI / 90)));
           for (let i = 1; i <= numPoints; i++) {
@@ -3767,13 +3871,11 @@ function renderVectorizedToSVG(vectorized, svgElement) {
             const py = center.y + radius * Math.sin(angle);
             segmentPathData += ` L ${px + 0.5} ${py + 0.5}`;
           }
-          currentPoint = segment.projectedEnd;
         } else {
           for (let i = 1; i < segPoints.length; i++) {
             const point = segPoints[i];
             segmentPathData += ` L ${point.x + 0.5} ${point.y + 0.5}`;
           }
-          currentPoint = segPoints[segPoints.length - 1];
         }
         const segmentComment = document.createComment(
           ` Segment ${segIdx}: type=${segment.type}, points=[${segment.startIndex}-${segment.endIndex}]${segment.circleFit ? `, center=(${segment.circleFit.center.x.toFixed(1)},${segment.circleFit.center.y.toFixed(1)}), radius=${segment.circleFit.radius.toFixed(1)}, sweep=${(segment.circleFit.sweepAngle * 180 / Math.PI).toFixed(1)}\xB0` : ""} `

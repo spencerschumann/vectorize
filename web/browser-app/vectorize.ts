@@ -357,28 +357,166 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
   const finalPaths: SimplifiedPath[] = simplifiedPaths.map((path, i) => {
     const circle = circleResults[i];
     const pathSegments = segmentedPaths[i];
-    const points = path.vertices.map((id) => {
+    const originalPath = paths[i];
+
+    // DEBUG: Show original skeleton pixels
+    const originalSkeletonPoints = originalPath.vertices.map((id) => {
       const v = vertices.get(id);
-      return v ? { x: v.x, y: v.y } : { x: 0, y: 0 }; // Fallback for missing vertices
+      return v ? { x: v.x, y: v.y } : { x: 0, y: 0 };
     });
-
-    // Update segment indices to match the simplified points array
-    // Each segment now has only 2 points (start and end) with shared endpoints
-    // So segment i goes from point i to point i+1
-    const adjustedSegments = pathSegments.segments.map((seg, segIdx) => {
-      return {
-        ...seg,
-        startIndex: segIdx,
-        endIndex: segIdx + 1,
-      };
-    });
-
+    console.log(`\n=== PATH ${i} DEBUG ===`);
+    console.log(`Original skeleton: ${originalSkeletonPoints.length} pixels`);
     console.log(
-      `[Path ${i}] ${points.length} points, ${adjustedSegments.length} segments:`,
+      `  Points: ${
+        originalSkeletonPoints.slice(0, 10).map((p) => `(${p.x},${p.y})`).join(
+          " ",
+        )
+      }${originalSkeletonPoints.length > 10 ? "..." : ""}`,
     );
-    adjustedSegments.forEach((seg, idx) => {
+
+    // DEBUG: Show segments from incremental segmentation
+    console.log(
+      `Segments from incremental segmentation: ${pathSegments.segments.length}`,
+    );
+    pathSegments.segments.forEach((seg, idx) => {
+      const segPoints = originalSkeletonPoints.slice(
+        seg.startIndex,
+        seg.endIndex + 1,
+      );
       console.log(
-        `  Segment ${idx}: [${seg.startIndex}-${seg.endIndex}] type=${seg.type}`,
+        `  Seg ${idx}: [${seg.startIndex}-${seg.endIndex}] type=${seg.type}, ${segPoints.length} skeleton pixels`,
+      );
+      console.log(
+        `    Skeleton: ${segPoints.map((p) => `(${p.x},${p.y})`).join(" ")}`,
+      );
+      if (seg.projectedStart) {
+        console.log(
+          `    Projected start: (${seg.projectedStart.x.toFixed(2)}, ${
+            seg.projectedStart.y.toFixed(2)
+          })`,
+        );
+      }
+      if (seg.projectedEnd) {
+        console.log(
+          `    Projected end: (${seg.projectedEnd.x.toFixed(2)}, ${
+            seg.projectedEnd.y.toFixed(2)
+          })`,
+        );
+      }
+    });
+
+    // Build points array from segment endpoints (projected or skeleton pixels)
+    const points: Array<{ x: number; y: number }> = [];
+    const adjustedSegments: Segment[] = [];
+
+    for (let segIdx = 0; segIdx < pathSegments.segments.length; segIdx++) {
+      const seg = pathSegments.segments[segIdx];
+      const startIdx = points.length;
+
+      // Get skeleton points for this segment
+      const skeletonPoints = originalPath.vertices.slice(
+        seg.startIndex,
+        seg.endIndex + 1,
+      ).map((id) => {
+        const v = vertices.get(id);
+        return v ? { x: v.x, y: v.y } : { x: 0, y: 0 };
+      });
+
+      if (seg.type === "arc" || seg.type === "line") {
+        // Fitted segment: use projected endpoints if available
+        if (seg.projectedStart && seg.projectedEnd) {
+          if (points.length === 0) {
+            // First segment: add both start and end
+            points.push(seg.projectedStart);
+            points.push(seg.projectedEnd);
+          } else {
+            // Subsequent segments: check if start matches previous end
+            const lastPoint = points[points.length - 1];
+            const startMatches =
+              Math.abs(lastPoint.x - seg.projectedStart.x) < 0.01 &&
+              Math.abs(lastPoint.y - seg.projectedStart.y) < 0.01;
+
+            if (!startMatches) {
+              // Gap between segments - add the projected start
+              points.push(seg.projectedStart);
+            }
+            points.push(seg.projectedEnd);
+          }
+
+          adjustedSegments.push({
+            ...seg,
+            startIndex: startIdx,
+            endIndex: points.length - 1,
+          });
+        } else {
+          // Fitted segment but no projected endpoints - fallback to skeleton pixels
+          if (points.length === 0) {
+            points.push(...skeletonPoints);
+          } else {
+            const lastPoint = points[points.length - 1];
+            const firstSkeletonPoint = skeletonPoints[0];
+            if (
+              lastPoint.x === firstSkeletonPoint.x &&
+              lastPoint.y === firstSkeletonPoint.y
+            ) {
+              points.push(...skeletonPoints.slice(1));
+            } else {
+              points.push(...skeletonPoints);
+            }
+          }
+
+          adjustedSegments.push({
+            ...seg,
+            startIndex: startIdx,
+            endIndex: points.length - 1,
+          });
+        }
+      } else {
+        // Unfitted segment (polyline): use skeleton pixels
+        if (points.length === 0) {
+          // First segment: add all skeleton points
+          points.push(...skeletonPoints);
+        } else {
+          // Subsequent segments: skip first point if it matches the last point in the array
+          const lastPoint = points[points.length - 1];
+          const firstSkeletonPoint = skeletonPoints[0];
+          if (
+            lastPoint.x === firstSkeletonPoint.x &&
+            lastPoint.y === firstSkeletonPoint.y
+          ) {
+            points.push(...skeletonPoints.slice(1));
+          } else {
+            points.push(...skeletonPoints);
+          }
+        }
+
+        adjustedSegments.push({
+          ...seg,
+          startIndex: startIdx,
+          endIndex: points.length - 1,
+        });
+      }
+    }
+
+    console.log(`Final output points: ${points.length}`);
+    console.log(
+      `  Points: ${
+        points.slice(0, 10).map((p) => `(${p.x.toFixed(2)},${p.y.toFixed(2)})`)
+          .join(" ")
+      }${points.length > 10 ? "..." : ""}`,
+    );
+    console.log(`Adjusted segments: ${adjustedSegments.length}`);
+    adjustedSegments.forEach((seg, idx) => {
+      const segPoints = points.slice(seg.startIndex, seg.endIndex + 1);
+      console.log(
+        `  Segment ${idx}: [${seg.startIndex}-${seg.endIndex}] type=${seg.type}, ${segPoints.length} points`,
+      );
+      console.log(
+        `    Output: ${
+          segPoints.map((p) => `(${p.x.toFixed(2)},${p.y.toFixed(2)})`).join(
+            " ",
+          )
+        }`,
       );
     });
 
@@ -963,9 +1101,6 @@ export function renderVectorizedToSVG(
       );
       svgElement.appendChild(pathComment);
 
-      // Start from first segment's projected start (or first skeleton pixel if no projection)
-      let currentPoint = path.segments[0].projectedStart || path.points[0];
-
       // Process each segment as a separate SVG path
       for (let segIdx = 0; segIdx < path.segments.length; segIdx++) {
         const segment = path.segments[segIdx];
@@ -976,16 +1111,16 @@ export function renderVectorizedToSVG(
 
         if (segPoints.length === 0) continue;
 
-        let segmentPathData = `M ${currentPoint.x + 0.5} ${
-          currentPoint.y + 0.5
-        }`;
+        // Start from the actual first point in the segment
+        const startPoint = segPoints[0];
+        let segmentPathData = `M ${startPoint.x + 0.5} ${startPoint.y + 0.5}`;
 
         if (segment.type === "line" && segment.projectedEnd) {
-          // Line segment: draw to projected endpoint
-          segmentPathData += ` L ${segment.projectedEnd.x + 0.5} ${
-            segment.projectedEnd.y + 0.5
-          }`;
-          currentPoint = segment.projectedEnd;
+          // Line segment: draw to projected endpoint (if we have 2+ points)
+          if (segPoints.length > 1) {
+            const endPoint = segPoints[segPoints.length - 1];
+            segmentPathData += ` L ${endPoint.x + 0.5} ${endPoint.y + 0.5}`;
+          }
         } else if (
           segment.type === "arc" && segment.circleFit &&
           segment.projectedStart && segment.projectedEnd
@@ -996,10 +1131,10 @@ export function renderVectorizedToSVG(
           const sweepAngle = segment.circleFit.sweepAngle;
           const clockwise = segment.circleFit.clockwise;
 
-          // Calculate start angle from segment's projected start
+          // Calculate start angle from actual start point
           const startAngle = Math.atan2(
-            segment.projectedStart.y - center.y,
-            segment.projectedStart.x - center.x,
+            startPoint.y - center.y,
+            startPoint.x - center.x,
           );
 
           // Generate points every ~2 degrees for smooth appearance
@@ -1013,16 +1148,12 @@ export function renderVectorizedToSVG(
             const py = center.y + radius * Math.sin(angle);
             segmentPathData += ` L ${px + 0.5} ${py + 0.5}`;
           }
-
-          // Update current point to the segment's projected end
-          currentPoint = segment.projectedEnd;
         } else {
           // Unfitted segment (polyline): render as pixel-level polyline
           for (let i = 1; i < segPoints.length; i++) {
             const point = segPoints[i];
             segmentPathData += ` L ${point.x + 0.5} ${point.y + 0.5}`;
           }
-          currentPoint = segPoints[segPoints.length - 1];
         }
 
         // Add comment for segment
