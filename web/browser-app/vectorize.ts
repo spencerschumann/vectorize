@@ -325,8 +325,8 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
         resultVertices.push(points[0]);
       }
 
-      // For fitted segments (arc/line), just keep endpoints - SVG will render the shape
-      // For unfitted segments, keep all skeleton pixels as polyline
+      // For fitted segments (arc/line): just keep endpoints - data stores the fit parameters
+      // For unfitted segments (polyline): keep all skeleton pixels
       if (seg.type === "arc" || seg.type === "line") {
         resultVertices.push(points[points.length - 1]);
       } else {
@@ -963,16 +963,33 @@ export function renderVectorizedToSVG(
           const endPoint = segPoints[segPoints.length - 1];
           pathData += ` L ${endPoint.x + 0.5} ${endPoint.y + 0.5}`;
         } else if (segment.type === "arc" && segment.circleFit) {
-          // Arc segment: render as SVG arc
-          const endPoint = segPoints[segPoints.length - 1];
-          const { largeArc, sweep } = calculateArcFlags(
-            segment.circleFit.sweepAngle,
-            segment.circleFit.clockwise,
-          );
+          // Arc segment: render as polyline approximation using fitted circle points
+          // Generate points along the fitted circle
+          const center = segment.circleFit.center;
           const radius = segment.circleFit.radius;
-          pathData += ` A ${radius} ${radius} 0 ${largeArc} ${sweep} ${
-            endPoint.x + 0.5
-          } ${endPoint.y + 0.5}`;
+          const sweepAngle = segment.circleFit.sweepAngle;
+          const clockwise = segment.circleFit.clockwise;
+
+          const startPoint = segPoints[0];
+          const endPoint = segPoints[segPoints.length - 1];
+
+          // Calculate start angle
+          const startAngle = Math.atan2(
+            startPoint.y - center.y,
+            startPoint.x - center.x,
+          );
+
+          // Generate points every ~2 degrees for smooth appearance
+          const numPoints = Math.max(3, Math.ceil(sweepAngle / (Math.PI / 90)));
+          for (let i = 1; i <= numPoints; i++) {
+            const t = i / numPoints;
+            const angle = clockwise
+              ? startAngle + t * sweepAngle
+              : startAngle - t * sweepAngle;
+            const px = center.x + radius * Math.cos(angle);
+            const py = center.y + radius * Math.sin(angle);
+            pathData += ` L ${px + 0.5} ${py + 0.5}`;
+          }
         } else {
           // Unfitted segment: render as pixel-level polyline
           for (let i = 1; i < segPoints.length; i++) {

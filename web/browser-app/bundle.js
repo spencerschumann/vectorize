@@ -3029,7 +3029,7 @@ function forceDeactivateEyedropper() {
 
 // browser-app/incremental_segmentation.ts
 var MAX_ERROR = 0.75;
-var MAX_ERROR_P90 = 2;
+var MAX_ERROR_P90 = 1;
 var MIN_POINTS = 5;
 var LOOKAHEAD_POINTS = 2;
 var ERROR_PERCENTILE = 0.9;
@@ -3219,12 +3219,18 @@ function segmentPath(points, isClosed) {
       const circleOk = medianCircleError <= MAX_ERROR && percentileCircleError <= MAX_ERROR_P90;
       if (j - segStart > 10 && j % 5 === 0) {
         console.log(`[Segment ${segStart}-${j}] Points: ${j - segStart + 1}`);
-        console.log(`  Line: median=${medianLineError.toFixed(3)}px (${lineOk ? "\u2713" : "\u2717"}), p90=${percentileLineError.toFixed(3)}px`);
-        console.log(`  Circle: median=${medianCircleError.toFixed(3)}px (${circleOk ? "\u2713" : "\u2717"}), p90=${percentileCircleError.toFixed(3)}px`);
+        console.log(
+          `  Line: median=${medianLineError.toFixed(3)}px (${lineOk ? "\u2713" : "\u2717"}), p90=${percentileLineError.toFixed(3)}px`
+        );
+        console.log(
+          `  Circle: median=${medianCircleError.toFixed(3)}px (${circleOk ? "\u2713" : "\u2717"}), p90=${percentileCircleError.toFixed(3)}px`
+        );
         if (circleFit.getCount() >= MIN_POINTS) {
           const circleFitResult = circleFit.getFit();
           if (circleFitResult.valid) {
-            console.log(`  Circle fit: center=(${circleFitResult.center.x.toFixed(1)}, ${circleFitResult.center.y.toFixed(1)}), radius=${circleFitResult.radius.toFixed(1)}px`);
+            console.log(
+              `  Circle fit: center=(${circleFitResult.center.x.toFixed(1)}, ${circleFitResult.center.y.toFixed(1)}), radius=${circleFitResult.radius.toFixed(1)}px`
+            );
           }
         }
       }
@@ -3232,17 +3238,23 @@ function segmentPath(points, isClosed) {
       const circleMedianBad = medianCircleError > MAX_ERROR;
       if (lineOk || circleOk) {
         if (lineMedianBad && circleMedianBad) {
-          console.log(`[Segment ${segStart}-${j}] STOPPED - both median errors exceeded ${MAX_ERROR}px`);
+          console.log(
+            `[Segment ${segStart}-${j}] STOPPED - both median errors exceeded ${MAX_ERROR}px`
+          );
           break;
         }
         j++;
         continue;
       }
-      console.log(`[Segment ${segStart}-${j}] STOPPED - both fits exceeded tolerance`);
+      console.log(
+        `[Segment ${segStart}-${j}] STOPPED - both fits exceeded tolerance`
+      );
       break;
     }
     const segEnd = Math.max(j - LOOKAHEAD_POINTS, segStart + MIN_POINTS - 1);
-    console.log(`[Segment finalized] ${segStart}-${segEnd} (${segEnd - segStart + 1} points, backed up ${j - segEnd} points)`);
+    console.log(
+      `[Segment finalized] ${segStart}-${segEnd} (${segEnd - segStart + 1} points, backed up ${j - segEnd} points)`
+    );
     segments.push({
       startIndex: segStart,
       endIndex: Math.min(segEnd, N - 1),
@@ -3356,9 +3368,15 @@ function classifySegments(points, segments, isClosed) {
     const lineWithinTolerance = medianLineError <= MAX_ERROR && p90LineError <= MAX_ERROR_P90;
     const circleWithinTolerance = medianCircleError <= MAX_ERROR && p90CircleError <= MAX_ERROR_P90;
     if (!lineWithinTolerance && !circleWithinTolerance) {
-      console.log(`[Classify segment ${seg.startIndex}-${seg.endIndex}] ${segPoints.length} points`);
-      console.log(`  Line: median=${medianLineError.toFixed(3)}px, p90=${p90LineError.toFixed(3)}px (\u2717)`);
-      console.log(`  Circle: median=${medianCircleError.toFixed(3)}px, p90=${p90CircleError.toFixed(3)}px (\u2717)`);
+      console.log(
+        `[Classify segment ${seg.startIndex}-${seg.endIndex}] ${segPoints.length} points`
+      );
+      console.log(
+        `  Line: median=${medianLineError.toFixed(3)}px, p90=${p90LineError.toFixed(3)}px (\u2717)`
+      );
+      console.log(
+        `  Circle: median=${medianCircleError.toFixed(3)}px, p90=${p90CircleError.toFixed(3)}px (\u2717)`
+      );
       console.log(`  \u2192 Classified as: UNFITTED (neither fit within tolerance)`);
       return {
         ...seg,
@@ -3367,13 +3385,23 @@ function classifySegments(points, segments, isClosed) {
       };
     }
     const isArc = circleResult.valid && circleWithinTolerance && medianCircleError <= medianLineError * ARC_PREFERENCE_FACTOR && sweepAngle >= MIN_SWEEP_ANGLE;
-    console.log(`[Classify segment ${seg.startIndex}-${seg.endIndex}] ${segPoints.length} points`);
-    console.log(`  Line: median=${medianLineError.toFixed(3)}px, p90=${p90LineError.toFixed(3)}px`);
-    console.log(`  Circle: median=${medianCircleError.toFixed(3)}px, p90=${p90CircleError.toFixed(3)}px, valid=${circleResult.valid}, sweep=${(sweepAngle * 180 / Math.PI).toFixed(1)}\xB0`);
+    console.log(
+      `[Classify segment ${seg.startIndex}-${seg.endIndex}] ${segPoints.length} points`
+    );
+    console.log(
+      `  Line: median=${medianLineError.toFixed(3)}px, p90=${p90LineError.toFixed(3)}px`
+    );
+    console.log(
+      `  Circle: median=${medianCircleError.toFixed(3)}px, p90=${p90CircleError.toFixed(3)}px, valid=${circleResult.valid}, sweep=${(sweepAngle * 180 / Math.PI).toFixed(1)}\xB0`
+    );
     if (circleResult.valid) {
-      console.log(`  Circle: center=(${circleResult.center.x.toFixed(1)}, ${circleResult.center.y.toFixed(1)}), radius=${circleResult.radius.toFixed(1)}px`);
+      console.log(
+        `  Circle: center=(${circleResult.center.x.toFixed(1)}, ${circleResult.center.y.toFixed(1)}), radius=${circleResult.radius.toFixed(1)}px`
+      );
     }
-    console.log(`  \u2192 Classified as: ${isArc ? "ARC" : "LINE"} (circle ${medianCircleError.toFixed(3)} vs line ${medianLineError.toFixed(3)} * ${ARC_PREFERENCE_FACTOR})`);
+    console.log(
+      `  \u2192 Classified as: ${isArc ? "ARC" : "LINE"} (circle ${medianCircleError.toFixed(3)} vs line ${medianLineError.toFixed(3)} * ${ARC_PREFERENCE_FACTOR})`
+    );
     if (isArc) {
       return {
         ...seg,
@@ -3640,11 +3668,6 @@ function isPixelSet(binary, x, y) {
   if (byteIndex >= binary.data.length) return false;
   return (binary.data[byteIndex] & 1 << bitIndex) !== 0;
 }
-function calculateArcFlags(sweepAngle, clockwise) {
-  const largeArc = sweepAngle > Math.PI ? 1 : 0;
-  const sweep = clockwise ? 1 : 0;
-  return { largeArc, sweep };
-}
 function renderVectorizedToSVG(vectorized, svgElement) {
   const { width, height, paths } = vectorized;
   svgElement.setAttribute("width", width.toString());
@@ -3680,13 +3703,24 @@ function renderVectorizedToSVG(vectorized, svgElement) {
           const endPoint = segPoints[segPoints.length - 1];
           pathData += ` L ${endPoint.x + 0.5} ${endPoint.y + 0.5}`;
         } else if (segment.type === "arc" && segment.circleFit) {
-          const endPoint = segPoints[segPoints.length - 1];
-          const { largeArc, sweep } = calculateArcFlags(
-            segment.circleFit.sweepAngle,
-            segment.circleFit.clockwise
-          );
+          const center = segment.circleFit.center;
           const radius = segment.circleFit.radius;
-          pathData += ` A ${radius} ${radius} 0 ${largeArc} ${sweep} ${endPoint.x + 0.5} ${endPoint.y + 0.5}`;
+          const sweepAngle = segment.circleFit.sweepAngle;
+          const clockwise = segment.circleFit.clockwise;
+          const startPoint = segPoints[0];
+          const endPoint = segPoints[segPoints.length - 1];
+          const startAngle = Math.atan2(
+            startPoint.y - center.y,
+            startPoint.x - center.x
+          );
+          const numPoints = Math.max(3, Math.ceil(sweepAngle / (Math.PI / 90)));
+          for (let i = 1; i <= numPoints; i++) {
+            const t = i / numPoints;
+            const angle = clockwise ? startAngle + t * sweepAngle : startAngle - t * sweepAngle;
+            const px = center.x + radius * Math.cos(angle);
+            const py = center.y + radius * Math.sin(angle);
+            pathData += ` L ${px + 0.5} ${py + 0.5}`;
+          }
         } else {
           for (let i = 1; i < segPoints.length; i++) {
             const point = segPoints[i];

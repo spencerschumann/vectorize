@@ -31,7 +31,7 @@ export interface Segment {
 
 // Tunable parameters
 const MAX_ERROR = 0.75; // absolute distance tolerance (pixels) for median/majority
-const MAX_ERROR_P90 = 2.0; // absolute distance tolerance (pixels) at 90th percentile
+const MAX_ERROR_P90 = 1; // absolute distance tolerance (pixels) at 90th percentile
 const MIN_POINTS = 5; // minimum points for a valid fit
 const LOOKAHEAD_POINTS = 2; // hysteresis to prevent jitter
 const ERROR_PERCENTILE = 0.9; // Use 90th percentile for outlier tolerance
@@ -300,32 +300,48 @@ export function segmentPath(points: Point[], isClosed: boolean): Segment[] {
 
       // Continue if at least one fit is within tolerance
       // Require both median <= MAX_ERROR and 90th percentile <= MAX_ERROR_P90
-      const lineOk = medianLineError <= MAX_ERROR && percentileLineError <= MAX_ERROR_P90;
-      const circleOk = medianCircleError <= MAX_ERROR && percentileCircleError <= MAX_ERROR_P90;
-      
+      const lineOk = medianLineError <= MAX_ERROR &&
+        percentileLineError <= MAX_ERROR_P90;
+      const circleOk = medianCircleError <= MAX_ERROR &&
+        percentileCircleError <= MAX_ERROR_P90;
+
       // Debug logging for segment growing
       if (j - segStart > 10 && j % 5 === 0) {
         console.log(`[Segment ${segStart}-${j}] Points: ${j - segStart + 1}`);
-        console.log(`  Line: median=${medianLineError.toFixed(3)}px (${lineOk ? "✓" : "✗"}), p90=${percentileLineError.toFixed(3)}px`);
-        console.log(`  Circle: median=${medianCircleError.toFixed(3)}px (${circleOk ? "✓" : "✗"}), p90=${percentileCircleError.toFixed(3)}px`);
+        console.log(
+          `  Line: median=${medianLineError.toFixed(3)}px (${
+            lineOk ? "✓" : "✗"
+          }), p90=${percentileLineError.toFixed(3)}px`,
+        );
+        console.log(
+          `  Circle: median=${medianCircleError.toFixed(3)}px (${
+            circleOk ? "✓" : "✗"
+          }), p90=${percentileCircleError.toFixed(3)}px`,
+        );
         if (circleFit.getCount() >= MIN_POINTS) {
           const circleFitResult = circleFit.getFit();
           if (circleFitResult.valid) {
-            console.log(`  Circle fit: center=(${circleFitResult.center.x.toFixed(1)}, ${circleFitResult.center.y.toFixed(1)}), radius=${circleFitResult.radius.toFixed(1)}px`);
+            console.log(
+              `  Circle fit: center=(${circleFitResult.center.x.toFixed(1)}, ${
+                circleFitResult.center.y.toFixed(1)
+              }), radius=${circleFitResult.radius.toFixed(1)}px`,
+            );
           }
         }
       }
-      
+
       // Stop if fits are getting worse - if neither fit has good median anymore, stop even if p90 is ok
       // This prevents creating long segments with mediocre fits
       const lineMedianBad = medianLineError > MAX_ERROR;
       const circleMedianBad = medianCircleError > MAX_ERROR;
-      
+
       if (lineOk || circleOk) {
         // Allow continuing if at least one fit is fully within tolerance
         // But stop if both medians are bad (even if one p90 is still ok)
         if (lineMedianBad && circleMedianBad) {
-          console.log(`[Segment ${segStart}-${j}] STOPPED - both median errors exceeded ${MAX_ERROR}px`);
+          console.log(
+            `[Segment ${segStart}-${j}] STOPPED - both median errors exceeded ${MAX_ERROR}px`,
+          );
           break;
         }
         j++;
@@ -333,14 +349,20 @@ export function segmentPath(points: Point[], isClosed: boolean): Segment[] {
       }
 
       // Both fits failed - stop growing
-      console.log(`[Segment ${segStart}-${j}] STOPPED - both fits exceeded tolerance`);
+      console.log(
+        `[Segment ${segStart}-${j}] STOPPED - both fits exceeded tolerance`,
+      );
       break;
     }
 
     // Apply hysteresis: back up a few points
     const segEnd = Math.max(j - LOOKAHEAD_POINTS, segStart + MIN_POINTS - 1);
 
-    console.log(`[Segment finalized] ${segStart}-${segEnd} (${segEnd - segStart + 1} points, backed up ${j - segEnd} points)`);
+    console.log(
+      `[Segment finalized] ${segStart}-${segEnd} (${
+        segEnd - segStart + 1
+      } points, backed up ${j - segEnd} points)`,
+    );
 
     // Create segment (classification happens later)
     segments.push({
@@ -492,7 +514,7 @@ export function classifySegments(
         totalAngle += Math.abs(deltaAngle);
       }
       sweepAngle = totalAngle;
-      
+
       // Determine direction based on cumulative angle change
       // In SVG coords (y-axis points down):
       // - Positive cumulative angle = clockwise rotation
@@ -502,22 +524,34 @@ export function classifySegments(
 
     // Decide: arc, line, or unfitted?
     // Check if either fit meets tolerance requirements
-    const lineWithinTolerance = medianLineError <= MAX_ERROR && p90LineError <= MAX_ERROR_P90;
-    const circleWithinTolerance = medianCircleError <= MAX_ERROR && p90CircleError <= MAX_ERROR_P90;
-    
+    const lineWithinTolerance = medianLineError <= MAX_ERROR &&
+      p90LineError <= MAX_ERROR_P90;
+    const circleWithinTolerance = medianCircleError <= MAX_ERROR &&
+      p90CircleError <= MAX_ERROR_P90;
+
     // If neither fit is within tolerance, mark as unfitted (keep as pixel polyline)
     if (!lineWithinTolerance && !circleWithinTolerance) {
-      console.log(`[Classify segment ${seg.startIndex}-${seg.endIndex}] ${segPoints.length} points`);
-      console.log(`  Line: median=${medianLineError.toFixed(3)}px, p90=${p90LineError.toFixed(3)}px (✗)`);
-      console.log(`  Circle: median=${medianCircleError.toFixed(3)}px, p90=${p90CircleError.toFixed(3)}px (✗)`);
+      console.log(
+        `[Classify segment ${seg.startIndex}-${seg.endIndex}] ${segPoints.length} points`,
+      );
+      console.log(
+        `  Line: median=${medianLineError.toFixed(3)}px, p90=${
+          p90LineError.toFixed(3)
+        }px (✗)`,
+      );
+      console.log(
+        `  Circle: median=${medianCircleError.toFixed(3)}px, p90=${
+          p90CircleError.toFixed(3)
+        }px (✗)`,
+      );
       console.log(`  → Classified as: UNFITTED (neither fit within tolerance)`);
-      
+
       return {
         ...seg,
         type: "polyline", // Keep raw skeleton pixels
       };
     }
-    
+
     // Prefer arc if:
     // 1. Circle fit is valid
     // 2. Circle error meets tolerance requirements
@@ -527,15 +561,35 @@ export function classifySegments(
       circleWithinTolerance &&
       medianCircleError <= medianLineError * ARC_PREFERENCE_FACTOR &&
       sweepAngle >= MIN_SWEEP_ANGLE;
-    
-    console.log(`[Classify segment ${seg.startIndex}-${seg.endIndex}] ${segPoints.length} points`);
-    console.log(`  Line: median=${medianLineError.toFixed(3)}px, p90=${p90LineError.toFixed(3)}px`);
-    console.log(`  Circle: median=${medianCircleError.toFixed(3)}px, p90=${p90CircleError.toFixed(3)}px, valid=${circleResult.valid}, sweep=${(sweepAngle * 180 / Math.PI).toFixed(1)}°`);
+
+    console.log(
+      `[Classify segment ${seg.startIndex}-${seg.endIndex}] ${segPoints.length} points`,
+    );
+    console.log(
+      `  Line: median=${medianLineError.toFixed(3)}px, p90=${
+        p90LineError.toFixed(3)
+      }px`,
+    );
+    console.log(
+      `  Circle: median=${medianCircleError.toFixed(3)}px, p90=${
+        p90CircleError.toFixed(3)
+      }px, valid=${circleResult.valid}, sweep=${
+        (sweepAngle * 180 / Math.PI).toFixed(1)
+      }°`,
+    );
     if (circleResult.valid) {
-      console.log(`  Circle: center=(${circleResult.center.x.toFixed(1)}, ${circleResult.center.y.toFixed(1)}), radius=${circleResult.radius.toFixed(1)}px`);
+      console.log(
+        `  Circle: center=(${circleResult.center.x.toFixed(1)}, ${
+          circleResult.center.y.toFixed(1)
+        }), radius=${circleResult.radius.toFixed(1)}px`,
+      );
     }
-    console.log(`  → Classified as: ${isArc ? "ARC" : "LINE"} (circle ${medianCircleError.toFixed(3)} vs line ${medianLineError.toFixed(3)} * ${ARC_PREFERENCE_FACTOR})`);
-    
+    console.log(
+      `  → Classified as: ${isArc ? "ARC" : "LINE"} (circle ${
+        medianCircleError.toFixed(3)
+      } vs line ${medianLineError.toFixed(3)} * ${ARC_PREFERENCE_FACTOR})`,
+    );
+
     if (isArc) {
       return {
         ...seg,
