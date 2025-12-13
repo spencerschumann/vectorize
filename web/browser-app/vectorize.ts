@@ -9,6 +9,8 @@ import {
   detectKeyVertices,
   type KeyVertex,
 } from "./primitives/key_vertices.ts";
+import { vectorizeWithIncrementalSegmentation } from "./incremental_segmentation.ts";
+import type { Segment } from "./incremental_segmentation.ts";
 
 export interface Vertex {
   x: number;
@@ -32,6 +34,7 @@ export interface SimplifiedPath {
   points: Array<{ x: number; y: number }>; // Just coordinates after simplification
   closed: boolean;
   circle?: Circle; // If this path represents a circle
+  segments?: Segment[]; // Segment information for rendering arcs
 }
 
 export interface VectorizedImage {
@@ -220,50 +223,132 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
   }
 
   // Detect key vertices in original paths (before simplification)
+  // DISABLED: Key vertex detection
   const allKeyVertices: KeyVertex[] = [];
   const allCurvatureDebug: CurvatureDebugInfo[] = [];
-  for (const path of paths) {
-    const result = detectKeyVertices(path, vertices, 10);
-    allKeyVertices.push(...result.keyVertices);
-    allCurvatureDebug.push(...result.curvatureDebug);
-  }
-  console.log(`Vectorization: Detected ${allKeyVertices.length} key vertices`);
+  // for (const path of paths) {
+  //   const result = detectKeyVertices(path, vertices, 10);
+  //   allKeyVertices.push(...result.keyVertices);
+  //   allCurvatureDebug.push(...result.curvatureDebug);
+  // }
+  // console.log(`Vectorization: Detected ${allKeyVertices.length} key vertices`);
 
   // Detect circles before simplification
-  const circleEpsilon = 1.4;
-  const circleResults = paths.map((path) =>
-    detectCircle(path, vertices, circleEpsilon)
-  );
-  const circleCount = circleResults.filter((r) => r !== null).length;
-  console.log(`Vectorization: Detected ${circleCount} circles`);
+  // DISABLED: Circle detection
+  // const circleEpsilon = 1.4;
+  // const circleResults = paths.map((path) =>
+  //   detectCircle(path, vertices, circleEpsilon)
+  // );
+  // const circleCount = circleResults.filter((r) => r !== null).length;
+  // console.log(`Vectorization: Detected ${circleCount} circles`);
+  const circleResults = paths.map(() => null);
 
-  // First, run a light Douglas-Peucker pass to simplify trivial cases (skip circles)
-  const dpPaths = paths.map((path, i) =>
-    circleResults[i] ? path : douglasPeucker(path, vertices, 0.1)
-  );
-  const totalDPBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);
-  const totalDPAfter = dpPaths.reduce((sum, p) => sum + p.vertices.length, 0);
-  console.log(
-    `Vectorization: DP pass simplified from ${totalDPBefore} to ${totalDPAfter} vertices`,
-  );
+  // DISABLED: Douglas-Peucker and Segmented Linear Regression
+  // // First, run a light Douglas-Peucker pass to simplify trivial cases (skip circles)
+  // const dpPaths = paths.map((path, i) =>
+  //   circleResults[i] ? path : douglasPeucker(path, vertices, 0.1)
+  // );
+  // const totalDPBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);
+  // const totalDPAfter = dpPaths.reduce((sum, p) => sum + p.vertices.length, 0);
+  // console.log(
+  //   `Vectorization: DP pass simplified from ${totalDPBefore} to ${totalDPAfter} vertices`,
+  // );
+  //
+  // // Apply segmented linear regression to simplify paths (skip circles)
+  // const simplifiedPaths = dpPaths.map((path, i) =>
+  //   circleResults[i]
+  //     ? path
+  //     : segmentedLinearRegression(path, vertices, width, 0.75)
+  // );
+  //
+  // const totalVerticesBefore = dpPaths.reduce(
+  //   (sum, p) => sum + p.vertices.length,
+  //   0,
+  // );
+  // const totalVerticesAfter = simplifiedPaths.reduce(
+  //   (sum, p) => sum + p.vertices.length,
+  //   0,
+  // );
+  // console.log(
+  //   `Vectorization: SLR simplified from ${totalVerticesBefore} to ${totalVerticesAfter} vertices (${
+  //     ((1 - totalVerticesAfter / totalVerticesBefore) * 100).toFixed(1)
+  //   }% reduction)`,
+  // );
 
-  // Apply segmented linear regression to simplify paths (skip circles)
-  const simplifiedPaths = dpPaths.map((path, i) =>
-    circleResults[i]
-      ? path
-      : segmentedLinearRegression(path, vertices, width, 0.75)
-  );
-
-  const totalVerticesBefore = dpPaths.reduce(
+  // Apply incremental segmentation with line and arc fitting
+  const totalVerticesBefore = paths.reduce(
     (sum, p) => sum + p.vertices.length,
     0,
   );
+
+  const segmentedPaths: Array<{ segments: Segment[]; closed: boolean }> = paths
+    .map((path) => {
+      const points = path.vertices.map((id) => {
+        const v = vertices.get(id);
+        return v ? { x: v.x, y: v.y } : { x: 0, y: 0 };
+      });
+      const segments = vectorizeWithIncrementalSegmentation(
+        points,
+        path.closed,
+      );
+      return { segments, closed: path.closed };
+    });
+
+  const totalSegments = segmentedPaths.reduce(
+    (sum, p) => sum + p.segments.length,
+    0,
+  );
+  const totalArcs = segmentedPaths.reduce(
+    (sum, p) => sum + p.segments.filter((s) => s.type === "arc").length,
+    0,
+  );
+  console.log(
+    `Vectorization: Incremental segmentation created ${totalSegments} segments (${totalArcs} arcs, ${
+      totalSegments - totalArcs
+    } lines) from ${totalVerticesBefore} vertices`,
+  );
+
+  // Convert segments back to SimplifiedPath format
+  const simplifiedPaths = segmentedPaths.map((pathData, pathIdx) => {
+    const originalPath = paths[pathIdx];
+    const resultVertices: number[] = [];
+
+    for (let i = 0; i < pathData.segments.length; i++) {
+      const seg = pathData.segments[i];
+      const points = originalPath.vertices.slice(
+        seg.startIndex,
+        seg.endIndex + 1,
+      );
+
+      // Add start point
+      if (resultVertices.length === 0) {
+        resultVertices.push(points[0]);
+      }
+
+      // For fitted segments (arc/line), just keep endpoints - SVG will render the shape
+      // For unfitted segments, keep all skeleton pixels as polyline
+      if (seg.type === "arc" || seg.type === "line") {
+        resultVertices.push(points[points.length - 1]);
+      } else {
+        // Unfitted segment - keep all skeleton pixels
+        for (let k = 1; k < points.length; k++) {
+          resultVertices.push(points[k]);
+        }
+      }
+    }
+
+    return {
+      vertices: resultVertices,
+      closed: originalPath.closed,
+    };
+  });
+
   const totalVerticesAfter = simplifiedPaths.reduce(
     (sum, p) => sum + p.vertices.length,
     0,
   );
   console.log(
-    `Vectorization: SLR simplified from ${totalVerticesBefore} to ${totalVerticesAfter} vertices (${
+    `Vectorization: Simplified to ${totalVerticesAfter} vertices (${
       ((1 - totalVerticesAfter / totalVerticesBefore) * 100).toFixed(1)
     }% reduction)`,
   );
@@ -271,13 +356,37 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
   // Convert to SimplifiedPath (just coordinates, no IDs)
   const finalPaths: SimplifiedPath[] = simplifiedPaths.map((path, i) => {
     const circle = circleResults[i];
+    const pathSegments = segmentedPaths[i];
+    const points = path.vertices.map((id) => {
+      const v = vertices.get(id);
+      return v ? { x: v.x, y: v.y } : { x: 0, y: 0 }; // Fallback for missing vertices
+    });
+
+    // Update segment indices to match the simplified points array
+    // Each segment now has only 2 points (start and end) with shared endpoints
+    // So segment i goes from point i to point i+1
+    const adjustedSegments = pathSegments.segments.map((seg, segIdx) => {
+      return {
+        ...seg,
+        startIndex: segIdx,
+        endIndex: segIdx + 1,
+      };
+    });
+
+    console.log(
+      `[Path ${i}] ${points.length} points, ${adjustedSegments.length} segments:`,
+    );
+    adjustedSegments.forEach((seg, idx) => {
+      console.log(
+        `  Segment ${idx}: [${seg.startIndex}-${seg.endIndex}] type=${seg.type}`,
+      );
+    });
+
     return {
-      points: path.vertices.map((id) => {
-        const v = vertices.get(id);
-        return v ? { x: v.x, y: v.y } : { x: 0, y: 0 }; // Fallback for missing vertices
-      }),
+      points,
       closed: path.closed,
       circle: circle || undefined,
+      segments: adjustedSegments,
     };
   });
 
@@ -742,6 +851,22 @@ function isPixelSet(binary: BinaryImage, x: number, y: number): boolean {
 }
 
 /**
+ * Calculate if an arc should use the large-arc-flag based on sweep angle
+ */
+function calculateArcFlags(
+  sweepAngle: number,
+  clockwise: boolean,
+): { largeArc: number; sweep: number } {
+  // Large arc flag is 1 if sweep angle > 180 degrees
+  const largeArc = sweepAngle > Math.PI ? 1 : 0;
+
+  // SVG sweep flag: 1 for clockwise, 0 for counter-clockwise
+  const sweep = clockwise ? 1 : 0;
+
+  return { largeArc, sweep };
+}
+
+/**
  * Render vectorized image as SVG overlay on top of canvas
  */
 export function renderVectorizedToSVG(
@@ -760,44 +885,46 @@ export function renderVectorizedToSVG(
   svgElement.innerHTML = "";
 
   // Draw key vertices first (underneath everything else)
-  for (const kv of vectorized.keyVertices) {
-    const kvCircle = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "circle",
-    );
-    kvCircle.setAttribute("cx", (kv.x + 0.5).toString());
-    kvCircle.setAttribute("cy", (kv.y + 0.5).toString());
-    kvCircle.setAttribute("r", "2");
-    kvCircle.setAttribute("fill", "none");
-    kvCircle.setAttribute("stroke", "blue");
-    kvCircle.setAttribute("stroke-width", "0.5");
-    kvCircle.setAttribute("vector-effect", "non-scaling-stroke");
-    svgElement.appendChild(kvCircle);
-  }
+  // DISABLED: Key vertices visualization
+  // for (const kv of vectorized.keyVertices) {
+  //   const kvCircle = document.createElementNS(
+  //     "http://www.w3.org/2000/svg",
+  //     "circle",
+  //   );
+  //   kvCircle.setAttribute("cx", (kv.x + 0.5).toString());
+  //   kvCircle.setAttribute("cy", (kv.y + 0.5).toString());
+  //   kvCircle.setAttribute("r", "2");
+  //   kvCircle.setAttribute("fill", "none");
+  //   kvCircle.setAttribute("stroke", "blue");
+  //   kvCircle.setAttribute("stroke-width", "0.5");
+  //   kvCircle.setAttribute("vector-effect", "non-scaling-stroke");
+  //   svgElement.appendChild(kvCircle);
+  // }
 
   // Draw curvature debug visualization (perpendicular lines showing curvature)
-  const curvatureScale = 2.0; // Scale factor for visualization
-  for (const curv of vectorized.curvatureDebug) {
-    const halfLength = curv.magnitude * curvatureScale / 2;
-    const x1 = curv.x + 0.5 - curv.directionX * halfLength;
-    const y1 = curv.y + 0.5 - curv.directionY * halfLength;
-    const x2 = curv.x + 0.5 + curv.directionX * halfLength;
-    const y2 = curv.y + 0.5 + curv.directionY * halfLength;
-
-    const curvLine = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "line",
-    );
-    curvLine.setAttribute("x1", x1.toString());
-    curvLine.setAttribute("y1", y1.toString());
-    curvLine.setAttribute("x2", x2.toString());
-    curvLine.setAttribute("y2", y2.toString());
-    curvLine.setAttribute("stroke", "orange");
-    curvLine.setAttribute("stroke-width", "0.3");
-    curvLine.setAttribute("opacity", "0.6");
-    curvLine.setAttribute("vector-effect", "non-scaling-stroke");
-    svgElement.appendChild(curvLine);
-  }
+  // DISABLED: Curvature debug visualization
+  // const curvatureScale = 2.0; // Scale factor for visualization
+  // for (const curv of vectorized.curvatureDebug) {
+  //   const halfLength = curv.magnitude * curvatureScale / 2;
+  //   const x1 = curv.x + 0.5 - curv.directionX * halfLength;
+  //   const y1 = curv.y + 0.5 - curv.directionY * halfLength;
+  //   const x2 = curv.x + 0.5 + curv.directionX * halfLength;
+  //   const y2 = curv.y + 0.5 + curv.directionY * halfLength;
+  //
+  //   const curvLine = document.createElementNS(
+  //     "http://www.w3.org/2000/svg",
+  //     "line",
+  //   );
+  //   curvLine.setAttribute("x1", x1.toString());
+  //   curvLine.setAttribute("y1", y1.toString());
+  //   curvLine.setAttribute("x2", x2.toString());
+  //   curvLine.setAttribute("y2", y2.toString());
+  //   curvLine.setAttribute("stroke", "orange");
+  //   curvLine.setAttribute("stroke-width", "0.3");
+  //   curvLine.setAttribute("opacity", "0.6");
+  //   curvLine.setAttribute("vector-effect", "non-scaling-stroke");
+  //   svgElement.appendChild(curvLine);
+  // }
 
   // Draw each path as an SVG path element or circle
   for (const path of paths) {
@@ -815,13 +942,65 @@ export function renderVectorizedToSVG(
       circleElement.setAttribute("stroke-width", "0.5");
       circleElement.setAttribute("vector-effect", "non-scaling-stroke");
       svgElement.appendChild(circleElement);
-    } else {
-      // Render as path
+    } else if (path.segments && path.segments.length > 0) {
+      // Render path with segments (lines and arcs)
       if (path.points.length === 0) continue;
 
       const firstPoint = path.points[0];
+      let pathData = `M ${firstPoint.x + 0.5} ${firstPoint.y + 0.5}`;
 
-      // Shift by 0.5 pixels to align with pixel centers
+      // Process each segment
+      for (const segment of path.segments) {
+        const segPoints = path.points.slice(
+          segment.startIndex,
+          segment.endIndex + 1,
+        );
+
+        if (segPoints.length === 0) continue;
+
+        if (segment.type === "line") {
+          // Line segment: just draw to the end point
+          const endPoint = segPoints[segPoints.length - 1];
+          pathData += ` L ${endPoint.x + 0.5} ${endPoint.y + 0.5}`;
+        } else if (segment.type === "arc" && segment.circleFit) {
+          // Arc segment: render as SVG arc
+          const endPoint = segPoints[segPoints.length - 1];
+          const { largeArc, sweep } = calculateArcFlags(
+            segment.circleFit.sweepAngle,
+            segment.circleFit.clockwise,
+          );
+          const radius = segment.circleFit.radius;
+          pathData += ` A ${radius} ${radius} 0 ${largeArc} ${sweep} ${
+            endPoint.x + 0.5
+          } ${endPoint.y + 0.5}`;
+        } else {
+          // Unfitted segment: render as pixel-level polyline
+          for (let i = 1; i < segPoints.length; i++) {
+            const point = segPoints[i];
+            pathData += ` L ${point.x + 0.5} ${point.y + 0.5}`;
+          }
+        }
+      }
+
+      if (path.closed) {
+        pathData += " Z";
+      }
+
+      const pathElement = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "path",
+      );
+      pathElement.setAttribute("d", pathData);
+      pathElement.setAttribute("fill", "none");
+      pathElement.setAttribute("stroke", "red");
+      pathElement.setAttribute("stroke-width", "0.5");
+      pathElement.setAttribute("vector-effect", "non-scaling-stroke");
+      svgElement.appendChild(pathElement);
+    } else {
+      // Fallback: Render as simple polyline (legacy paths without segments)
+      if (path.points.length === 0) continue;
+
+      const firstPoint = path.points[0];
       let pathData = `M ${firstPoint.x + 0.5} ${firstPoint.y + 0.5}`;
 
       for (let i = 1; i < path.points.length; i++) {

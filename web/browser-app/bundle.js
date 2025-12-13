@@ -3027,323 +3027,397 @@ function forceDeactivateEyedropper() {
   }
 }
 
-// browser-app/primitives/circle.ts
-function detectCircle(path, vertices, epsilon) {
-  if (!path.closed || path.vertices.length < 4) {
-    return null;
-  }
-  const coords = path.vertices.map((id) => vertices.get(id));
-  let points = coords;
-  if (coords.length > 1) {
-    const first = coords[0];
-    const last = coords[coords.length - 1];
-    if (first.x === last.x && first.y === last.y) {
-      points = coords.slice(0, -1);
-    }
-  }
-  if (points.length < 4) {
-    return null;
-  }
-  const circle = fitCircleLeastSquares(points);
-  if (!circle) {
-    return null;
-  }
-  const distancesSquared = points.map((p) => {
-    const dx = p.x - circle.cx;
-    const dy = p.y - circle.cy;
-    return dx * dx + dy * dy;
-  });
-  const radiusSquared = circle.radius * circle.radius;
-  const minRadiusSquared = (circle.radius - epsilon) * (circle.radius - epsilon);
-  const maxRadiusSquared = (circle.radius + epsilon) * (circle.radius + epsilon);
-  const minRadiusSquared2x = (circle.radius - 2 * epsilon) * (circle.radius - 2 * epsilon);
-  const maxRadiusSquared2x = (circle.radius + 2 * epsilon) * (circle.radius + 2 * epsilon);
-  const withinEpsilon = distancesSquared.filter(
-    (d) => d >= minRadiusSquared && d <= maxRadiusSquared
-  ).length;
-  const allWithin2Epsilon = distancesSquared.every(
-    (d) => d >= minRadiusSquared2x && d <= maxRadiusSquared2x
-  );
-  const percentileThreshold = 0.9;
-  const isCircle = withinEpsilon / distancesSquared.length >= percentileThreshold && allWithin2Epsilon;
-  console.log(
-    `Circle detection: path with ${points.length} points, fitted radius ${circle.radius.toFixed(2)}, center (${circle.cx.toFixed(2)}, ${circle.cy.toFixed(2)}), ${(withinEpsilon / distancesSquared.length * 100).toFixed(1)}% within epsilon, all within 2x epsilon => ${isCircle ? "CIRCLE" : "not a circle"}`
-  );
-  if (isCircle) {
-    return {
-      cx: circle.cx + 0.5,
-      // Shift by 0.5 to align with pixel centers
-      cy: circle.cy + 0.5,
-      radius: circle.radius
-    };
-  }
-  return null;
+// browser-app/incremental_segmentation.ts
+var MAX_ERROR = 0.75;
+var MAX_ERROR_P90 = 2;
+var MIN_POINTS = 5;
+var LOOKAHEAD_POINTS = 2;
+var ERROR_PERCENTILE = 0.9;
+var MIN_RADIUS = 2;
+var MAX_RADIUS = 1e4;
+var ARC_PREFERENCE_FACTOR = 1.2;
+var MIN_SWEEP_ANGLE = Math.PI / 6;
+function percentile(values, p) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.floor(sorted.length * p);
+  return sorted[Math.min(index, sorted.length - 1)];
 }
-function fitCircleLeastSquares(points) {
-  const n = points.length;
-  let mx = 0;
-  let my = 0;
-  for (const p of points) {
-    mx += p.x;
-    my += p.y;
+var IncrementalLineFit = class {
+  n = 0;
+  sumX = 0;
+  sumY = 0;
+  sumXX = 0;
+  sumYY = 0;
+  sumXY = 0;
+  addPoint(p) {
+    this.n++;
+    this.sumX += p.x;
+    this.sumY += p.y;
+    this.sumXX += p.x * p.x;
+    this.sumYY += p.y * p.y;
+    this.sumXY += p.x * p.y;
   }
-  mx /= n;
-  my /= n;
-  const centeredPoints = points.map((p) => ({
-    x: p.x - mx,
-    y: p.y - my
-  }));
-  let Sxx = 0, Sxy = 0, Syy = 0, Sx = 0, Sy = 0;
-  let Sxxx = 0, Sxyy = 0, Syyy = 0, Sxxy = 0;
-  for (const p of centeredPoints) {
-    const x = p.x;
-    const y = p.y;
-    const x2 = x * x;
-    const y2 = y * y;
-    Sxx += x2;
-    Sxy += x * y;
-    Syy += y2;
-    Sx += x;
-    Sy += y;
-    Sxxx += x * x2;
-    Sxyy += x * y2;
-    Syyy += y * y2;
-    Sxxy += x2 * y;
+  getCount() {
+    return this.n;
   }
-  const b1 = Sxxx + Sxyy;
-  const b2 = Syyy + Sxxy;
-  const b3 = Sxx + Syy;
-  const det = Sxx * (Syy * n - Sy * Sy) - Sxy * (Sxy * n - Sx * Sy) + Sx * (Sxy * Sy - Syy * Sx);
-  if (Math.abs(det) < 1e-10) {
-    return null;
+  /**
+   * Compute line fit and return perpendicular distance to a point
+   */
+  distanceToPoint(p) {
+    if (this.n < 2) return 0;
+    const { centroid, direction } = this.getFit();
+    const dx = p.x - centroid.x;
+    const dy = p.y - centroid.y;
+    const perpX = -direction.y;
+    const perpY = direction.x;
+    return Math.abs(dx * perpX + dy * perpY);
   }
-  const detA = b1 * (Syy * n - Sy * Sy) - Sxy * (b2 * n - b3 * Sy) + Sx * (b2 * Sy - Syy * b3);
-  const a = detA / det / 2;
-  const detB = Sxx * (b2 * n - b3 * Sy) - b1 * (Sxy * n - Sx * Sy) + Sx * (Sxy * b3 - b2 * Sx);
-  const b = detB / det / 2;
-  const detC = Sxx * (Syy * b3 - Sy * b2) - Sxy * (Sxy * b3 - Sx * b2) + b1 * (Sxy * Sy - Syy * Sx);
-  const c = detC / det;
-  const cx = a + mx;
-  const cy = b + my;
-  const r2 = c + a * a + b * b;
-  if (r2 <= 0) {
-    return null;
-  }
-  const radius = Math.sqrt(r2);
-  return { cx, cy, radius };
-}
-
-// browser-app/primitives/key_vertices.ts
-function detectKeyVertices(path, vertices, windowSize = 5, debugCallback) {
-  const keyVertices = [];
-  const curvatureDebug = [];
-  const coords = path.vertices.map((id) => vertices.get(id));
-  if (coords.length === 0) {
-    return { keyVertices, curvatureDebug };
-  }
-  if (!path.closed) {
-    const start = coords[0];
-    keyVertices.push({
-      vertexId: start.id,
-      x: start.x,
-      y: start.y,
-      reason: "endpoint"
-    });
-    if (coords.length > 1) {
-      const end = coords[coords.length - 1];
-      keyVertices.push({
-        vertexId: end.id,
-        x: end.x,
-        y: end.y,
-        reason: "endpoint"
-      });
+  getFit() {
+    if (this.n < 2) {
+      return {
+        centroid: { x: 0, y: 0 },
+        direction: { x: 1, y: 0 }
+      };
     }
-  }
-  if (coords.length < windowSize + 1) {
-    return { keyVertices, curvatureDebug };
-  }
-  const collectDebug = debugCallback || ((x, y, dx, dy, mag) => {
-    curvatureDebug.push({
-      x,
-      y,
-      directionX: dx,
-      directionY: dy,
-      magnitude: mag
-    });
-  });
-  const curvatures = calculatePathCurvature(
-    coords,
-    windowSize,
-    path.closed,
-    collectDebug
-  );
-  const curvatureThreshold = 2.2;
-  const localMaxima = findLocalMaxima(
-    curvatures,
-    curvatureThreshold,
-    path.closed
-  );
-  for (const index of localMaxima) {
-    const vertex = coords[index];
-    if (!keyVertices.some((kv) => kv.vertexId === vertex.id)) {
-      keyVertices.push({
-        vertexId: vertex.id,
-        x: vertex.x,
-        y: vertex.y,
-        reason: "curvature"
-      });
-    }
-  }
-  return { keyVertices, curvatureDebug };
-}
-function calculatePathCurvature(points, windowSize, closed, debugCallback) {
-  const curvatures = [];
-  const n = points.length;
-  if (n < 2) {
-    return curvatures;
-  }
-  const getPoint = (idx) => {
-    if (closed) {
-      return points[(idx % n + n) % n];
-    }
-    return points[Math.max(0, Math.min(n - 1, idx))];
-  };
-  const segments = [];
-  const numSegments = closed ? n : n - 1;
-  for (let i = 0; i < numSegments; i++) {
-    const A = getPoint(i);
-    const B = getPoint(i + 1);
-    const dx = B.x - A.x;
-    const dy = B.y - A.y;
-    const length = Math.sqrt(dx * dx + dy * dy);
-    segments.push({
-      length,
-      midX: (A.x + B.x) / 2,
-      midY: (A.y + B.y) / 2,
-      ax: 0,
-      // Will be updated when we know centroid
-      ay: 0,
-      bx: 0,
-      by: 0
-    });
-  }
-  for (let i = 0; i < n; i++) {
-    const halfWindow = Math.floor(windowSize / 2);
-    const windowSegments = [];
-    const segmentIndices = [];
-    for (let offset = -halfWindow; offset <= halfWindow; offset++) {
-      let segIdx;
-      if (closed) {
-        segIdx = ((i + offset) % numSegments + numSegments) % numSegments;
-      } else {
-        segIdx = Math.max(0, Math.min(numSegments - 1, i + offset));
-      }
-      if (!segmentIndices.includes(segIdx)) {
-        windowSegments.push(segments[segIdx]);
-        segmentIndices.push(segIdx);
-      }
-    }
-    let totalLength = 0;
-    let weightedCx = 0;
-    let weightedCy = 0;
-    for (const seg of windowSegments) {
-      totalLength += seg.length;
-      weightedCx += seg.length * seg.midX;
-      weightedCy += seg.length * seg.midY;
-    }
-    const centroidX = weightedCx / totalLength;
-    const centroidY = weightedCy / totalLength;
-    let covXX = 0;
-    let covXY = 0;
-    let covYY = 0;
-    for (let j = 0; j < segmentIndices.length; j++) {
-      const seg = windowSegments[j];
-      const segIdx = segmentIndices[j];
-      const A = getPoint(segIdx);
-      const B = getPoint(segIdx + 1);
-      const ax = A.x - centroidX;
-      const ay = A.y - centroidY;
-      const bx = B.x - centroidX;
-      const by = B.y - centroidY;
-      const L = seg.length;
-      covXX += L / 3 * (ax * ax + ax * bx + bx * bx);
-      covXY += L / 3 * (ax * ay + ax * by + bx * by);
-      covYY += L / 3 * (ay * ay + ay * by + by * by);
-    }
+    const meanX = this.sumX / this.n;
+    const meanY = this.sumY / this.n;
+    const covXX = this.sumXX / this.n - meanX * meanX;
+    const covYY = this.sumYY / this.n - meanY * meanY;
+    const covXY = this.sumXY / this.n - meanX * meanY;
     const trace = covXX + covYY;
     const det = covXX * covYY - covXY * covXY;
-    const lambda1 = trace / 2 + Math.sqrt(Math.max(0, trace * trace / 4 - det));
-    let dx, dy;
+    const lambda1 = (trace + Math.sqrt(trace * trace - 4 * det)) / 2;
+    let dirX, dirY;
     if (Math.abs(covXY) > 1e-10) {
-      dx = lambda1 - covYY;
-      dy = covXY;
+      dirX = lambda1 - covYY;
+      dirY = covXY;
     } else if (covXX > covYY) {
-      dx = 1;
-      dy = 0;
+      dirX = 1;
+      dirY = 0;
     } else {
-      dx = 0;
-      dy = 1;
+      dirX = 0;
+      dirY = 1;
     }
-    const dirLength = Math.sqrt(dx * dx + dy * dy);
-    if (dirLength > 1e-10) {
-      dx /= dirLength;
-      dy /= dirLength;
+    const length = Math.sqrt(dirX * dirX + dirY * dirY);
+    if (length > 1e-10) {
+      dirX /= length;
+      dirY /= length;
     }
-    const currentPoint = points[i];
-    const windowStart = getPoint(i - halfWindow);
-    const windowEnd = getPoint(i + halfWindow);
-    const dist1 = Math.abs(
-      (currentPoint.x - centroidX) * dy - (currentPoint.y - centroidY) * dx
-    );
-    const dist2 = Math.abs(
-      (windowStart.x - centroidX) * dy - (windowStart.y - centroidY) * dx
-    );
-    const dist3 = Math.abs(
-      (windowEnd.x - centroidX) * dy - (windowEnd.y - centroidY) * dx
-    );
-    const threshold = Math.SQRT2 / 2;
-    const filteredDist1 = dist1 < threshold ? 0 : dist1;
-    const filteredDist2 = dist2 < threshold ? 0 : dist2;
-    const filteredDist3 = dist3 < threshold ? 0 : dist3;
-    const totalCurvature = filteredDist1 + filteredDist2 + filteredDist3;
-    curvatures.push(totalCurvature);
-    if (debugCallback) {
-      debugCallback(
-        currentPoint.x,
-        currentPoint.y,
-        dy,
-        // Perpendicular to line direction
-        -dx,
-        // Perpendicular to line direction
-        totalCurvature
-      );
-    }
+    return {
+      centroid: { x: meanX, y: meanY },
+      direction: { x: dirX, y: dirY }
+    };
   }
-  return curvatures;
+};
+var IncrementalCircleFit = class {
+  n = 0;
+  sumX = 0;
+  sumY = 0;
+  sumXX = 0;
+  sumYY = 0;
+  sumXY = 0;
+  sumR2 = 0;
+  // Σ(x²+y²)
+  sumXR2 = 0;
+  // Σx(x²+y²)
+  sumYR2 = 0;
+  // Σy(x²+y²)
+  addPoint(p) {
+    this.n++;
+    const r2 = p.x * p.x + p.y * p.y;
+    this.sumX += p.x;
+    this.sumY += p.y;
+    this.sumXX += p.x * p.x;
+    this.sumYY += p.y * p.y;
+    this.sumXY += p.x * p.y;
+    this.sumR2 += r2;
+    this.sumXR2 += p.x * r2;
+    this.sumYR2 += p.y * r2;
+  }
+  getCount() {
+    return this.n;
+  }
+  /**
+   * Compute circle fit and return distance to point
+   */
+  distanceToPoint(p) {
+    if (this.n < 3) return 0;
+    const { center, radius, valid } = this.getFit();
+    if (!valid) return Infinity;
+    const dx = p.x - center.x;
+    const dy = p.y - center.y;
+    const distToCenter = Math.sqrt(dx * dx + dy * dy);
+    return Math.abs(distToCenter - radius);
+  }
+  getFit() {
+    if (this.n < 3) {
+      return { center: { x: 0, y: 0 }, radius: 0, valid: false };
+    }
+    const n = this.n;
+    const a11 = this.sumXX;
+    const a12 = this.sumXY;
+    const a13 = this.sumX;
+    const a21 = this.sumXY;
+    const a22 = this.sumYY;
+    const a23 = this.sumY;
+    const a31 = this.sumX;
+    const a32 = this.sumY;
+    const a33 = n;
+    const b1 = this.sumXR2;
+    const b2 = this.sumYR2;
+    const b3 = this.sumR2;
+    const det = a11 * (a22 * a33 - a23 * a32) - a12 * (a21 * a33 - a23 * a31) + a13 * (a21 * a32 - a22 * a31);
+    if (Math.abs(det) < 1e-10) {
+      return { center: { x: 0, y: 0 }, radius: 0, valid: false };
+    }
+    const det1 = b1 * (a22 * a33 - a23 * a32) - a12 * (b2 * a33 - a23 * b3) + a13 * (b2 * a32 - a22 * b3);
+    const det2 = a11 * (b2 * a33 - a23 * b3) - b1 * (a21 * a33 - a23 * a31) + a13 * (a21 * b3 - b2 * a31);
+    const det3 = a11 * (a22 * b3 - b2 * a32) - a12 * (a21 * b3 - b2 * a31) + b1 * (a21 * a32 - a22 * a31);
+    const cx = det1 / det / 2;
+    const cy = det2 / det / 2;
+    const c = det3 / det;
+    const radius = Math.sqrt(cx * cx + cy * cy + c);
+    const valid = radius >= MIN_RADIUS && radius <= MAX_RADIUS;
+    return {
+      center: { x: cx, y: cy },
+      radius,
+      valid
+    };
+  }
+};
+function segmentPath(points, isClosed) {
+  const N = points.length;
+  if (N < 2) return [];
+  const segments = [];
+  let i = 0;
+  while (i < N) {
+    const segStart = i;
+    const lineFit = new IncrementalLineFit();
+    const circleFit = new IncrementalCircleFit();
+    const lineErrors = [];
+    const circleErrors = [];
+    let j = i;
+    while (j < N) {
+      lineFit.addPoint(points[j]);
+      circleFit.addPoint(points[j]);
+      if (lineFit.getCount() < MIN_POINTS) {
+        j++;
+        continue;
+      }
+      lineErrors.length = 0;
+      circleErrors.length = 0;
+      for (let k = segStart; k <= j; k++) {
+        lineErrors.push(lineFit.distanceToPoint(points[k]));
+        circleErrors.push(circleFit.distanceToPoint(points[k]));
+      }
+      const medianLineError = percentile(lineErrors, 0.5);
+      const medianCircleError = percentile(circleErrors, 0.5);
+      const percentileLineError = percentile(lineErrors, ERROR_PERCENTILE);
+      const percentileCircleError = percentile(circleErrors, ERROR_PERCENTILE);
+      const lineOk = medianLineError <= MAX_ERROR && percentileLineError <= MAX_ERROR_P90;
+      const circleOk = medianCircleError <= MAX_ERROR && percentileCircleError <= MAX_ERROR_P90;
+      if (j - segStart > 10 && j % 5 === 0) {
+        console.log(`[Segment ${segStart}-${j}] Points: ${j - segStart + 1}`);
+        console.log(`  Line: median=${medianLineError.toFixed(3)}px (${lineOk ? "\u2713" : "\u2717"}), p90=${percentileLineError.toFixed(3)}px`);
+        console.log(`  Circle: median=${medianCircleError.toFixed(3)}px (${circleOk ? "\u2713" : "\u2717"}), p90=${percentileCircleError.toFixed(3)}px`);
+        if (circleFit.getCount() >= MIN_POINTS) {
+          const circleFitResult = circleFit.getFit();
+          if (circleFitResult.valid) {
+            console.log(`  Circle fit: center=(${circleFitResult.center.x.toFixed(1)}, ${circleFitResult.center.y.toFixed(1)}), radius=${circleFitResult.radius.toFixed(1)}px`);
+          }
+        }
+      }
+      const lineMedianBad = medianLineError > MAX_ERROR;
+      const circleMedianBad = medianCircleError > MAX_ERROR;
+      if (lineOk || circleOk) {
+        if (lineMedianBad && circleMedianBad) {
+          console.log(`[Segment ${segStart}-${j}] STOPPED - both median errors exceeded ${MAX_ERROR}px`);
+          break;
+        }
+        j++;
+        continue;
+      }
+      console.log(`[Segment ${segStart}-${j}] STOPPED - both fits exceeded tolerance`);
+      break;
+    }
+    const segEnd = Math.max(j - LOOKAHEAD_POINTS, segStart + MIN_POINTS - 1);
+    console.log(`[Segment finalized] ${segStart}-${segEnd} (${segEnd - segStart + 1} points, backed up ${j - segEnd} points)`);
+    segments.push({
+      startIndex: segStart,
+      endIndex: Math.min(segEnd, N - 1),
+      type: "line"
+      // Will be classified later
+    });
+    i = segEnd + 1;
+  }
+  if (isClosed && segments.length >= 2) {
+    const merged = reconcileClosedPath(points, segments);
+    return merged;
+  }
+  return segments;
 }
-function findLocalMaxima(values, threshold, closed) {
-  const maxima = [];
-  const n = values.length;
-  const start = closed ? 0 : 1;
-  const end = closed ? n - 1 : n - 1;
-  for (let i = start; i < end; i++) {
-    const curr = values[i];
-    if (curr < threshold) {
-      continue;
+function reconcileClosedPath(points, segments) {
+  if (segments.length < 2) return segments;
+  const first = segments[0];
+  const last = segments[segments.length - 1];
+  const wrappedPoints = [];
+  for (let i = last.startIndex; i < points.length; i++) {
+    wrappedPoints.push(points[i]);
+  }
+  for (let i = 0; i <= first.endIndex; i++) {
+    wrappedPoints.push(points[i]);
+  }
+  if (wrappedPoints.length < MIN_POINTS) return segments;
+  const lineFit = new IncrementalLineFit();
+  const circleFit = new IncrementalCircleFit();
+  for (const p of wrappedPoints) {
+    lineFit.addPoint(p);
+    circleFit.addPoint(p);
+  }
+  let maxLineError = 0;
+  let maxCircleError = 0;
+  for (const p of wrappedPoints) {
+    maxLineError = Math.max(maxLineError, lineFit.distanceToPoint(p));
+    maxCircleError = Math.max(maxCircleError, circleFit.distanceToPoint(p));
+  }
+  if (maxLineError <= MAX_ERROR || maxCircleError <= MAX_ERROR) {
+    const newSegment = {
+      startIndex: last.startIndex,
+      endIndex: first.endIndex,
+      type: "line"
+      // Will be classified later
+    };
+    return [newSegment, ...segments.slice(1, -1)];
+  }
+  return segments;
+}
+function classifySegments(points, segments, isClosed) {
+  return segments.map((seg) => {
+    const segPoints = extractSegmentPoints(points, seg, isClosed);
+    if (segPoints.length < MIN_POINTS) {
+      return { ...seg, type: "line" };
     }
-    let prev, next;
-    if (closed) {
-      prev = values[(i - 1 + n) % n];
-      next = values[(i + 1) % n];
+    const lineFit = new IncrementalLineFit();
+    const lineErrors = [];
+    for (const p of segPoints) {
+      lineFit.addPoint(p);
+    }
+    const lineResult = lineFit.getFit();
+    for (const p of segPoints) {
+      lineErrors.push(lineFit.distanceToPoint(p));
+    }
+    const medianLineError = percentile(lineErrors, 0.5);
+    const p90LineError = percentile(lineErrors, ERROR_PERCENTILE);
+    const circleFit = new IncrementalCircleFit();
+    const circleErrors = [];
+    for (const p of segPoints) {
+      circleFit.addPoint(p);
+    }
+    const circleResult = circleFit.getFit();
+    let medianCircleError = Infinity;
+    let p90CircleError = Infinity;
+    let sweepAngle = 0;
+    let clockwise = false;
+    if (circleResult.valid) {
+      for (const p of segPoints) {
+        circleErrors.push(circleFit.distanceToPoint(p));
+      }
+      medianCircleError = percentile(circleErrors, 0.5);
+      p90CircleError = percentile(circleErrors, ERROR_PERCENTILE);
+      const startAngle = Math.atan2(
+        segPoints[0].y - circleResult.center.y,
+        segPoints[0].x - circleResult.center.x
+      );
+      const endAngle = Math.atan2(
+        segPoints[segPoints.length - 1].y - circleResult.center.y,
+        segPoints[segPoints.length - 1].x - circleResult.center.x
+      );
+      let totalAngle = 0;
+      let cumulativeAngle = 0;
+      for (let i = 1; i < segPoints.length; i++) {
+        const angle1 = Math.atan2(
+          segPoints[i - 1].y - circleResult.center.y,
+          segPoints[i - 1].x - circleResult.center.x
+        );
+        const angle2 = Math.atan2(
+          segPoints[i].y - circleResult.center.y,
+          segPoints[i].x - circleResult.center.x
+        );
+        let deltaAngle = angle2 - angle1;
+        while (deltaAngle > Math.PI) deltaAngle -= 2 * Math.PI;
+        while (deltaAngle < -Math.PI) deltaAngle += 2 * Math.PI;
+        cumulativeAngle += deltaAngle;
+        totalAngle += Math.abs(deltaAngle);
+      }
+      sweepAngle = totalAngle;
+      clockwise = cumulativeAngle > 0;
+    }
+    const lineWithinTolerance = medianLineError <= MAX_ERROR && p90LineError <= MAX_ERROR_P90;
+    const circleWithinTolerance = medianCircleError <= MAX_ERROR && p90CircleError <= MAX_ERROR_P90;
+    if (!lineWithinTolerance && !circleWithinTolerance) {
+      console.log(`[Classify segment ${seg.startIndex}-${seg.endIndex}] ${segPoints.length} points`);
+      console.log(`  Line: median=${medianLineError.toFixed(3)}px, p90=${p90LineError.toFixed(3)}px (\u2717)`);
+      console.log(`  Circle: median=${medianCircleError.toFixed(3)}px, p90=${p90CircleError.toFixed(3)}px (\u2717)`);
+      console.log(`  \u2192 Classified as: UNFITTED (neither fit within tolerance)`);
+      return {
+        ...seg,
+        type: "polyline"
+        // Keep raw skeleton pixels
+      };
+    }
+    const isArc = circleResult.valid && circleWithinTolerance && medianCircleError <= medianLineError * ARC_PREFERENCE_FACTOR && sweepAngle >= MIN_SWEEP_ANGLE;
+    console.log(`[Classify segment ${seg.startIndex}-${seg.endIndex}] ${segPoints.length} points`);
+    console.log(`  Line: median=${medianLineError.toFixed(3)}px, p90=${p90LineError.toFixed(3)}px`);
+    console.log(`  Circle: median=${medianCircleError.toFixed(3)}px, p90=${p90CircleError.toFixed(3)}px, valid=${circleResult.valid}, sweep=${(sweepAngle * 180 / Math.PI).toFixed(1)}\xB0`);
+    if (circleResult.valid) {
+      console.log(`  Circle: center=(${circleResult.center.x.toFixed(1)}, ${circleResult.center.y.toFixed(1)}), radius=${circleResult.radius.toFixed(1)}px`);
+    }
+    console.log(`  \u2192 Classified as: ${isArc ? "ARC" : "LINE"} (circle ${medianCircleError.toFixed(3)} vs line ${medianLineError.toFixed(3)} * ${ARC_PREFERENCE_FACTOR})`);
+    if (isArc) {
+      return {
+        ...seg,
+        type: "arc",
+        circleFit: {
+          center: circleResult.center,
+          radius: circleResult.radius,
+          error: medianCircleError,
+          sweepAngle,
+          clockwise
+        }
+      };
     } else {
-      prev = values[i - 1];
-      next = values[i + 1];
+      return {
+        ...seg,
+        type: "line",
+        lineFit: {
+          centroid: lineResult.centroid,
+          direction: lineResult.direction,
+          error: medianLineError
+        }
+      };
     }
-    if (curr > prev && curr > next) {
-      maxima.push(i);
+  });
+}
+function extractSegmentPoints(points, segment, isClosed) {
+  const result = [];
+  if (segment.endIndex >= segment.startIndex) {
+    for (let i = segment.startIndex; i <= segment.endIndex; i++) {
+      result.push(points[i]);
+    }
+  } else if (isClosed) {
+    for (let i = segment.startIndex; i < points.length; i++) {
+      result.push(points[i]);
+    }
+    for (let i = 0; i <= segment.endIndex; i++) {
+      result.push(points[i]);
     }
   }
-  return maxima;
+  return result;
+}
+function vectorizeWithIncrementalSegmentation(points, isClosed) {
+  const segments = segmentPath(points, isClosed);
+  return classifySegments(points, segments, isClosed);
 }
 
 // browser-app/vectorize.ts
@@ -3463,49 +3537,92 @@ function vectorizeSkeleton(binary) {
   }
   const allKeyVertices = [];
   const allCurvatureDebug = [];
-  for (const path of paths) {
-    const result = detectKeyVertices(path, vertices, 10);
-    allKeyVertices.push(...result.keyVertices);
-    allCurvatureDebug.push(...result.curvatureDebug);
-  }
-  console.log(`Vectorization: Detected ${allKeyVertices.length} key vertices`);
-  const circleEpsilon = 1.4;
-  const circleResults = paths.map(
-    (path) => detectCircle(path, vertices, circleEpsilon)
-  );
-  const circleCount = circleResults.filter((r) => r !== null).length;
-  console.log(`Vectorization: Detected ${circleCount} circles`);
-  const dpPaths = paths.map(
-    (path, i) => circleResults[i] ? path : douglasPeucker(path, vertices, 0.1)
-  );
-  const totalDPBefore = paths.reduce((sum, p) => sum + p.vertices.length, 0);
-  const totalDPAfter = dpPaths.reduce((sum, p) => sum + p.vertices.length, 0);
-  console.log(
-    `Vectorization: DP pass simplified from ${totalDPBefore} to ${totalDPAfter} vertices`
-  );
-  const simplifiedPaths = dpPaths.map(
-    (path, i) => circleResults[i] ? path : segmentedLinearRegression(path, vertices, width, 0.75)
-  );
-  const totalVerticesBefore = dpPaths.reduce(
+  const circleResults = paths.map(() => null);
+  const totalVerticesBefore = paths.reduce(
     (sum, p) => sum + p.vertices.length,
     0
   );
+  const segmentedPaths = paths.map((path) => {
+    const points = path.vertices.map((id) => {
+      const v = vertices.get(id);
+      return v ? { x: v.x, y: v.y } : { x: 0, y: 0 };
+    });
+    const segments = vectorizeWithIncrementalSegmentation(
+      points,
+      path.closed
+    );
+    return { segments, closed: path.closed };
+  });
+  const totalSegments = segmentedPaths.reduce(
+    (sum, p) => sum + p.segments.length,
+    0
+  );
+  const totalArcs = segmentedPaths.reduce(
+    (sum, p) => sum + p.segments.filter((s) => s.type === "arc").length,
+    0
+  );
+  console.log(
+    `Vectorization: Incremental segmentation created ${totalSegments} segments (${totalArcs} arcs, ${totalSegments - totalArcs} lines) from ${totalVerticesBefore} vertices`
+  );
+  const simplifiedPaths = segmentedPaths.map((pathData, pathIdx) => {
+    const originalPath = paths[pathIdx];
+    const resultVertices = [];
+    for (let i = 0; i < pathData.segments.length; i++) {
+      const seg = pathData.segments[i];
+      const points = originalPath.vertices.slice(
+        seg.startIndex,
+        seg.endIndex + 1
+      );
+      if (resultVertices.length === 0) {
+        resultVertices.push(points[0]);
+      }
+      if (seg.type === "arc" || seg.type === "line") {
+        resultVertices.push(points[points.length - 1]);
+      } else {
+        for (let k = 1; k < points.length; k++) {
+          resultVertices.push(points[k]);
+        }
+      }
+    }
+    return {
+      vertices: resultVertices,
+      closed: originalPath.closed
+    };
+  });
   const totalVerticesAfter = simplifiedPaths.reduce(
     (sum, p) => sum + p.vertices.length,
     0
   );
   console.log(
-    `Vectorization: SLR simplified from ${totalVerticesBefore} to ${totalVerticesAfter} vertices (${((1 - totalVerticesAfter / totalVerticesBefore) * 100).toFixed(1)}% reduction)`
+    `Vectorization: Simplified to ${totalVerticesAfter} vertices (${((1 - totalVerticesAfter / totalVerticesBefore) * 100).toFixed(1)}% reduction)`
   );
   const finalPaths = simplifiedPaths.map((path, i) => {
     const circle = circleResults[i];
+    const pathSegments = segmentedPaths[i];
+    const points = path.vertices.map((id) => {
+      const v = vertices.get(id);
+      return v ? { x: v.x, y: v.y } : { x: 0, y: 0 };
+    });
+    const adjustedSegments = pathSegments.segments.map((seg, segIdx) => {
+      return {
+        ...seg,
+        startIndex: segIdx,
+        endIndex: segIdx + 1
+      };
+    });
+    console.log(
+      `[Path ${i}] ${points.length} points, ${adjustedSegments.length} segments:`
+    );
+    adjustedSegments.forEach((seg, idx) => {
+      console.log(
+        `  Segment ${idx}: [${seg.startIndex}-${seg.endIndex}] type=${seg.type}`
+      );
+    });
     return {
-      points: path.vertices.map((id) => {
-        const v = vertices.get(id);
-        return v ? { x: v.x, y: v.y } : { x: 0, y: 0 };
-      }),
+      points,
       closed: path.closed,
-      circle: circle || void 0
+      circle: circle || void 0,
+      segments: adjustedSegments
     };
   });
   return {
@@ -3516,292 +3633,17 @@ function vectorizeSkeleton(binary) {
     curvatureDebug: allCurvatureDebug
   };
 }
-function segmentedLinearRegression(path, vertices, width, epsilon) {
-  if (path.vertices.length <= 2) {
-    return path;
-  }
-  let coords = path.vertices.map((id) => vertices.get(id));
-  let wasClosed = path.closed;
-  if (wasClosed && coords.length > 2) {
-    const first = coords[0];
-    const last = coords[coords.length - 1];
-    if (first.x === last.x && first.y === last.y) {
-      coords = coords.slice(0, -1);
-      if (coords.length > 2) {
-        const cx = coords.reduce((sum, p) => sum + p.x, 0) / coords.length;
-        const cy = coords.reduce((sum, p) => sum + p.y, 0) / coords.length;
-        let maxDist = 0;
-        let maxDistIndex = 0;
-        for (let i = 0; i < coords.length; i++) {
-          const dx = coords[i].x - cx;
-          const dy = coords[i].y - cy;
-          const dist = dx * dx + dy * dy;
-          if (dist > maxDist) {
-            maxDist = dist;
-            maxDistIndex = i;
-          }
-        }
-        coords = [
-          ...coords.slice(maxDistIndex),
-          ...coords.slice(0, maxDistIndex)
-        ];
-      }
-    }
-  }
-  const simplified = slrRecursive(coords, epsilon, width, wasClosed);
-  for (const vertex of simplified) {
-    if (!vertices.has(vertex.id)) {
-      vertices.set(vertex.id, vertex);
-    }
-  }
-  const resultVertices = simplified.map((v) => v.id);
-  if (wasClosed && simplified.length > 0) {
-    resultVertices.push(simplified[0].id);
-  }
-  return {
-    vertices: resultVertices,
-    closed: wasClosed
-  };
-}
-function slrRecursive(points, epsilon, width, isClosed = false) {
-  if (points.length <= 2) {
-    return points;
-  }
-  const { direction, centroid, maxError } = fitLineToSegments(points);
-  if (maxError <= epsilon) {
-    const start2 = points[0];
-    const end2 = points[points.length - 1];
-    const projStart = projectOntoLine(start2, centroid, direction);
-    const projEnd = projectOntoLine(end2, centroid, direction);
-    if (false) {
-      console.log(
-        `
-=== SLR: Good fit (error ${maxError.toFixed(2)} <= ${epsilon}) ===`
-      );
-      console.log(`Points: ${points.map((p) => `(${p.x},${p.y})`).join(", ")}`);
-      console.log(
-        `Centroid: (${centroid.x.toFixed(2)}, ${centroid.y.toFixed(2)})`
-      );
-      console.log(
-        `Direction: (${direction.x.toFixed(3)}, ${direction.y.toFixed(3)})`
-      );
-      console.log(
-        `Projected start: (${projStart.x.toFixed(2)}, ${projStart.y.toFixed(2)})`
-      );
-      console.log(
-        `Projected end: (${projEnd.x.toFixed(2)}, ${projEnd.y.toFixed(2)})`
-      );
-    }
-    const startId = projStart.y * width + projStart.x;
-    const endId = projEnd.y * width + projEnd.x;
-    return [
-      { ...projStart, id: startId, neighbors: [] },
-      { ...projEnd, id: endId, neighbors: [] }
-    ];
-  }
-  const start = points[0];
-  const end = points[points.length - 1];
-  let maxDist = 0;
-  let maxDistIndex = 1;
-  const dx = end.x - start.x;
-  const dy = end.y - start.y;
-  const lineLen = Math.sqrt(dx * dx + dy * dy);
-  if (lineLen < 1e-10) {
-    return [start, end];
-  }
-  for (let i = 1; i < points.length - 1; i++) {
-    const p = points[i];
-    const dist = Math.abs(
-      (end.y - start.y) * p.x - (end.x - start.x) * p.y + end.x * start.y - end.y * start.x
-    ) / lineLen;
-    if (dist > maxDist) {
-      maxDist = dist;
-      maxDistIndex = i;
-    }
-  }
-  const left = slrRecursive(
-    points.slice(0, maxDistIndex + 1),
-    epsilon,
-    width,
-    false
-  );
-  const right = slrRecursive(points.slice(maxDistIndex), epsilon, width, false);
-  if (left.length > 1 && right.length > 1) {
-    const intersection = findLineIntersection(
-      left[left.length - 2],
-      left[left.length - 1],
-      right[0],
-      right[1]
-    );
-    if (intersection) {
-      const intId = intersection.y * width + intersection.x;
-      const intVertex = { ...intersection, id: intId, neighbors: [] };
-      return [
-        ...left.slice(0, -1),
-        intVertex,
-        ...right.slice(1)
-      ];
-    }
-  }
-  return [...left.slice(0, -1), ...right];
-}
-function fitLineToSegments(points) {
-  let totalLength = 0;
-  let weightedCx = 0;
-  let weightedCy = 0;
-  for (let i = 0; i < points.length - 1; i++) {
-    const A = points[i];
-    const B = points[i + 1];
-    const dx2 = B.x - A.x;
-    const dy2 = B.y - A.y;
-    const L = Math.sqrt(dx2 * dx2 + dy2 * dy2);
-    const segmentCentroid = {
-      x: (A.x + B.x) / 2,
-      y: (A.y + B.y) / 2
-    };
-    totalLength += L;
-    weightedCx += L * segmentCentroid.x;
-    weightedCy += L * segmentCentroid.y;
-  }
-  const centroid = {
-    x: weightedCx / totalLength,
-    y: weightedCy / totalLength
-  };
-  let covXX = 0;
-  let covXY = 0;
-  let covYY = 0;
-  for (let i = 0; i < points.length - 1; i++) {
-    const A = points[i];
-    const B = points[i + 1];
-    const dx2 = B.x - A.x;
-    const dy2 = B.y - A.y;
-    const L = Math.sqrt(dx2 * dx2 + dy2 * dy2);
-    const Ax = A.x - centroid.x;
-    const Ay = A.y - centroid.y;
-    const Bx = B.x - centroid.x;
-    const By = B.y - centroid.y;
-    covXX += L / 3 * (Ax * Ax + Ax * Bx + Bx * Bx);
-    covXY += L / 3 * (Ax * Ay + Ax * By + Bx * By);
-    covYY += L / 3 * (Ay * Ay + Ay * By + By * By);
-  }
-  const trace = covXX + covYY;
-  const det = covXX * covYY - covXY * covXY;
-  const lambda1 = trace / 2 + Math.sqrt(Math.max(0, trace * trace / 4 - det));
-  let dx, dy;
-  if (Math.abs(covXY) > 1e-10) {
-    dx = lambda1 - covYY;
-    dy = covXY;
-  } else if (covXX > covYY) {
-    dx = 1;
-    dy = 0;
-  } else {
-    dx = 0;
-    dy = 1;
-  }
-  const dirLength = Math.sqrt(dx * dx + dy * dy);
-  dx /= dirLength;
-  dy /= dirLength;
-  const direction = { x: dx, y: dy };
-  let maxError = 0;
-  let maxErrorIndex = 1;
-  for (let i = 1; i < points.length - 1; i++) {
-    const p = points[i];
-    const vx = p.x - centroid.x;
-    const vy = p.y - centroid.y;
-    const error = Math.abs(vx * dy - vy * dx);
-    if (error > maxError) {
-      maxError = error;
-      maxErrorIndex = i;
-    }
-  }
-  return { direction, centroid, maxError, maxErrorIndex };
-}
-function projectOntoLine(point, linePoint, direction) {
-  const vx = point.x - linePoint.x;
-  const vy = point.y - linePoint.y;
-  const t = vx * direction.x + vy * direction.y;
-  return {
-    x: linePoint.x + t * direction.x,
-    y: linePoint.y + t * direction.y
-  };
-}
-function findLineIntersection(a1, a2, b1, b2) {
-  const dx1 = a2.x - a1.x;
-  const dy1 = a2.y - a1.y;
-  const dx2 = b2.x - b1.x;
-  const dy2 = b2.y - b1.y;
-  const denom = dx1 * dy2 - dy1 * dx2;
-  if (Math.abs(denom) < 1e-10) {
-    return {
-      x: Math.round((a2.x + b1.x) / 2),
-      y: Math.round((a2.y + b1.y) / 2)
-    };
-  }
-  const dx3 = b1.x - a1.x;
-  const dy3 = b1.y - a1.y;
-  const t = (dx3 * dy2 - dy3 * dx2) / denom;
-  return {
-    x: Math.round(a1.x + t * dx1),
-    y: Math.round(a1.y + t * dy1)
-  };
-}
-function douglasPeucker(path, vertices, epsilon) {
-  if (path.vertices.length <= 2) {
-    return path;
-  }
-  const vertexCoords = path.vertices.map((id) => vertices.get(id));
-  const simplified = douglasPeuckerRecursive(vertexCoords, epsilon);
-  return {
-    vertices: simplified.map((v) => v.id),
-    closed: path.closed
-  };
-}
-function douglasPeuckerRecursive(points, epsilon) {
-  if (points.length <= 2) {
-    return points;
-  }
-  let maxDistance = 0;
-  let maxIndex = 0;
-  const start = points[0];
-  const end = points[points.length - 1];
-  for (let i = 1; i < points.length - 1; i++) {
-    const distance = perpendicularDistance(points[i], start, end);
-    if (distance > maxDistance) {
-      maxDistance = distance;
-      maxIndex = i;
-    }
-  }
-  if (maxDistance > epsilon) {
-    const left = douglasPeuckerRecursive(
-      points.slice(0, maxIndex + 1),
-      epsilon
-    );
-    const right = douglasPeuckerRecursive(points.slice(maxIndex), epsilon);
-    return [...left.slice(0, -1), ...right];
-  } else {
-    return [start, end];
-  }
-}
-function perpendicularDistance(point, lineStart, lineEnd) {
-  const dx = lineEnd.x - lineStart.x;
-  const dy = lineEnd.y - lineStart.y;
-  if (dx === 0 && dy === 0) {
-    return Math.sqrt(
-      (point.x - lineStart.x) ** 2 + (point.y - lineStart.y) ** 2
-    );
-  }
-  const numerator = Math.abs(
-    dy * point.x - dx * point.y + lineEnd.x * lineStart.y - lineEnd.y * lineStart.x
-  );
-  const denominator = Math.sqrt(dx * dx + dy * dy);
-  return numerator / denominator;
-}
 function isPixelSet(binary, x, y) {
   const pixelIndex = y * binary.width + x;
   const byteIndex = Math.floor(pixelIndex / 8);
   const bitIndex = 7 - pixelIndex % 8;
   if (byteIndex >= binary.data.length) return false;
   return (binary.data[byteIndex] & 1 << bitIndex) !== 0;
+}
+function calculateArcFlags(sweepAngle, clockwise) {
+  const largeArc = sweepAngle > Math.PI ? 1 : 0;
+  const sweep = clockwise ? 1 : 0;
+  return { largeArc, sweep };
 }
 function renderVectorizedToSVG(vectorized, svgElement) {
   const { width, height, paths } = vectorized;
@@ -3810,41 +3652,6 @@ function renderVectorizedToSVG(vectorized, svgElement) {
   svgElement.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svgElement.style.display = "block";
   svgElement.innerHTML = "";
-  for (const kv of vectorized.keyVertices) {
-    const kvCircle = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "circle"
-    );
-    kvCircle.setAttribute("cx", (kv.x + 0.5).toString());
-    kvCircle.setAttribute("cy", (kv.y + 0.5).toString());
-    kvCircle.setAttribute("r", "2");
-    kvCircle.setAttribute("fill", "none");
-    kvCircle.setAttribute("stroke", "blue");
-    kvCircle.setAttribute("stroke-width", "0.5");
-    kvCircle.setAttribute("vector-effect", "non-scaling-stroke");
-    svgElement.appendChild(kvCircle);
-  }
-  const curvatureScale = 2;
-  for (const curv of vectorized.curvatureDebug) {
-    const halfLength = curv.magnitude * curvatureScale / 2;
-    const x1 = curv.x + 0.5 - curv.directionX * halfLength;
-    const y1 = curv.y + 0.5 - curv.directionY * halfLength;
-    const x2 = curv.x + 0.5 + curv.directionX * halfLength;
-    const y2 = curv.y + 0.5 + curv.directionY * halfLength;
-    const curvLine = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "line"
-    );
-    curvLine.setAttribute("x1", x1.toString());
-    curvLine.setAttribute("y1", y1.toString());
-    curvLine.setAttribute("x2", x2.toString());
-    curvLine.setAttribute("y2", y2.toString());
-    curvLine.setAttribute("stroke", "orange");
-    curvLine.setAttribute("stroke-width", "0.3");
-    curvLine.setAttribute("opacity", "0.6");
-    curvLine.setAttribute("vector-effect", "non-scaling-stroke");
-    svgElement.appendChild(curvLine);
-  }
   for (const path of paths) {
     if (path.circle) {
       const circleElement = document.createElementNS(
@@ -3859,6 +3666,47 @@ function renderVectorizedToSVG(vectorized, svgElement) {
       circleElement.setAttribute("stroke-width", "0.5");
       circleElement.setAttribute("vector-effect", "non-scaling-stroke");
       svgElement.appendChild(circleElement);
+    } else if (path.segments && path.segments.length > 0) {
+      if (path.points.length === 0) continue;
+      const firstPoint = path.points[0];
+      let pathData = `M ${firstPoint.x + 0.5} ${firstPoint.y + 0.5}`;
+      for (const segment of path.segments) {
+        const segPoints = path.points.slice(
+          segment.startIndex,
+          segment.endIndex + 1
+        );
+        if (segPoints.length === 0) continue;
+        if (segment.type === "line") {
+          const endPoint = segPoints[segPoints.length - 1];
+          pathData += ` L ${endPoint.x + 0.5} ${endPoint.y + 0.5}`;
+        } else if (segment.type === "arc" && segment.circleFit) {
+          const endPoint = segPoints[segPoints.length - 1];
+          const { largeArc, sweep } = calculateArcFlags(
+            segment.circleFit.sweepAngle,
+            segment.circleFit.clockwise
+          );
+          const radius = segment.circleFit.radius;
+          pathData += ` A ${radius} ${radius} 0 ${largeArc} ${sweep} ${endPoint.x + 0.5} ${endPoint.y + 0.5}`;
+        } else {
+          for (let i = 1; i < segPoints.length; i++) {
+            const point = segPoints[i];
+            pathData += ` L ${point.x + 0.5} ${point.y + 0.5}`;
+          }
+        }
+      }
+      if (path.closed) {
+        pathData += " Z";
+      }
+      const pathElement = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "path"
+      );
+      pathElement.setAttribute("d", pathData);
+      pathElement.setAttribute("fill", "none");
+      pathElement.setAttribute("stroke", "red");
+      pathElement.setAttribute("stroke-width", "0.5");
+      pathElement.setAttribute("vector-effect", "non-scaling-stroke");
+      svgElement.appendChild(pathElement);
     } else {
       if (path.points.length === 0) continue;
       const firstPoint = path.points[0];
@@ -5495,3 +5343,4 @@ document.addEventListener("keydown", (e) => {
   }
 });
 renderPaletteUI();
+//# sourceMappingURL=bundle.js.map
