@@ -3133,6 +3133,219 @@ function fitCircleLeastSquares(points) {
   return { cx, cy, radius };
 }
 
+// browser-app/primitives/key_vertices.ts
+function detectKeyVertices(path, vertices, windowSize = 5, debugCallback) {
+  const keyVertices = [];
+  const curvatureDebug = [];
+  const coords = path.vertices.map((id) => vertices.get(id));
+  if (coords.length === 0) {
+    return { keyVertices, curvatureDebug };
+  }
+  if (!path.closed) {
+    const start = coords[0];
+    keyVertices.push({
+      vertexId: start.id,
+      x: start.x,
+      y: start.y,
+      reason: "endpoint"
+    });
+    if (coords.length > 1) {
+      const end = coords[coords.length - 1];
+      keyVertices.push({
+        vertexId: end.id,
+        x: end.x,
+        y: end.y,
+        reason: "endpoint"
+      });
+    }
+  }
+  if (coords.length < windowSize + 1) {
+    return { keyVertices, curvatureDebug };
+  }
+  const collectDebug = debugCallback || ((x, y, dx, dy, mag) => {
+    curvatureDebug.push({
+      x,
+      y,
+      directionX: dx,
+      directionY: dy,
+      magnitude: mag
+    });
+  });
+  const curvatures = calculatePathCurvature(
+    coords,
+    windowSize,
+    path.closed,
+    collectDebug
+  );
+  const curvatureThreshold = 2.2;
+  const localMaxima = findLocalMaxima(
+    curvatures,
+    curvatureThreshold,
+    path.closed
+  );
+  for (const index of localMaxima) {
+    const vertex = coords[index];
+    if (!keyVertices.some((kv) => kv.vertexId === vertex.id)) {
+      keyVertices.push({
+        vertexId: vertex.id,
+        x: vertex.x,
+        y: vertex.y,
+        reason: "curvature"
+      });
+    }
+  }
+  return { keyVertices, curvatureDebug };
+}
+function calculatePathCurvature(points, windowSize, closed, debugCallback) {
+  const curvatures = [];
+  const n = points.length;
+  if (n < 2) {
+    return curvatures;
+  }
+  const getPoint = (idx) => {
+    if (closed) {
+      return points[(idx % n + n) % n];
+    }
+    return points[Math.max(0, Math.min(n - 1, idx))];
+  };
+  const segments = [];
+  const numSegments = closed ? n : n - 1;
+  for (let i = 0; i < numSegments; i++) {
+    const A = getPoint(i);
+    const B = getPoint(i + 1);
+    const dx = B.x - A.x;
+    const dy = B.y - A.y;
+    const length = Math.sqrt(dx * dx + dy * dy);
+    segments.push({
+      length,
+      midX: (A.x + B.x) / 2,
+      midY: (A.y + B.y) / 2,
+      ax: 0,
+      // Will be updated when we know centroid
+      ay: 0,
+      bx: 0,
+      by: 0
+    });
+  }
+  for (let i = 0; i < n; i++) {
+    const halfWindow = Math.floor(windowSize / 2);
+    const windowSegments = [];
+    const segmentIndices = [];
+    for (let offset = -halfWindow; offset <= halfWindow; offset++) {
+      let segIdx;
+      if (closed) {
+        segIdx = ((i + offset) % numSegments + numSegments) % numSegments;
+      } else {
+        segIdx = Math.max(0, Math.min(numSegments - 1, i + offset));
+      }
+      if (!segmentIndices.includes(segIdx)) {
+        windowSegments.push(segments[segIdx]);
+        segmentIndices.push(segIdx);
+      }
+    }
+    let totalLength = 0;
+    let weightedCx = 0;
+    let weightedCy = 0;
+    for (const seg of windowSegments) {
+      totalLength += seg.length;
+      weightedCx += seg.length * seg.midX;
+      weightedCy += seg.length * seg.midY;
+    }
+    const centroidX = weightedCx / totalLength;
+    const centroidY = weightedCy / totalLength;
+    let covXX = 0;
+    let covXY = 0;
+    let covYY = 0;
+    for (let j = 0; j < segmentIndices.length; j++) {
+      const seg = windowSegments[j];
+      const segIdx = segmentIndices[j];
+      const A = getPoint(segIdx);
+      const B = getPoint(segIdx + 1);
+      const ax = A.x - centroidX;
+      const ay = A.y - centroidY;
+      const bx = B.x - centroidX;
+      const by = B.y - centroidY;
+      const L = seg.length;
+      covXX += L / 3 * (ax * ax + ax * bx + bx * bx);
+      covXY += L / 3 * (ax * ay + ax * by + bx * by);
+      covYY += L / 3 * (ay * ay + ay * by + by * by);
+    }
+    const trace = covXX + covYY;
+    const det = covXX * covYY - covXY * covXY;
+    const lambda1 = trace / 2 + Math.sqrt(Math.max(0, trace * trace / 4 - det));
+    let dx, dy;
+    if (Math.abs(covXY) > 1e-10) {
+      dx = lambda1 - covYY;
+      dy = covXY;
+    } else if (covXX > covYY) {
+      dx = 1;
+      dy = 0;
+    } else {
+      dx = 0;
+      dy = 1;
+    }
+    const dirLength = Math.sqrt(dx * dx + dy * dy);
+    if (dirLength > 1e-10) {
+      dx /= dirLength;
+      dy /= dirLength;
+    }
+    const currentPoint = points[i];
+    const windowStart = getPoint(i - halfWindow);
+    const windowEnd = getPoint(i + halfWindow);
+    const dist1 = Math.abs(
+      (currentPoint.x - centroidX) * dy - (currentPoint.y - centroidY) * dx
+    );
+    const dist2 = Math.abs(
+      (windowStart.x - centroidX) * dy - (windowStart.y - centroidY) * dx
+    );
+    const dist3 = Math.abs(
+      (windowEnd.x - centroidX) * dy - (windowEnd.y - centroidY) * dx
+    );
+    const threshold = Math.SQRT2 / 2;
+    const filteredDist1 = dist1 < threshold ? 0 : dist1;
+    const filteredDist2 = dist2 < threshold ? 0 : dist2;
+    const filteredDist3 = dist3 < threshold ? 0 : dist3;
+    const totalCurvature = filteredDist1 + filteredDist2 + filteredDist3;
+    curvatures.push(totalCurvature);
+    if (debugCallback) {
+      debugCallback(
+        currentPoint.x,
+        currentPoint.y,
+        dy,
+        // Perpendicular to line direction
+        -dx,
+        // Perpendicular to line direction
+        totalCurvature
+      );
+    }
+  }
+  return curvatures;
+}
+function findLocalMaxima(values, threshold, closed) {
+  const maxima = [];
+  const n = values.length;
+  const start = closed ? 0 : 1;
+  const end = closed ? n - 1 : n - 1;
+  for (let i = start; i < end; i++) {
+    const curr = values[i];
+    if (curr < threshold) {
+      continue;
+    }
+    let prev, next;
+    if (closed) {
+      prev = values[(i - 1 + n) % n];
+      next = values[(i + 1) % n];
+    } else {
+      prev = values[i - 1];
+      next = values[i + 1];
+    }
+    if (curr > prev && curr > next) {
+      maxima.push(i);
+    }
+  }
+  return maxima;
+}
+
 // browser-app/vectorize.ts
 function vectorizeSkeleton(binary) {
   const { width, height } = binary;
@@ -3248,6 +3461,14 @@ function vectorizeSkeleton(binary) {
       }
     }
   }
+  const allKeyVertices = [];
+  const allCurvatureDebug = [];
+  for (const path of paths) {
+    const result = detectKeyVertices(path, vertices, 10);
+    allKeyVertices.push(...result.keyVertices);
+    allCurvatureDebug.push(...result.curvatureDebug);
+  }
+  console.log(`Vectorization: Detected ${allKeyVertices.length} key vertices`);
   const circleEpsilon = 1.4;
   const circleResults = paths.map(
     (path) => detectCircle(path, vertices, circleEpsilon)
@@ -3290,7 +3511,9 @@ function vectorizeSkeleton(binary) {
   return {
     width,
     height,
-    paths: finalPaths
+    paths: finalPaths,
+    keyVertices: allKeyVertices,
+    curvatureDebug: allCurvatureDebug
   };
 }
 function segmentedLinearRegression(path, vertices, width, epsilon) {
@@ -3587,6 +3810,41 @@ function renderVectorizedToSVG(vectorized, svgElement) {
   svgElement.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svgElement.style.display = "block";
   svgElement.innerHTML = "";
+  for (const kv of vectorized.keyVertices) {
+    const kvCircle = document.createElementNS(
+      "http://www.w3.org/2000/svg",
+      "circle"
+    );
+    kvCircle.setAttribute("cx", (kv.x + 0.5).toString());
+    kvCircle.setAttribute("cy", (kv.y + 0.5).toString());
+    kvCircle.setAttribute("r", "2");
+    kvCircle.setAttribute("fill", "none");
+    kvCircle.setAttribute("stroke", "blue");
+    kvCircle.setAttribute("stroke-width", "0.5");
+    kvCircle.setAttribute("vector-effect", "non-scaling-stroke");
+    svgElement.appendChild(kvCircle);
+  }
+  const curvatureScale = 2;
+  for (const curv of vectorized.curvatureDebug) {
+    const halfLength = curv.magnitude * curvatureScale / 2;
+    const x1 = curv.x + 0.5 - curv.directionX * halfLength;
+    const y1 = curv.y + 0.5 - curv.directionY * halfLength;
+    const x2 = curv.x + 0.5 + curv.directionX * halfLength;
+    const y2 = curv.y + 0.5 + curv.directionY * halfLength;
+    const curvLine = document.createElementNS(
+      "http://www.w3.org/2000/svg",
+      "line"
+    );
+    curvLine.setAttribute("x1", x1.toString());
+    curvLine.setAttribute("y1", y1.toString());
+    curvLine.setAttribute("x2", x2.toString());
+    curvLine.setAttribute("y2", y2.toString());
+    curvLine.setAttribute("stroke", "orange");
+    curvLine.setAttribute("stroke-width", "0.3");
+    curvLine.setAttribute("opacity", "0.6");
+    curvLine.setAttribute("vector-effect", "non-scaling-stroke");
+    svgElement.appendChild(curvLine);
+  }
   for (const path of paths) {
     if (path.circle) {
       const circleElement = document.createElementNS(
