@@ -13,6 +13,10 @@ export interface Segment {
   startIndex: number;
   endIndex: number;
   type: "line" | "arc" | "polyline";
+  // Projected endpoints for fitted segments (on the fitted curve)
+  // For unfitted polylines, these are undefined and raw skeleton pixels are used
+  projectedStart?: Point;
+  projectedEnd?: Point;
   // For lines: store fitted direction and centroid
   lineFit?: {
     centroid: Point;
@@ -591,9 +595,35 @@ export function classifySegments(
     );
 
     if (isArc) {
+      // Project start and end points onto fitted circle
+      const start = segPoints[0];
+      const end = segPoints[segPoints.length - 1];
+      const center = circleResult.center;
+      const radius = circleResult.radius;
+
+      // Project start point
+      const dx0 = start.x - center.x;
+      const dy0 = start.y - center.y;
+      const dist0 = Math.sqrt(dx0 * dx0 + dy0 * dy0);
+      const projStart = {
+        x: center.x + (dx0 / dist0) * radius,
+        y: center.y + (dy0 / dist0) * radius,
+      };
+
+      // Project end point
+      const dx1 = end.x - center.x;
+      const dy1 = end.y - center.y;
+      const dist1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+      const projEnd = {
+        x: center.x + (dx1 / dist1) * radius,
+        y: center.y + (dy1 / dist1) * radius,
+      };
+
       return {
         ...seg,
         type: "arc",
+        projectedStart: projStart,
+        projectedEnd: projEnd,
         circleFit: {
           center: circleResult.center,
           radius: circleResult.radius,
@@ -603,9 +633,32 @@ export function classifySegments(
         },
       };
     } else {
+      // Project start and end points onto fitted line
+      const start = segPoints[0];
+      const end = segPoints[segPoints.length - 1];
+      const centroid = lineResult.centroid;
+      const direction = lineResult.direction;
+
+      // Project onto line: P_proj = centroid + t * direction
+      // where t = (P - centroid) · direction
+      const projectPoint = (p: Point) => {
+        const vx = p.x - centroid.x;
+        const vy = p.y - centroid.y;
+        const t = vx * direction.x + vy * direction.y;
+        return {
+          x: centroid.x + t * direction.x,
+          y: centroid.y + t * direction.y,
+        };
+      };
+
+      const projStart = projectPoint(start);
+      const projEnd = projectPoint(end);
+
       return {
         ...seg,
         type: "line",
+        projectedStart: projStart,
+        projectedEnd: projEnd,
         lineFit: {
           centroid: lineResult.centroid,
           direction: lineResult.direction,

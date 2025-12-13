@@ -927,7 +927,9 @@ export function renderVectorizedToSVG(
   // }
 
   // Draw each path as an SVG path element or circle
-  for (const path of paths) {
+  for (let pathIdx = 0; pathIdx < paths.length; pathIdx++) {
+    const path = paths[pathIdx];
+
     if (path.circle) {
       // Render as actual SVG circle
       const circleElement = document.createElementNS(
@@ -943,14 +945,30 @@ export function renderVectorizedToSVG(
       circleElement.setAttribute("vector-effect", "non-scaling-stroke");
       svgElement.appendChild(circleElement);
     } else if (path.segments && path.segments.length > 0) {
-      // Render path with segments (lines and arcs)
+      // Render path with segments (lines and arcs) - each segment as separate SVG path
       if (path.points.length === 0) continue;
 
-      const firstPoint = path.points[0];
-      let pathData = `M ${firstPoint.x + 0.5} ${firstPoint.y + 0.5}`;
+      // Create a group for this path
+      const pathGroup = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "g",
+      );
+      pathGroup.setAttribute("id", `path-${pathIdx}`);
 
-      // Process each segment
-      for (const segment of path.segments) {
+      // Add comment for path
+      const pathComment = document.createComment(
+        ` Path ${pathIdx}: ${path.segments.length} segments, ${
+          path.closed ? "closed" : "open"
+        } `,
+      );
+      svgElement.appendChild(pathComment);
+
+      // Start from first segment's projected start (or first skeleton pixel if no projection)
+      let currentPoint = path.segments[0].projectedStart || path.points[0];
+
+      // Process each segment as a separate SVG path
+      for (let segIdx = 0; segIdx < path.segments.length; segIdx++) {
+        const segment = path.segments[segIdx];
         const segPoints = path.points.slice(
           segment.startIndex,
           segment.endIndex + 1,
@@ -958,25 +976,30 @@ export function renderVectorizedToSVG(
 
         if (segPoints.length === 0) continue;
 
-        if (segment.type === "line") {
-          // Line segment: just draw to the end point
-          const endPoint = segPoints[segPoints.length - 1];
-          pathData += ` L ${endPoint.x + 0.5} ${endPoint.y + 0.5}`;
-        } else if (segment.type === "arc" && segment.circleFit) {
-          // Arc segment: render as polyline approximation using fitted circle points
-          // Generate points along the fitted circle
+        let segmentPathData = `M ${currentPoint.x + 0.5} ${
+          currentPoint.y + 0.5
+        }`;
+
+        if (segment.type === "line" && segment.projectedEnd) {
+          // Line segment: draw to projected endpoint
+          segmentPathData += ` L ${segment.projectedEnd.x + 0.5} ${
+            segment.projectedEnd.y + 0.5
+          }`;
+          currentPoint = segment.projectedEnd;
+        } else if (
+          segment.type === "arc" && segment.circleFit &&
+          segment.projectedStart && segment.projectedEnd
+        ) {
+          // Arc segment: render as polyline approximation using projected endpoints
           const center = segment.circleFit.center;
           const radius = segment.circleFit.radius;
           const sweepAngle = segment.circleFit.sweepAngle;
           const clockwise = segment.circleFit.clockwise;
 
-          const startPoint = segPoints[0];
-          const endPoint = segPoints[segPoints.length - 1];
-
-          // Calculate start angle
+          // Calculate start angle from segment's projected start
           const startAngle = Math.atan2(
-            startPoint.y - center.y,
-            startPoint.x - center.x,
+            segment.projectedStart.y - center.y,
+            segment.projectedStart.x - center.x,
           );
 
           // Generate points every ~2 degrees for smooth appearance
@@ -988,31 +1011,49 @@ export function renderVectorizedToSVG(
               : startAngle - t * sweepAngle;
             const px = center.x + radius * Math.cos(angle);
             const py = center.y + radius * Math.sin(angle);
-            pathData += ` L ${px + 0.5} ${py + 0.5}`;
+            segmentPathData += ` L ${px + 0.5} ${py + 0.5}`;
           }
+
+          // Update current point to the segment's projected end
+          currentPoint = segment.projectedEnd;
         } else {
-          // Unfitted segment: render as pixel-level polyline
+          // Unfitted segment (polyline): render as pixel-level polyline
           for (let i = 1; i < segPoints.length; i++) {
             const point = segPoints[i];
-            pathData += ` L ${point.x + 0.5} ${point.y + 0.5}`;
+            segmentPathData += ` L ${point.x + 0.5} ${point.y + 0.5}`;
           }
+          currentPoint = segPoints[segPoints.length - 1];
         }
+
+        // Add comment for segment
+        const segmentComment = document.createComment(
+          ` Segment ${segIdx}: type=${segment.type}, points=[${segment.startIndex}-${segment.endIndex}]${
+            segment.circleFit
+              ? `, center=(${segment.circleFit.center.x.toFixed(1)},${
+                segment.circleFit.center.y.toFixed(1)
+              }), radius=${segment.circleFit.radius.toFixed(1)}, sweep=${
+                (segment.circleFit.sweepAngle * 180 / Math.PI).toFixed(1)
+              }°`
+              : ""
+          } `,
+        );
+        pathGroup.appendChild(segmentComment);
+
+        const pathElement = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          "path",
+        );
+        pathElement.setAttribute("d", segmentPathData);
+        pathElement.setAttribute("fill", "none");
+        pathElement.setAttribute("stroke", "red");
+        pathElement.setAttribute("stroke-width", "0.5");
+        pathElement.setAttribute("vector-effect", "non-scaling-stroke");
+        pathElement.setAttribute("data-segment-type", segment.type);
+        pathElement.setAttribute("data-segment-index", segIdx.toString());
+        pathGroup.appendChild(pathElement);
       }
 
-      if (path.closed) {
-        pathData += " Z";
-      }
-
-      const pathElement = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "path",
-      );
-      pathElement.setAttribute("d", pathData);
-      pathElement.setAttribute("fill", "none");
-      pathElement.setAttribute("stroke", "red");
-      pathElement.setAttribute("stroke-width", "0.5");
-      pathElement.setAttribute("vector-effect", "non-scaling-stroke");
-      svgElement.appendChild(pathElement);
+      svgElement.appendChild(pathGroup);
     } else {
       // Fallback: Render as simple polyline (legacy paths without segments)
       if (path.points.length === 0) continue;
@@ -1056,8 +1097,87 @@ export function renderVectorizedToSVG(
       centerDot.setAttribute("fill", "#00aa00");
       centerDot.setAttribute("vector-effect", "non-scaling-stroke");
       svgElement.appendChild(centerDot);
+    } else if (path.segments && path.segments.length > 0) {
+      // For segmented paths, draw projected segment endpoints (green) and unfitted skeleton pixels (light blue)
+      const drawnVertices = new Set<string>();
+
+      for (const segment of path.segments) {
+        if (segment.type === "line" || segment.type === "arc") {
+          // Draw projected endpoints for fitted segments
+          if (segment.projectedStart) {
+            const key = `${segment.projectedStart.x.toFixed(3)},${
+              segment.projectedStart.y.toFixed(3)
+            }`;
+            if (!drawnVertices.has(key)) {
+              drawnVertices.add(key);
+              const circle = document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "circle",
+              );
+              circle.setAttribute(
+                "cx",
+                (segment.projectedStart.x + 0.5).toString(),
+              );
+              circle.setAttribute(
+                "cy",
+                (segment.projectedStart.y + 0.5).toString(),
+              );
+              circle.setAttribute("r", "0.5");
+              circle.setAttribute("fill", "#00aa00");
+              circle.setAttribute("vector-effect", "non-scaling-stroke");
+              svgElement.appendChild(circle);
+            }
+          }
+          if (segment.projectedEnd) {
+            const key = `${segment.projectedEnd.x.toFixed(3)},${
+              segment.projectedEnd.y.toFixed(3)
+            }`;
+            if (!drawnVertices.has(key)) {
+              drawnVertices.add(key);
+              const circle = document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "circle",
+              );
+              circle.setAttribute(
+                "cx",
+                (segment.projectedEnd.x + 0.5).toString(),
+              );
+              circle.setAttribute(
+                "cy",
+                (segment.projectedEnd.y + 0.5).toString(),
+              );
+              circle.setAttribute("r", "0.5");
+              circle.setAttribute("fill", "#00aa00");
+              circle.setAttribute("vector-effect", "non-scaling-stroke");
+              svgElement.appendChild(circle);
+            }
+          }
+        } else {
+          // Draw skeleton pixels for unfitted segments (polylines) in light blue
+          const segPoints = path.points.slice(
+            segment.startIndex,
+            segment.endIndex + 1,
+          );
+          for (const point of segPoints) {
+            const key = `${point.x},${point.y}`;
+            if (!drawnVertices.has(key)) {
+              drawnVertices.add(key);
+              const circle = document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "circle",
+              );
+              circle.setAttribute("cx", (point.x + 0.5).toString());
+              circle.setAttribute("cy", (point.y + 0.5).toString());
+              circle.setAttribute("r", "0.5");
+              circle.setAttribute("fill", "#87ceeb"); // Light blue for unfitted skeleton pixels
+              circle.setAttribute("vector-effect", "non-scaling-stroke");
+              svgElement.appendChild(circle);
+            }
+          }
+        }
+      }
     } else {
-      // For paths, draw all vertices
+      // Fallback: for paths without segments, draw all skeleton pixels
       for (const point of path.points) {
         const circle = document.createElementNS(
           "http://www.w3.org/2000/svg",

@@ -3403,9 +3403,29 @@ function classifySegments(points, segments, isClosed) {
       `  \u2192 Classified as: ${isArc ? "ARC" : "LINE"} (circle ${medianCircleError.toFixed(3)} vs line ${medianLineError.toFixed(3)} * ${ARC_PREFERENCE_FACTOR})`
     );
     if (isArc) {
+      const start = segPoints[0];
+      const end = segPoints[segPoints.length - 1];
+      const center = circleResult.center;
+      const radius = circleResult.radius;
+      const dx0 = start.x - center.x;
+      const dy0 = start.y - center.y;
+      const dist0 = Math.sqrt(dx0 * dx0 + dy0 * dy0);
+      const projStart = {
+        x: center.x + dx0 / dist0 * radius,
+        y: center.y + dy0 / dist0 * radius
+      };
+      const dx1 = end.x - center.x;
+      const dy1 = end.y - center.y;
+      const dist1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+      const projEnd = {
+        x: center.x + dx1 / dist1 * radius,
+        y: center.y + dy1 / dist1 * radius
+      };
       return {
         ...seg,
         type: "arc",
+        projectedStart: projStart,
+        projectedEnd: projEnd,
         circleFit: {
           center: circleResult.center,
           radius: circleResult.radius,
@@ -3415,9 +3435,26 @@ function classifySegments(points, segments, isClosed) {
         }
       };
     } else {
+      const start = segPoints[0];
+      const end = segPoints[segPoints.length - 1];
+      const centroid = lineResult.centroid;
+      const direction = lineResult.direction;
+      const projectPoint = (p) => {
+        const vx = p.x - centroid.x;
+        const vy = p.y - centroid.y;
+        const t = vx * direction.x + vy * direction.y;
+        return {
+          x: centroid.x + t * direction.x,
+          y: centroid.y + t * direction.y
+        };
+      };
+      const projStart = projectPoint(start);
+      const projEnd = projectPoint(end);
       return {
         ...seg,
         type: "line",
+        projectedStart: projStart,
+        projectedEnd: projEnd,
         lineFit: {
           centroid: lineResult.centroid,
           direction: lineResult.direction,
@@ -3675,7 +3712,8 @@ function renderVectorizedToSVG(vectorized, svgElement) {
   svgElement.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svgElement.style.display = "block";
   svgElement.innerHTML = "";
-  for (const path of paths) {
+  for (let pathIdx = 0; pathIdx < paths.length; pathIdx++) {
+    const path = paths[pathIdx];
     if (path.circle) {
       const circleElement = document.createElementNS(
         "http://www.w3.org/2000/svg",
@@ -3691,27 +3729,35 @@ function renderVectorizedToSVG(vectorized, svgElement) {
       svgElement.appendChild(circleElement);
     } else if (path.segments && path.segments.length > 0) {
       if (path.points.length === 0) continue;
-      const firstPoint = path.points[0];
-      let pathData = `M ${firstPoint.x + 0.5} ${firstPoint.y + 0.5}`;
-      for (const segment of path.segments) {
+      const pathGroup = document.createElementNS(
+        "http://www.w3.org/2000/svg",
+        "g"
+      );
+      pathGroup.setAttribute("id", `path-${pathIdx}`);
+      const pathComment = document.createComment(
+        ` Path ${pathIdx}: ${path.segments.length} segments, ${path.closed ? "closed" : "open"} `
+      );
+      svgElement.appendChild(pathComment);
+      let currentPoint = path.segments[0].projectedStart || path.points[0];
+      for (let segIdx = 0; segIdx < path.segments.length; segIdx++) {
+        const segment = path.segments[segIdx];
         const segPoints = path.points.slice(
           segment.startIndex,
           segment.endIndex + 1
         );
         if (segPoints.length === 0) continue;
-        if (segment.type === "line") {
-          const endPoint = segPoints[segPoints.length - 1];
-          pathData += ` L ${endPoint.x + 0.5} ${endPoint.y + 0.5}`;
-        } else if (segment.type === "arc" && segment.circleFit) {
+        let segmentPathData = `M ${currentPoint.x + 0.5} ${currentPoint.y + 0.5}`;
+        if (segment.type === "line" && segment.projectedEnd) {
+          segmentPathData += ` L ${segment.projectedEnd.x + 0.5} ${segment.projectedEnd.y + 0.5}`;
+          currentPoint = segment.projectedEnd;
+        } else if (segment.type === "arc" && segment.circleFit && segment.projectedStart && segment.projectedEnd) {
           const center = segment.circleFit.center;
           const radius = segment.circleFit.radius;
           const sweepAngle = segment.circleFit.sweepAngle;
           const clockwise = segment.circleFit.clockwise;
-          const startPoint = segPoints[0];
-          const endPoint = segPoints[segPoints.length - 1];
           const startAngle = Math.atan2(
-            startPoint.y - center.y,
-            startPoint.x - center.x
+            segment.projectedStart.y - center.y,
+            segment.projectedStart.x - center.x
           );
           const numPoints = Math.max(3, Math.ceil(sweepAngle / (Math.PI / 90)));
           for (let i = 1; i <= numPoints; i++) {
@@ -3719,28 +3765,34 @@ function renderVectorizedToSVG(vectorized, svgElement) {
             const angle = clockwise ? startAngle + t * sweepAngle : startAngle - t * sweepAngle;
             const px = center.x + radius * Math.cos(angle);
             const py = center.y + radius * Math.sin(angle);
-            pathData += ` L ${px + 0.5} ${py + 0.5}`;
+            segmentPathData += ` L ${px + 0.5} ${py + 0.5}`;
           }
+          currentPoint = segment.projectedEnd;
         } else {
           for (let i = 1; i < segPoints.length; i++) {
             const point = segPoints[i];
-            pathData += ` L ${point.x + 0.5} ${point.y + 0.5}`;
+            segmentPathData += ` L ${point.x + 0.5} ${point.y + 0.5}`;
           }
+          currentPoint = segPoints[segPoints.length - 1];
         }
+        const segmentComment = document.createComment(
+          ` Segment ${segIdx}: type=${segment.type}, points=[${segment.startIndex}-${segment.endIndex}]${segment.circleFit ? `, center=(${segment.circleFit.center.x.toFixed(1)},${segment.circleFit.center.y.toFixed(1)}), radius=${segment.circleFit.radius.toFixed(1)}, sweep=${(segment.circleFit.sweepAngle * 180 / Math.PI).toFixed(1)}\xB0` : ""} `
+        );
+        pathGroup.appendChild(segmentComment);
+        const pathElement = document.createElementNS(
+          "http://www.w3.org/2000/svg",
+          "path"
+        );
+        pathElement.setAttribute("d", segmentPathData);
+        pathElement.setAttribute("fill", "none");
+        pathElement.setAttribute("stroke", "red");
+        pathElement.setAttribute("stroke-width", "0.5");
+        pathElement.setAttribute("vector-effect", "non-scaling-stroke");
+        pathElement.setAttribute("data-segment-type", segment.type);
+        pathElement.setAttribute("data-segment-index", segIdx.toString());
+        pathGroup.appendChild(pathElement);
       }
-      if (path.closed) {
-        pathData += " Z";
-      }
-      const pathElement = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "path"
-      );
-      pathElement.setAttribute("d", pathData);
-      pathElement.setAttribute("fill", "none");
-      pathElement.setAttribute("stroke", "red");
-      pathElement.setAttribute("stroke-width", "0.5");
-      pathElement.setAttribute("vector-effect", "non-scaling-stroke");
-      svgElement.appendChild(pathElement);
+      svgElement.appendChild(pathGroup);
     } else {
       if (path.points.length === 0) continue;
       const firstPoint = path.points[0];
@@ -3776,6 +3828,77 @@ function renderVectorizedToSVG(vectorized, svgElement) {
       centerDot.setAttribute("fill", "#00aa00");
       centerDot.setAttribute("vector-effect", "non-scaling-stroke");
       svgElement.appendChild(centerDot);
+    } else if (path.segments && path.segments.length > 0) {
+      const drawnVertices = /* @__PURE__ */ new Set();
+      for (const segment of path.segments) {
+        if (segment.type === "line" || segment.type === "arc") {
+          if (segment.projectedStart) {
+            const key = `${segment.projectedStart.x.toFixed(3)},${segment.projectedStart.y.toFixed(3)}`;
+            if (!drawnVertices.has(key)) {
+              drawnVertices.add(key);
+              const circle = document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "circle"
+              );
+              circle.setAttribute(
+                "cx",
+                (segment.projectedStart.x + 0.5).toString()
+              );
+              circle.setAttribute(
+                "cy",
+                (segment.projectedStart.y + 0.5).toString()
+              );
+              circle.setAttribute("r", "0.5");
+              circle.setAttribute("fill", "#00aa00");
+              circle.setAttribute("vector-effect", "non-scaling-stroke");
+              svgElement.appendChild(circle);
+            }
+          }
+          if (segment.projectedEnd) {
+            const key = `${segment.projectedEnd.x.toFixed(3)},${segment.projectedEnd.y.toFixed(3)}`;
+            if (!drawnVertices.has(key)) {
+              drawnVertices.add(key);
+              const circle = document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "circle"
+              );
+              circle.setAttribute(
+                "cx",
+                (segment.projectedEnd.x + 0.5).toString()
+              );
+              circle.setAttribute(
+                "cy",
+                (segment.projectedEnd.y + 0.5).toString()
+              );
+              circle.setAttribute("r", "0.5");
+              circle.setAttribute("fill", "#00aa00");
+              circle.setAttribute("vector-effect", "non-scaling-stroke");
+              svgElement.appendChild(circle);
+            }
+          }
+        } else {
+          const segPoints = path.points.slice(
+            segment.startIndex,
+            segment.endIndex + 1
+          );
+          for (const point of segPoints) {
+            const key = `${point.x},${point.y}`;
+            if (!drawnVertices.has(key)) {
+              drawnVertices.add(key);
+              const circle = document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "circle"
+              );
+              circle.setAttribute("cx", (point.x + 0.5).toString());
+              circle.setAttribute("cy", (point.y + 0.5).toString());
+              circle.setAttribute("r", "0.5");
+              circle.setAttribute("fill", "#87ceeb");
+              circle.setAttribute("vector-effect", "non-scaling-stroke");
+              svgElement.appendChild(circle);
+            }
+          }
+        }
+      }
     } else {
       for (const point of path.points) {
         const circle = document.createElementNS(
