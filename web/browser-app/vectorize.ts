@@ -344,15 +344,32 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
       }${originalSkeletonPoints.length > 10 ? "..." : ""}`,
     );
 
+    // Helper to extract segment points with wrap-around support
+    const extractSegmentPoints = (startIdx: number, endIdx: number): Array<{ x: number; y: number }> => {
+      const result: Array<{ x: number; y: number }> = [];
+      if (endIdx >= startIdx) {
+        // Normal case
+        for (let i = startIdx; i <= endIdx; i++) {
+          result.push(originalSkeletonPoints[i]);
+        }
+      } else if (path.closed) {
+        // Wrap-around case for closed paths
+        for (let i = startIdx; i < originalSkeletonPoints.length; i++) {
+          result.push(originalSkeletonPoints[i]);
+        }
+        for (let i = 0; i <= endIdx; i++) {
+          result.push(originalSkeletonPoints[i]);
+        }
+      }
+      return result;
+    };
+
     // DEBUG: Show segments from incremental segmentation
     console.log(
       `Segments from incremental segmentation: ${pathSegments.segments.length}`,
     );
     pathSegments.segments.forEach((seg, idx) => {
-      const segPoints = originalSkeletonPoints.slice(
-        seg.startIndex,
-        seg.endIndex + 1,
-      );
+      const segPoints = extractSegmentPoints(seg.startIndex, seg.endIndex);
       console.log(
         `  Seg ${idx}: [${seg.startIndex}-${seg.endIndex}] type=${seg.type}, ${segPoints.length} skeleton pixels`,
       );
@@ -383,14 +400,8 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
       const seg = pathSegments.segments[segIdx];
       const startIdx = points.length;
 
-      // Get skeleton points for this segment
-      const skeletonPoints = originalPath.vertices.slice(
-        seg.startIndex,
-        seg.endIndex + 1,
-      ).map((id) => {
-        const v = vertices.get(id);
-        return v ? { x: v.x, y: v.y } : { x: 0, y: 0 };
-      });
+      // Get skeleton points for this segment (with wrap-around support)
+      const skeletonPoints = extractSegmentPoints(seg.startIndex, seg.endIndex);
 
       if (seg.type === "arc" || seg.type === "line") {
         // Fitted segment: use projected endpoints if available

@@ -359,8 +359,63 @@ export function segmentPath(points: Point[], isClosed: boolean): Segment[] {
       break;
     }
 
-    // Apply hysteresis: back up a few points
-    const segEnd = Math.max(j - LOOKAHEAD_POINTS, segStart + MIN_POINTS - 1);
+    // Determine segment end based on where we stopped and path end proximity
+    let segEnd: number;
+    
+    // Check if we're at or very close to the end of the path
+    if (j >= N - 1) {
+      // Reached the end naturally - use the last point
+      segEnd = N - 1;
+      console.log(
+        `[Segment reached end] ${segStart}-${segEnd} (${
+          segEnd - segStart + 1
+        } points)`,
+      );
+    } else if (N - 1 - j <= LOOKAHEAD_POINTS + 2) {
+      // Close to the end - try extending to the end if fit is still good
+      const extendedLineFit = new IncrementalLineFit();
+      const extendedCircleFit = new IncrementalCircleFit();
+      const extendedLineErrors: number[] = [];
+      const extendedCircleErrors: number[] = [];
+      
+      for (let k = segStart; k < N; k++) {
+        extendedLineFit.addPoint(points[k]);
+        extendedCircleFit.addPoint(points[k]);
+      }
+      
+      for (let k = segStart; k < N; k++) {
+        extendedLineErrors.push(extendedLineFit.distanceToPoint(points[k]));
+        extendedCircleErrors.push(extendedCircleFit.distanceToPoint(points[k]));
+      }
+      
+      const medianLineError = percentile(extendedLineErrors, 0.5);
+      const medianCircleError = percentile(extendedCircleErrors, 0.5);
+      const p90LineError = percentile(extendedLineErrors, ERROR_PERCENTILE);
+      const p90CircleError = percentile(extendedCircleErrors, ERROR_PERCENTILE);
+      
+      const lineOk = medianLineError <= MAX_ERROR && p90LineError <= MAX_ERROR_P90;
+      const circleOk = medianCircleError <= MAX_ERROR && p90CircleError <= MAX_ERROR_P90;
+      
+      if (lineOk || circleOk) {
+        segEnd = N - 1;
+        console.log(
+          `[Segment extended to end] ${segStart}-${segEnd} (${
+            segEnd - segStart + 1
+          } points, fit still good)`,
+        );
+      } else {
+        // Can't extend - use normal backup
+        segEnd = Math.max(j - LOOKAHEAD_POINTS, segStart + MIN_POINTS - 1);
+        console.log(
+          `[Segment near end, can't extend] ${segStart}-${segEnd} (${
+            segEnd - segStart + 1
+          } points, ${N - 1 - segEnd} points remain)`,
+        );
+      }
+    } else {
+      // Normal case: back up by lookahead points
+      segEnd = Math.max(j - LOOKAHEAD_POINTS, segStart + MIN_POINTS - 1);
+    }
 
     console.log(
       `[Segment finalized] ${segStart}-${segEnd} (${
@@ -378,6 +433,19 @@ export function segmentPath(points: Point[], isClosed: boolean): Segment[] {
     i = segEnd + 1;
   }
 
+  // For open paths, try extending first/last segments to path boundaries
+  if (!isClosed && segments.length > 0) {
+    const extended = extendBoundarySegments(points, segments);
+    
+    // Handle closed paths by attempting to merge first and last segments
+    if (isClosed && extended.length >= 2) {
+      const merged = reconcileClosedPath(points, extended);
+      return merged;
+    }
+    
+    return extended;
+  }
+
   // Handle closed paths by attempting to merge first and last segments
   if (isClosed && segments.length >= 2) {
     const merged = reconcileClosedPath(points, segments);
@@ -385,6 +453,85 @@ export function segmentPath(points: Point[], isClosed: boolean): Segment[] {
   }
 
   return segments;
+}
+
+/**
+ * Extend first and last segments of open paths to reach path boundaries (indices 0 and N-1)
+ */
+function extendBoundarySegments(points: Point[], segments: Segment[]): Segment[] {
+  if (segments.length === 0) return segments;
+  
+  const N = points.length;
+  const result = [...segments];
+  
+  // Try extending first segment to start at index 0
+  if (result[0].startIndex > 0) {
+    const seg = result[0];
+    const extendedPoints: Point[] = [];
+    for (let i = 0; i <= seg.endIndex; i++) {
+      extendedPoints.push(points[i]);
+    }
+    
+    // Test if extending to 0 maintains reasonable fit
+    const lineFit = new IncrementalLineFit();
+    const circleFit = new IncrementalCircleFit();
+    for (const p of extendedPoints) {
+      lineFit.addPoint(p);
+      circleFit.addPoint(p);
+    }
+    
+    const lineErrors = extendedPoints.map(p => lineFit.distanceToPoint(p));
+    const circleErrors = extendedPoints.map(p => circleFit.distanceToPoint(p));
+    
+    const medianLineError = percentile(lineErrors, 0.5);
+    const medianCircleError = percentile(circleErrors, 0.5);
+    const p90LineError = percentile(lineErrors, ERROR_PERCENTILE);
+    const p90CircleError = percentile(circleErrors, ERROR_PERCENTILE);
+    
+    const lineOk = medianLineError <= MAX_ERROR && p90LineError <= MAX_ERROR_P90;
+    const circleOk = medianCircleError <= MAX_ERROR && p90CircleError <= MAX_ERROR_P90;
+    
+    if (lineOk || circleOk) {
+      result[0] = { ...seg, startIndex: 0 };
+      console.log(`[Extended first segment to path start] 0-${seg.endIndex}`);
+    }
+  }
+  
+  // Try extending last segment to end at index N-1
+  const lastIdx = result.length - 1;
+  if (result[lastIdx].endIndex < N - 1) {
+    const seg = result[lastIdx];
+    const extendedPoints: Point[] = [];
+    for (let i = seg.startIndex; i < N; i++) {
+      extendedPoints.push(points[i]);
+    }
+    
+    // Test if extending to N-1 maintains reasonable fit
+    const lineFit = new IncrementalLineFit();
+    const circleFit = new IncrementalCircleFit();
+    for (const p of extendedPoints) {
+      lineFit.addPoint(p);
+      circleFit.addPoint(p);
+    }
+    
+    const lineErrors = extendedPoints.map(p => lineFit.distanceToPoint(p));
+    const circleErrors = extendedPoints.map(p => circleFit.distanceToPoint(p));
+    
+    const medianLineError = percentile(lineErrors, 0.5);
+    const medianCircleError = percentile(circleErrors, 0.5);
+    const p90LineError = percentile(lineErrors, ERROR_PERCENTILE);
+    const p90CircleError = percentile(circleErrors, ERROR_PERCENTILE);
+    
+    const lineOk = medianLineError <= MAX_ERROR && p90LineError <= MAX_ERROR_P90;
+    const circleOk = medianCircleError <= MAX_ERROR && p90CircleError <= MAX_ERROR_P90;
+    
+    if (lineOk || circleOk) {
+      result[lastIdx] = { ...seg, endIndex: N - 1 };
+      console.log(`[Extended last segment to path end] ${seg.startIndex}-${N - 1}`);
+    }
+  }
+  
+  return result;
 }
 
 /**
@@ -410,22 +557,32 @@ function reconcileClosedPath(points: Point[], segments: Segment[]): Segment[] {
   // Try fitting both line and circle to merged segment
   const lineFit = new IncrementalLineFit();
   const circleFit = new IncrementalCircleFit();
+  const lineErrors: number[] = [];
+  const circleErrors: number[] = [];
 
   for (const p of wrappedPoints) {
     lineFit.addPoint(p);
     circleFit.addPoint(p);
   }
 
-  let maxLineError = 0;
-  let maxCircleError = 0;
-
   for (const p of wrappedPoints) {
-    maxLineError = Math.max(maxLineError, lineFit.distanceToPoint(p));
-    maxCircleError = Math.max(maxCircleError, circleFit.distanceToPoint(p));
+    lineErrors.push(lineFit.distanceToPoint(p));
+    circleErrors.push(circleFit.distanceToPoint(p));
   }
 
+  const medianLineError = percentile(lineErrors, 0.5);
+  const medianCircleError = percentile(circleErrors, 0.5);
+  const p90LineError = percentile(lineErrors, ERROR_PERCENTILE);
+  const p90CircleError = percentile(circleErrors, ERROR_PERCENTILE);
+
+  const lineOk = medianLineError <= MAX_ERROR && p90LineError <= MAX_ERROR_P90;
+  const circleOk = medianCircleError <= MAX_ERROR && p90CircleError <= MAX_ERROR_P90;
+
   // If either fit is within tolerance, merge the segments
-  if (maxLineError <= MAX_ERROR || maxCircleError <= MAX_ERROR) {
+  if (lineOk || circleOk) {
+    console.log(
+      `[Closed path] Merging first and last segments: ${last.startIndex}-${first.endIndex} (${wrappedPoints.length} points)`,
+    );
     const newSegment: Segment = {
       startIndex: last.startIndex,
       endIndex: first.endIndex,
@@ -739,98 +896,187 @@ function refineSegmentBoundaries(
       baselineFit.distanceToPoint(p)
     );
     bestError = percentile(baselineErrors, 0.5);
+    
+    // Check if boundary points fit well
+    const startPointError = baselineErrors[0];
+    const endPointError = baselineErrors[baselineErrors.length - 1];
 
     const adjustment_range = 5; // Max points to adjust
-    // Try adjusting start boundary (trim or extend by up to adjustment_range points)
-    for (
-      let startDelta = -adjustment_range;
-      startDelta <= adjustment_range;
-      startDelta++
-    ) {
+    
+    // Determine if this segment is at a path boundary (only for open paths)
+    const isFirstSegment = (i === 0);
+    const isLastSegment = (i === segments.length - 1);
+    
+    // Phase 1: Find optimal start index by testing extensions/trims independently
+    // Look for local minima: keep extending as long as error decreases or stays similar
+    let optimalStartIndex = seg.startIndex;
+    let bestStartError = bestError;
+    
+    // Don't trim from start if the start point already fits well
+    const canTrimStart = startPointError > MAX_ERROR;
+    
+    // Try extending/trimming start
+    for (let startDelta = -adjustment_range; startDelta <= adjustment_range; startDelta++) {
       if (startDelta === 0) continue;
-
+      
+      // Skip trimming if start fits well
+      if (startDelta > 0 && !canTrimStart) continue;
+      
       const newStartIndex = seg.startIndex + startDelta;
-
+      
       // Ensure index is within bounds
       if (newStartIndex < 0 || newStartIndex >= points.length) continue;
-
+      
       // Ensure we don't overlap with previous segment
       if (i > 0 && !isClosed) {
         const prevSegEnd = refined[i - 1].endIndex;
         if (newStartIndex <= prevSegEnd) continue;
       }
-
-      // Try adjusting end boundary
-      for (
-        let endDelta = -adjustment_range;
-        endDelta <= adjustment_range;
-        endDelta++
+      
+      // Test this start index with current end index
+      const testSegLength = seg.endIndex >= newStartIndex
+        ? seg.endIndex - newStartIndex + 1
+        : (points.length - newStartIndex) + seg.endIndex + 1;
+      if (testSegLength < MIN_POINTS) continue;
+      
+      const testPoints = extractSegmentPoints(
+        points,
+        { startIndex: newStartIndex, endIndex: seg.endIndex, type: seg.type },
+        isClosed,
+      );
+      
+      if (testPoints.length < MIN_POINTS) continue;
+      
+      const testFit = seg.type === "line"
+        ? new IncrementalLineFit()
+        : new IncrementalCircleFit();
+      for (const p of testPoints) {
+        testFit.addPoint(p);
+      }
+      
+      if (seg.type === "arc") {
+        const circleFit = testFit as IncrementalCircleFit;
+        const result = circleFit.getFit();
+        if (!result.valid) continue;
+      }
+      
+      const testErrors = testPoints.map((p) => testFit.distanceToPoint(p));
+      const testMedian = percentile(testErrors, 0.5);
+      const testP90 = percentile(testErrors, ERROR_PERCENTILE);
+      
+      // Accept if error improves or stays very similar (within 5%)
+      // This finds local minima for extensions
+      if (
+        testMedian <= MAX_ERROR &&
+        testP90 <= MAX_ERROR_P90 &&
+        testMedian <= bestStartError * 1.05
       ) {
-        if (startDelta === 0 && endDelta === 0) continue;
-
-        const newEndIndex = seg.endIndex + endDelta;
-
-        // Ensure index is within bounds
-        if (newEndIndex < 0 || newEndIndex >= points.length) continue;
-
-        // Ensure we don't overlap with next segment
-        if (i < segments.length - 1 && !isClosed) {
-          const nextSegStart = segments[i + 1].startIndex;
-          if (newEndIndex >= nextSegStart) continue;
-        }
-
-        // Ensure minimum length and valid range
-        if (newEndIndex < newStartIndex && !isClosed) continue;
-
-        const segLength = newEndIndex >= newStartIndex
-          ? newEndIndex - newStartIndex + 1
-          : (points.length - newStartIndex) + newEndIndex + 1;
-        if (segLength < MIN_POINTS) continue;
-
-        // Extract candidate points
-        const candidateSegPoints = extractSegmentPoints(
-          points,
-          { startIndex: newStartIndex, endIndex: newEndIndex, type: seg.type },
-          isClosed,
-        );
-
-        // Skip if extraction failed
-        if (candidateSegPoints.length < MIN_POINTS) continue;
-
-        // Fit and measure error
-        const fit = seg.type === "line"
-          ? new IncrementalLineFit()
-          : new IncrementalCircleFit();
-        for (const p of candidateSegPoints) {
-          fit.addPoint(p);
-        }
-
-        // Check validity for circles
-        if (seg.type === "arc") {
-          const circleFit = fit as IncrementalCircleFit;
-          const result = circleFit.getFit();
-          if (!result.valid) continue;
-        }
-
-        const errors = candidateSegPoints.map((p) => fit.distanceToPoint(p));
-        const medianError = percentile(errors, 0.5);
-        const p90Error = percentile(errors, ERROR_PERCENTILE);
-
-        // Check if this is better and within tolerance
-        if (
-          medianError < bestError &&
-          medianError <= MAX_ERROR &&
-          p90Error <= MAX_ERROR_P90
-        ) {
-          bestError = medianError;
-          bestStartIndex = newStartIndex;
-          bestEndIndex = newEndIndex;
+        // For extensions (negative delta), require actual improvement
+        // For trims (positive delta), allow if it improves
+        if (startDelta < 0 && testMedian < bestStartError) {
+          optimalStartIndex = newStartIndex;
+          bestStartError = testMedian;
+        } else if (startDelta > 0 && testMedian < bestStartError) {
+          optimalStartIndex = newStartIndex;
+          bestStartError = testMedian;
         }
       }
     }
+    
+    // Phase 2: Find optimal end index using the optimal start index
+    let optimalEndIndex = seg.endIndex;
+    let bestEndError = bestStartError;
+    
+    // Don't trim from end if the end point already fits well
+    const canTrimEnd = endPointError > MAX_ERROR;
+    
+    // Try extending/trimming end
+    for (let endDelta = -adjustment_range; endDelta <= adjustment_range; endDelta++) {
+      if (endDelta === 0) continue;
+      
+      // Skip trimming if end fits well
+      if (endDelta < 0 && !canTrimEnd) continue;
+      
+      const newEndIndex = seg.endIndex + endDelta;
+      
+      // Ensure index is within bounds
+      if (newEndIndex < 0 || newEndIndex >= points.length) continue;
+      
+      // Ensure we don't overlap with next segment
+      if (i < segments.length - 1 && !isClosed) {
+        const nextSegStart = segments[i + 1].startIndex;
+        if (newEndIndex >= nextSegStart) continue;
+      }
+      
+      // Test this end index with optimal start index
+      const testSegLength = newEndIndex >= optimalStartIndex
+        ? newEndIndex - optimalStartIndex + 1
+        : (points.length - optimalStartIndex) + newEndIndex + 1;
+      if (testSegLength < MIN_POINTS) continue;
+      
+      const testPoints = extractSegmentPoints(
+        points,
+        { startIndex: optimalStartIndex, endIndex: newEndIndex, type: seg.type },
+        isClosed,
+      );
+      
+      if (testPoints.length < MIN_POINTS) continue;
+      
+      const testFit = seg.type === "line"
+        ? new IncrementalLineFit()
+        : new IncrementalCircleFit();
+      for (const p of testPoints) {
+        testFit.addPoint(p);
+      }
+      
+      if (seg.type === "arc") {
+        const circleFit = testFit as IncrementalCircleFit;
+        const result = circleFit.getFit();
+        if (!result.valid) continue;
+      }
+      
+      const testErrors = testPoints.map((p) => testFit.distanceToPoint(p));
+      const testMedian = percentile(testErrors, 0.5);
+      const testP90 = percentile(testErrors, ERROR_PERCENTILE);
+      
+      // Accept if error improves or stays very similar (within 5%)
+      if (
+        testMedian <= MAX_ERROR &&
+        testP90 <= MAX_ERROR_P90 &&
+        testMedian <= bestEndError * 1.05
+      ) {
+        // For extensions (positive delta), require actual improvement
+        // For trims (negative delta), allow if it improves
+        if (endDelta > 0 && testMedian < bestEndError) {
+          optimalEndIndex = newEndIndex;
+          bestEndError = testMedian;
+        } else if (endDelta < 0 && testMedian < bestEndError) {
+          optimalEndIndex = newEndIndex;
+          bestEndError = testMedian;
+        }
+      }
+    }
+    
+    bestStartIndex = optimalStartIndex;
+    bestEndIndex = optimalEndIndex;
+    bestError = bestEndError;
 
     // Update segment if we found improvement
+    // But enforce continuity: refined segments must be adjacent (no gaps)
     if (bestStartIndex !== seg.startIndex || bestEndIndex !== seg.endIndex) {
+      // Check for gaps with previous segment
+      if (i > 0) {
+        const prevEnd = refined[i - 1].endIndex;
+        // Ensure no gap: new segment must start at prevEnd+1 or earlier
+        if (bestStartIndex > prevEnd + 1) {
+          // Would create a gap - adjust start to maintain continuity
+          bestStartIndex = prevEnd + 1;
+          console.log(
+            `[Refine segment ${seg.startIndex}-${seg.endIndex}] Gap detected, adjusted start to ${bestStartIndex}`,
+          );
+        }
+      }
+      
       console.log(
         `[Refine segment ${seg.startIndex}-${seg.endIndex}] → [${bestStartIndex}-${bestEndIndex}] (error ${
           bestError.toFixed(3)
@@ -856,8 +1102,41 @@ export function vectorizeWithIncrementalSegmentation(
   points: Point[],
   isClosed: boolean,
 ): Segment[] {
+  console.log(
+    `\n=== Vectorizing path: ${points.length} points, ${
+      isClosed ? "closed" : "open"
+    } ===`,
+  );
+  
   const segments = segmentPath(points, isClosed);
+  console.log(`  After segmentPath: ${segments.length} segments`);
+  segments.forEach((s, i) =>
+    console.log(`    Seg ${i}: [${s.startIndex}-${s.endIndex}]`)
+  );
+  
   const classified = classifySegments(points, segments, isClosed);
+  console.log(`  After classification: ${classified.length} segments`);
+  classified.forEach((s, i) =>
+    console.log(
+      `    Seg ${i}: [${s.startIndex}-${s.endIndex}] type=${s.type}`,
+    )
+  );
+  
   const refined = refineSegmentBoundaries(points, classified, isClosed);
-  return classifySegments(points, refined, isClosed); // Re-classify after refinement
+  console.log(`  After refinement: ${refined.length} segments`);
+  refined.forEach((s, i) =>
+    console.log(
+      `    Seg ${i}: [${s.startIndex}-${s.endIndex}] type=${s.type}`,
+    )
+  );
+  
+  const final = classifySegments(points, refined, isClosed);
+  console.log(`  Final: ${final.length} segments`);
+  final.forEach((s, i) =>
+    console.log(
+      `    Seg ${i}: [${s.startIndex}-${s.endIndex}] type=${s.type}`,
+    )
+  );
+  
+  return final;
 }
