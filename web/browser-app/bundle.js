@@ -3480,9 +3480,95 @@ function extractSegmentPoints(points, segment, isClosed) {
   }
   return result;
 }
+function refineSegmentBoundaries(points, segments, isClosed) {
+  const refined = [];
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (seg.type !== "line" && seg.type !== "arc") {
+      refined.push(seg);
+      continue;
+    }
+    const currentSegPoints = extractSegmentPoints(points, seg, isClosed);
+    if (currentSegPoints.length < MIN_POINTS) {
+      refined.push(seg);
+      continue;
+    }
+    let bestStartIndex = seg.startIndex;
+    let bestEndIndex = seg.endIndex;
+    let bestError = Infinity;
+    const baselineFit = seg.type === "line" ? new IncrementalLineFit() : new IncrementalCircleFit();
+    for (const p of currentSegPoints) {
+      baselineFit.addPoint(p);
+    }
+    const baselineErrors = currentSegPoints.map(
+      (p) => baselineFit.distanceToPoint(p)
+    );
+    bestError = percentile(baselineErrors, 0.5);
+    const adjustment_range = 5;
+    for (let startDelta = -adjustment_range; startDelta <= adjustment_range; startDelta++) {
+      if (startDelta === 0) continue;
+      const newStartIndex = seg.startIndex + startDelta;
+      if (newStartIndex < 0 || newStartIndex >= points.length) continue;
+      if (i > 0 && !isClosed) {
+        const prevSegEnd = refined[i - 1].endIndex;
+        if (newStartIndex <= prevSegEnd) continue;
+      }
+      for (let endDelta = -adjustment_range; endDelta <= adjustment_range; endDelta++) {
+        if (startDelta === 0 && endDelta === 0) continue;
+        const newEndIndex = seg.endIndex + endDelta;
+        if (newEndIndex < 0 || newEndIndex >= points.length) continue;
+        if (i < segments.length - 1 && !isClosed) {
+          const nextSegStart = segments[i + 1].startIndex;
+          if (newEndIndex >= nextSegStart) continue;
+        }
+        if (newEndIndex < newStartIndex && !isClosed) continue;
+        const segLength = newEndIndex >= newStartIndex ? newEndIndex - newStartIndex + 1 : points.length - newStartIndex + newEndIndex + 1;
+        if (segLength < MIN_POINTS) continue;
+        const candidateSegPoints = extractSegmentPoints(
+          points,
+          { startIndex: newStartIndex, endIndex: newEndIndex, type: seg.type },
+          isClosed
+        );
+        if (candidateSegPoints.length < MIN_POINTS) continue;
+        const fit = seg.type === "line" ? new IncrementalLineFit() : new IncrementalCircleFit();
+        for (const p of candidateSegPoints) {
+          fit.addPoint(p);
+        }
+        if (seg.type === "arc") {
+          const circleFit = fit;
+          const result = circleFit.getFit();
+          if (!result.valid) continue;
+        }
+        const errors = candidateSegPoints.map((p) => fit.distanceToPoint(p));
+        const medianError = percentile(errors, 0.5);
+        const p90Error = percentile(errors, ERROR_PERCENTILE);
+        if (medianError < bestError && medianError <= MAX_ERROR && p90Error <= MAX_ERROR_P90) {
+          bestError = medianError;
+          bestStartIndex = newStartIndex;
+          bestEndIndex = newEndIndex;
+        }
+      }
+    }
+    if (bestStartIndex !== seg.startIndex || bestEndIndex !== seg.endIndex) {
+      console.log(
+        `[Refine segment ${seg.startIndex}-${seg.endIndex}] \u2192 [${bestStartIndex}-${bestEndIndex}] (error ${bestError.toFixed(3)}px)`
+      );
+      refined.push({
+        ...seg,
+        startIndex: bestStartIndex,
+        endIndex: bestEndIndex
+      });
+    } else {
+      refined.push(seg);
+    }
+  }
+  return refined;
+}
 function vectorizeWithIncrementalSegmentation(points, isClosed) {
   const segments = segmentPath(points, isClosed);
-  return classifySegments(points, segments, isClosed);
+  const classified = classifySegments(points, segments, isClosed);
+  const refined = refineSegmentBoundaries(points, classified, isClosed);
+  return classifySegments(points, refined, isClosed);
 }
 
 // browser-app/vectorize.ts
@@ -3600,9 +3686,6 @@ function vectorizeSkeleton(binary) {
       }
     }
   }
-  const allKeyVertices = [];
-  const allCurvatureDebug = [];
-  const circleResults = paths.map(() => null);
   const totalVerticesBefore = paths.reduce(
     (sum, p) => sum + p.vertices.length,
     0
@@ -3662,7 +3745,6 @@ function vectorizeSkeleton(binary) {
     `Vectorization: Simplified to ${totalVerticesAfter} vertices (${((1 - totalVerticesAfter / totalVerticesBefore) * 100).toFixed(1)}% reduction)`
   );
   const finalPaths = simplifiedPaths.map((path, i) => {
-    const circle = circleResults[i];
     const pathSegments = segmentedPaths[i];
     const originalPath = paths[i];
     const originalSkeletonPoints = originalPath.vertices.map((id) => {
@@ -3788,16 +3870,13 @@ function vectorizeSkeleton(binary) {
     return {
       points,
       closed: path.closed,
-      circle: circle || void 0,
       segments: adjustedSegments
     };
   });
   return {
     width,
     height,
-    paths: finalPaths,
-    keyVertices: allKeyVertices,
-    curvatureDebug: allCurvatureDebug
+    paths: finalPaths
   };
 }
 function isPixelSet(binary, x, y) {
@@ -3816,20 +3895,7 @@ function renderVectorizedToSVG(vectorized, svgElement) {
   svgElement.innerHTML = "";
   for (let pathIdx = 0; pathIdx < paths.length; pathIdx++) {
     const path = paths[pathIdx];
-    if (path.circle) {
-      const circleElement = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "circle"
-      );
-      circleElement.setAttribute("cx", path.circle.cx.toString());
-      circleElement.setAttribute("cy", path.circle.cy.toString());
-      circleElement.setAttribute("r", path.circle.radius.toString());
-      circleElement.setAttribute("fill", "none");
-      circleElement.setAttribute("stroke", "red");
-      circleElement.setAttribute("stroke-width", "0.5");
-      circleElement.setAttribute("vector-effect", "non-scaling-stroke");
-      svgElement.appendChild(circleElement);
-    } else if (path.segments && path.segments.length > 0) {
+    if (path.segments && path.segments.length > 0) {
       if (path.points.length === 0) continue;
       const pathGroup = document.createElementNS(
         "http://www.w3.org/2000/svg",
@@ -3919,18 +3985,7 @@ function renderVectorizedToSVG(vectorized, svgElement) {
     }
   }
   for (const path of paths) {
-    if (path.circle) {
-      const centerDot = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "circle"
-      );
-      centerDot.setAttribute("cx", path.circle.cx.toString());
-      centerDot.setAttribute("cy", path.circle.cy.toString());
-      centerDot.setAttribute("r", "0.5");
-      centerDot.setAttribute("fill", "#00aa00");
-      centerDot.setAttribute("vector-effect", "non-scaling-stroke");
-      svgElement.appendChild(centerDot);
-    } else if (path.segments && path.segments.length > 0) {
+    if (path.segments && path.segments.length > 0) {
       const drawnVertices = /* @__PURE__ */ new Set();
       for (const segment of path.segments) {
         if (segment.type === "line" || segment.type === "arc") {

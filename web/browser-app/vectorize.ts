@@ -3,12 +3,6 @@
  */
 
 import type { BinaryImage } from "../src/formats/binary.ts";
-import { detectCircle } from "./primitives/circle.ts";
-import {
-  type CurvatureDebugInfo,
-  detectKeyVertices,
-  type KeyVertex,
-} from "./primitives/key_vertices.ts";
 import { vectorizeWithIncrementalSegmentation } from "./incremental_segmentation.ts";
 import type { Segment } from "./incremental_segmentation.ts";
 
@@ -41,8 +35,6 @@ export interface VectorizedImage {
   width: number;
   height: number;
   paths: SimplifiedPath[]; // Use SimplifiedPath after vectorization
-  keyVertices: KeyVertex[]; // Key vertices detected in original paths
-  curvatureDebug: CurvatureDebugInfo[]; // Curvature visualization data
 }
 
 /**
@@ -222,27 +214,6 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
     }
   }
 
-  // Detect key vertices in original paths (before simplification)
-  // DISABLED: Key vertex detection
-  const allKeyVertices: KeyVertex[] = [];
-  const allCurvatureDebug: CurvatureDebugInfo[] = [];
-  // for (const path of paths) {
-  //   const result = detectKeyVertices(path, vertices, 10);
-  //   allKeyVertices.push(...result.keyVertices);
-  //   allCurvatureDebug.push(...result.curvatureDebug);
-  // }
-  // console.log(`Vectorization: Detected ${allKeyVertices.length} key vertices`);
-
-  // Detect circles before simplification
-  // DISABLED: Circle detection
-  // const circleEpsilon = 1.4;
-  // const circleResults = paths.map((path) =>
-  //   detectCircle(path, vertices, circleEpsilon)
-  // );
-  // const circleCount = circleResults.filter((r) => r !== null).length;
-  // console.log(`Vectorization: Detected ${circleCount} circles`);
-  const circleResults = paths.map(() => null);
-
   // DISABLED: Douglas-Peucker and Segmented Linear Regression
   // // First, run a light Douglas-Peucker pass to simplify trivial cases (skip circles)
   // const dpPaths = paths.map((path, i) =>
@@ -355,7 +326,6 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
 
   // Convert to SimplifiedPath (just coordinates, no IDs)
   const finalPaths: SimplifiedPath[] = simplifiedPaths.map((path, i) => {
-    const circle = circleResults[i];
     const pathSegments = segmentedPaths[i];
     const originalPath = paths[i];
 
@@ -523,7 +493,6 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
     return {
       points,
       closed: path.closed,
-      circle: circle || undefined,
       segments: adjustedSegments,
     };
   });
@@ -532,8 +501,6 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
     width,
     height,
     paths: finalPaths,
-    keyVertices: allKeyVertices,
-    curvatureDebug: allCurvatureDebug,
   };
 }
 
@@ -1022,67 +989,11 @@ export function renderVectorizedToSVG(
   // Clear existing paths
   svgElement.innerHTML = "";
 
-  // Draw key vertices first (underneath everything else)
-  // DISABLED: Key vertices visualization
-  // for (const kv of vectorized.keyVertices) {
-  //   const kvCircle = document.createElementNS(
-  //     "http://www.w3.org/2000/svg",
-  //     "circle",
-  //   );
-  //   kvCircle.setAttribute("cx", (kv.x + 0.5).toString());
-  //   kvCircle.setAttribute("cy", (kv.y + 0.5).toString());
-  //   kvCircle.setAttribute("r", "2");
-  //   kvCircle.setAttribute("fill", "none");
-  //   kvCircle.setAttribute("stroke", "blue");
-  //   kvCircle.setAttribute("stroke-width", "0.5");
-  //   kvCircle.setAttribute("vector-effect", "non-scaling-stroke");
-  //   svgElement.appendChild(kvCircle);
-  // }
-
-  // Draw curvature debug visualization (perpendicular lines showing curvature)
-  // DISABLED: Curvature debug visualization
-  // const curvatureScale = 2.0; // Scale factor for visualization
-  // for (const curv of vectorized.curvatureDebug) {
-  //   const halfLength = curv.magnitude * curvatureScale / 2;
-  //   const x1 = curv.x + 0.5 - curv.directionX * halfLength;
-  //   const y1 = curv.y + 0.5 - curv.directionY * halfLength;
-  //   const x2 = curv.x + 0.5 + curv.directionX * halfLength;
-  //   const y2 = curv.y + 0.5 + curv.directionY * halfLength;
-  //
-  //   const curvLine = document.createElementNS(
-  //     "http://www.w3.org/2000/svg",
-  //     "line",
-  //   );
-  //   curvLine.setAttribute("x1", x1.toString());
-  //   curvLine.setAttribute("y1", y1.toString());
-  //   curvLine.setAttribute("x2", x2.toString());
-  //   curvLine.setAttribute("y2", y2.toString());
-  //   curvLine.setAttribute("stroke", "orange");
-  //   curvLine.setAttribute("stroke-width", "0.3");
-  //   curvLine.setAttribute("opacity", "0.6");
-  //   curvLine.setAttribute("vector-effect", "non-scaling-stroke");
-  //   svgElement.appendChild(curvLine);
-  // }
-
-  // Draw each path as an SVG path element or circle
+  // Draw each path as an SVG path element
   for (let pathIdx = 0; pathIdx < paths.length; pathIdx++) {
     const path = paths[pathIdx];
 
-    if (path.circle) {
-      // Render as actual SVG circle
-      const circleElement = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "circle",
-      );
-      circleElement.setAttribute("cx", path.circle.cx.toString());
-      circleElement.setAttribute("cy", path.circle.cy.toString());
-      circleElement.setAttribute("r", path.circle.radius.toString());
-      circleElement.setAttribute("fill", "none");
-      circleElement.setAttribute("stroke", "red");
-      circleElement.setAttribute("stroke-width", "0.5");
-      circleElement.setAttribute("vector-effect", "non-scaling-stroke");
-      svgElement.appendChild(circleElement);
-    } else if (path.segments && path.segments.length > 0) {
+    if (path.segments && path.segments.length > 0) {
       // Render path with segments (lines and arcs) - each segment as separate SVG path
       if (path.points.length === 0) continue;
 
@@ -1214,21 +1125,9 @@ export function renderVectorizedToSVG(
     }
   }
 
-  // Draw vertices as circles (skip for detected circles)
+  // Draw vertices as circles
   for (const path of paths) {
-    if (path.circle) {
-      // For circles, just draw the center point
-      const centerDot = document.createElementNS(
-        "http://www.w3.org/2000/svg",
-        "circle",
-      );
-      centerDot.setAttribute("cx", path.circle.cx.toString());
-      centerDot.setAttribute("cy", path.circle.cy.toString());
-      centerDot.setAttribute("r", "0.5");
-      centerDot.setAttribute("fill", "#00aa00");
-      centerDot.setAttribute("vector-effect", "non-scaling-stroke");
-      svgElement.appendChild(centerDot);
-    } else if (path.segments && path.segments.length > 0) {
+    if (path.segments && path.segments.length > 0) {
       // For segmented paths, draw projected segment endpoints (green) and unfitted skeleton pixels (light blue)
       const drawnVertices = new Set<string>();
 
