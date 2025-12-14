@@ -3028,8 +3028,6 @@ function forceDeactivateEyedropper() {
 }
 
 // browser-app/incremental_segmentation.ts
-var MAX_ERROR = 0.75;
-var MAX_ERROR_P90 = 1;
 var MIN_POINTS = 5;
 var LOOKAHEAD_POINTS = 2;
 var ERROR_PERCENTILE = 0.9;
@@ -3037,6 +3035,14 @@ var MIN_RADIUS = 2;
 var MAX_RADIUS = 1e4;
 var ARC_PREFERENCE_FACTOR = 1.2;
 var MIN_SWEEP_ANGLE = Math.PI / 6;
+var TOLERANCE_LEVELS = [
+  { name: "strict", maxError: 0.3, maxErrorP90: 0.5, minSegmentLength: 20 },
+  // Pass 1: Long clean segments only
+  { name: "normal", maxError: 0.6, maxErrorP90: 1, minSegmentLength: 10 },
+  // Pass 2: Medium segments
+  { name: "relaxed", maxError: 1, maxErrorP90: 1.5, minSegmentLength: 5 }
+  // Pass 3: Short segments OK
+];
 function percentile(values, p) {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -3186,11 +3192,43 @@ var IncrementalCircleFit = class {
     };
   }
 };
-function segmentPath(points, isClosed) {
+function segmentPathWithTolerance(points, isClosed, maxError, maxErrorP90, minSegmentLength, skipIndices = /* @__PURE__ */ new Set()) {
   const N = points.length;
   if (N < 2) return [];
   const segments = [];
+  if (isClosed && skipIndices.size === 0 && N >= minSegmentLength) {
+    console.log(`[Testing complete circle] ${N} points, minLen=${minSegmentLength}, maxErr=${maxError}px`);
+    const circleFit = new IncrementalCircleFit();
+    for (const p of points) {
+      circleFit.addPoint(p);
+    }
+    const circleErrors = [];
+    for (const p of points) {
+      circleErrors.push(circleFit.distanceToPoint(p));
+    }
+    const medianCircleError = percentile(circleErrors, 0.5);
+    const percentileCircleError = percentile(circleErrors, ERROR_PERCENTILE);
+    const fit = circleFit.getFit();
+    console.log(
+      `  Circle fit: valid=${fit.valid}, radius=${fit.valid ? fit.radius.toFixed(1) : "N/A"}px, medianErr=${medianCircleError.toFixed(3)}px (max=${maxError}px), p90Err=${percentileCircleError.toFixed(3)}px (max=${maxErrorP90}px)`
+    );
+    if (fit.valid && fit.radius >= MIN_RADIUS && fit.radius <= MAX_RADIUS && medianCircleError <= maxError && percentileCircleError <= maxErrorP90) {
+      console.log(
+        `[\u2713 Complete circle detected] Returning single arc segment for entire path`
+      );
+      return [{
+        startIndex: 0,
+        endIndex: N - 1,
+        type: "arc"
+      }];
+    } else {
+      console.log(`[\u2717 Complete circle rejected] Proceeding with normal segmentation`);
+    }
+  }
   let i = 0;
+  while (i < N && skipIndices.has(i)) {
+    i++;
+  }
   while (i < N) {
     const segStart = i;
     const lineFit = new IncrementalLineFit();
@@ -3215,8 +3253,8 @@ function segmentPath(points, isClosed) {
       const medianCircleError = percentile(circleErrors, 0.5);
       const percentileLineError = percentile(lineErrors, ERROR_PERCENTILE);
       const percentileCircleError = percentile(circleErrors, ERROR_PERCENTILE);
-      const lineOk = medianLineError <= MAX_ERROR && percentileLineError <= MAX_ERROR_P90;
-      const circleOk = medianCircleError <= MAX_ERROR && percentileCircleError <= MAX_ERROR_P90;
+      const lineOk = medianLineError <= maxError && percentileLineError <= maxErrorP90;
+      const circleOk = medianCircleError <= maxError && percentileCircleError <= maxErrorP90;
       if (j - segStart > 10 && j % 5 === 0) {
         console.log(`[Segment ${segStart}-${j}] Points: ${j - segStart + 1}`);
         console.log(
@@ -3234,16 +3272,43 @@ function segmentPath(points, isClosed) {
           }
         }
       }
-      const lineMedianBad = medianLineError > MAX_ERROR;
-      const circleMedianBad = medianCircleError > MAX_ERROR;
+      let isNearCompleteCircle = false;
+      if (circleOk && isClosed && minSegmentLength >= 10) {
+        const fit = circleFit.getFit();
+        if (fit.valid && fit.radius >= MIN_RADIUS && fit.radius <= MAX_RADIUS) {
+          const pointsCovered = j - segStart + 1;
+          const totalPoints = N;
+          if (pointsCovered > totalPoints * 0.8) {
+            isNearCompleteCircle = true;
+            console.log(
+              `[Near complete circle] ${pointsCovered}/${totalPoints} points covered (${(pointsCovered / totalPoints * 100).toFixed(1)}%)`
+            );
+          }
+        }
+      }
+      const lineMedianBad = medianLineError > maxError;
+      const circleMedianBad = medianCircleError > maxError;
       if (lineOk || circleOk) {
-        if (lineMedianBad && circleMedianBad) {
+        if (lineMedianBad && circleMedianBad && !isNearCompleteCircle) {
           console.log(
-            `[Segment ${segStart}-${j}] STOPPED - both median errors exceeded ${MAX_ERROR}px`
+            `[Segment ${segStart}-${j}] STOPPED - both median errors exceeded ${maxError}px`
           );
           break;
         }
         j++;
+        while (j < N && skipIndices.has(j)) {
+          j++;
+        }
+        continue;
+      }
+      if (isNearCompleteCircle && medianCircleError <= maxError * 1.2) {
+        console.log(
+          `[Segment ${segStart}-${j}] CONTINUING to complete circle (sweep > 300\xB0)`
+        );
+        j++;
+        while (j < N && skipIndices.has(j)) {
+          j++;
+        }
         continue;
       }
       console.log(
@@ -3274,21 +3339,21 @@ function segmentPath(points, isClosed) {
       const medianCircleError = percentile(extendedCircleErrors, 0.5);
       const p90LineError = percentile(extendedLineErrors, ERROR_PERCENTILE);
       const p90CircleError = percentile(extendedCircleErrors, ERROR_PERCENTILE);
-      const lineOk = medianLineError <= MAX_ERROR && p90LineError <= MAX_ERROR_P90;
-      const circleOk = medianCircleError <= MAX_ERROR && p90CircleError <= MAX_ERROR_P90;
+      const lineOk = medianLineError <= maxError && p90LineError <= maxErrorP90;
+      const circleOk = medianCircleError <= maxError && p90CircleError <= maxErrorP90;
       if (lineOk || circleOk) {
         segEnd = N - 1;
         console.log(
           `[Segment extended to end] ${segStart}-${segEnd} (${segEnd - segStart + 1} points, fit still good)`
         );
       } else {
-        segEnd = Math.max(j - LOOKAHEAD_POINTS, segStart + MIN_POINTS - 1);
+        segEnd = Math.max(j - LOOKAHEAD_POINTS, segStart + minSegmentLength - 1);
         console.log(
           `[Segment near end, can't extend] ${segStart}-${segEnd} (${segEnd - segStart + 1} points, ${N - 1 - segEnd} points remain)`
         );
       }
     } else {
-      segEnd = Math.max(j - LOOKAHEAD_POINTS, segStart + MIN_POINTS - 1);
+      segEnd = Math.max(j - LOOKAHEAD_POINTS, segStart + minSegmentLength - 1);
     }
     console.log(
       `[Segment finalized] ${segStart}-${segEnd} (${segEnd - segStart + 1} points, backed up ${j - segEnd} points)`
@@ -3300,6 +3365,9 @@ function segmentPath(points, isClosed) {
       // Will be classified later
     });
     i = segEnd + 1;
+    while (i < N && skipIndices.has(i)) {
+      i++;
+    }
   }
   if (!isClosed && segments.length > 0) {
     const extended = extendBoundarySegments(points, segments);
@@ -3309,13 +3377,21 @@ function segmentPath(points, isClosed) {
     }
     return extended;
   }
-  if (isClosed && segments.length >= 2) {
-    const merged = reconcileClosedPath(points, segments);
-    return merged;
+  if (isClosed) {
+    if (segments.length === 1 && segments[0].startIndex === 0 && segments[0].endIndex === N - 1) {
+      console.log(`[Complete closed path] Single segment covers entire path (0-${N - 1})`);
+      return segments;
+    }
+    if (segments.length >= 2) {
+      const merged = reconcileClosedPath(points, segments);
+      return merged;
+    }
   }
   return segments;
 }
 function tryExtendBoundary(points, startIndex, endIndex, direction, targetIndex) {
+  const MAX_ERROR = TOLERANCE_LEVELS[TOLERANCE_LEVELS.length - 1].maxError;
+  const MAX_ERROR_P90 = TOLERANCE_LEVELS[TOLERANCE_LEVELS.length - 1].maxErrorP90;
   const baselinePoints = [];
   for (let i = startIndex; i <= endIndex; i++) {
     baselinePoints.push(points[i]);
@@ -3364,6 +3440,8 @@ function tryExtendBoundary(points, startIndex, endIndex, direction, targetIndex)
   return bestIndex;
 }
 function extendBoundarySegments(points, segments) {
+  const MAX_ERROR = TOLERANCE_LEVELS[TOLERANCE_LEVELS.length - 1].maxError;
+  const MAX_ERROR_P90 = TOLERANCE_LEVELS[TOLERANCE_LEVELS.length - 1].maxErrorP90;
   if (segments.length === 0) return segments;
   const N = points.length;
   const result = [...segments];
@@ -3403,6 +3481,8 @@ function extendBoundarySegments(points, segments) {
   return result;
 }
 function reconcileClosedPath(points, segments) {
+  const MAX_ERROR = TOLERANCE_LEVELS[TOLERANCE_LEVELS.length - 1].maxError;
+  const MAX_ERROR_P90 = TOLERANCE_LEVELS[TOLERANCE_LEVELS.length - 1].maxErrorP90;
   if (segments.length < 2) return segments;
   const first = segments[0];
   const last = segments[segments.length - 1];
@@ -3446,14 +3526,30 @@ function reconcileClosedPath(points, segments) {
   }
   return segments;
 }
-function classifySegments(points, segments, isClosed) {
+function classifySegments(points, segments, isClosed, maxError = TOLERANCE_LEVELS[TOLERANCE_LEVELS.length - 1].maxError, maxErrorP90 = TOLERANCE_LEVELS[TOLERANCE_LEVELS.length - 1].maxErrorP90) {
   return segments.map((seg) => {
     if (seg.type === "polyline") {
       return seg;
     }
     const segPoints = extractSegmentPoints(points, seg, isClosed);
     if (segPoints.length < MIN_POINTS) {
-      return { ...seg, type: "line" };
+      const lineFit2 = new IncrementalLineFit();
+      for (const p of segPoints) {
+        lineFit2.addPoint(p);
+      }
+      const lineResult2 = lineFit2.getFit();
+      return {
+        ...seg,
+        type: "line",
+        lineFit: {
+          centroid: lineResult2.centroid,
+          direction: lineResult2.direction,
+          error: 0
+          // Small segments typically fit perfectly
+        },
+        projectedStart: segPoints[0],
+        projectedEnd: segPoints[segPoints.length - 1]
+      };
     }
     const lineFit = new IncrementalLineFit();
     const lineErrors = [];
@@ -3510,8 +3606,8 @@ function classifySegments(points, segments, isClosed) {
       sweepAngle = totalAngle;
       clockwise = cumulativeAngle > 0;
     }
-    const lineWithinTolerance = medianLineError <= MAX_ERROR && p90LineError <= MAX_ERROR_P90;
-    const circleWithinTolerance = medianCircleError <= MAX_ERROR && p90CircleError <= MAX_ERROR_P90;
+    const lineWithinTolerance = medianLineError <= maxError && p90LineError <= maxErrorP90;
+    const circleWithinTolerance = medianCircleError <= maxError && p90CircleError <= maxErrorP90;
     if (!lineWithinTolerance && !circleWithinTolerance) {
       console.log(
         `[Classify segment ${seg.startIndex}-${seg.endIndex}] ${segPoints.length} points`
@@ -3626,6 +3722,8 @@ function extractSegmentPoints(points, segment, isClosed) {
   return result;
 }
 function refineSegmentBoundaries(points, segments, isClosed) {
+  const MAX_ERROR = TOLERANCE_LEVELS[TOLERANCE_LEVELS.length - 1].maxError;
+  const MAX_ERROR_P90 = TOLERANCE_LEVELS[TOLERANCE_LEVELS.length - 1].maxErrorP90;
   const refined = [];
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
@@ -3662,9 +3760,11 @@ function refineSegmentBoundaries(points, segments, isClosed) {
       if (startDelta > 0 && !canTrimStart) continue;
       const newStartIndex = seg.startIndex + startDelta;
       if (newStartIndex < 0 || newStartIndex >= points.length) continue;
-      if (i > 0 && !isClosed) {
+      if (i > 0) {
         const prevSegEnd = refined[i - 1].endIndex;
-        if (newStartIndex <= prevSegEnd) continue;
+        if (newStartIndex <= prevSegEnd && prevSegEnd + 1 === seg.startIndex) {
+          continue;
+        }
       }
       const testSegLength = seg.endIndex >= newStartIndex ? seg.endIndex - newStartIndex + 1 : points.length - newStartIndex + seg.endIndex + 1;
       if (testSegLength < MIN_POINTS) continue;
@@ -3704,9 +3804,11 @@ function refineSegmentBoundaries(points, segments, isClosed) {
       if (endDelta < 0 && !canTrimEnd) continue;
       const newEndIndex = seg.endIndex + endDelta;
       if (newEndIndex < 0 || newEndIndex >= points.length) continue;
-      if (i < segments.length - 1 && !isClosed) {
+      if (i < segments.length - 1) {
         const nextSegStart = segments[i + 1].startIndex;
-        if (newEndIndex >= nextSegStart) continue;
+        if (newEndIndex >= nextSegStart && seg.endIndex + 1 === nextSegStart) {
+          continue;
+        }
       }
       const testSegLength = newEndIndex >= optimalStartIndex ? newEndIndex - optimalStartIndex + 1 : points.length - optimalStartIndex + newEndIndex + 1;
       if (testSegLength < MIN_POINTS) continue;
@@ -3746,15 +3848,6 @@ function refineSegmentBoundaries(points, segments, isClosed) {
     bestEndIndex = optimalEndIndex;
     bestError = bestEndError;
     if (bestStartIndex !== seg.startIndex || bestEndIndex !== seg.endIndex) {
-      if (i > 0) {
-        const prevEnd = refined[i - 1].endIndex;
-        if (bestStartIndex > prevEnd + 1) {
-          bestStartIndex = prevEnd + 1;
-          console.log(
-            `[Refine segment ${seg.startIndex}-${seg.endIndex}] Gap detected, adjusted start to ${bestStartIndex}`
-          );
-        }
-      }
       console.log(
         `[Refine segment ${seg.startIndex}-${seg.endIndex}] \u2192 [${bestStartIndex}-${bestEndIndex}] (error ${bestError.toFixed(3)}px)`
       );
@@ -3849,7 +3942,62 @@ function closestIntersection(intersections, reference) {
   }
   return closest;
 }
+function bestIntersectionForGap(intersections, points, gapStartIdx, gapEndIdx, seg, nextSeg) {
+  if (intersections.length === 0) return null;
+  if (intersections.length === 1) return intersections[0];
+  console.log(
+    `[bestIntersectionForGap] Testing ${intersections.length} intersection candidates against skeleton pixels [${gapStartIdx}-${gapEndIdx}]`
+  );
+  let bestIntersection = intersections[0];
+  let bestError = Infinity;
+  for (let i = 0; i < intersections.length; i++) {
+    const candidate = intersections[i];
+    let maxError = 0;
+    for (let k = gapStartIdx; k <= gapEndIdx; k++) {
+      const skelPt = points[k];
+      const segEndPt = points[seg.endIndex];
+      const nextSegStartPt = points[nextSeg.startIndex];
+      const dx1 = candidate.x - segEndPt.x;
+      const dy1 = candidate.y - segEndPt.y;
+      const len1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+      const dx2 = nextSegStartPt.x - candidate.x;
+      const dy2 = nextSegStartPt.y - candidate.y;
+      const len2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+      let dist1 = Infinity;
+      if (len1 > 0) {
+        const nx1 = -dy1 / len1;
+        const ny1 = dx1 / len1;
+        const vx1 = skelPt.x - segEndPt.x;
+        const vy1 = skelPt.y - segEndPt.y;
+        dist1 = Math.abs(nx1 * vx1 + ny1 * vy1);
+      }
+      let dist2 = Infinity;
+      if (len2 > 0) {
+        const nx2 = -dy2 / len2;
+        const ny2 = dx2 / len2;
+        const vx2 = skelPt.x - candidate.x;
+        const vy2 = skelPt.y - candidate.y;
+        dist2 = Math.abs(nx2 * vx2 + ny2 * vy2);
+      }
+      const dist = Math.min(dist1, dist2);
+      maxError = Math.max(maxError, dist);
+    }
+    console.log(
+      `[bestIntersectionForGap]   Candidate ${i} at (${candidate.x.toFixed(1)}, ${candidate.y.toFixed(1)}): maxError=${maxError.toFixed(3)}px`
+    );
+    if (maxError < bestError) {
+      bestError = maxError;
+      bestIntersection = candidate;
+    }
+  }
+  console.log(
+    `[bestIntersectionForGap] Selected candidate with error ${bestError.toFixed(3)}px`
+  );
+  return bestIntersection;
+}
 function refineSegmentConnections(points, segments, isClosed) {
+  const MAX_ERROR = TOLERANCE_LEVELS[TOLERANCE_LEVELS.length - 1].maxError;
+  const MAX_ERROR_P90 = TOLERANCE_LEVELS[TOLERANCE_LEVELS.length - 1].maxErrorP90;
   if (segments.length < 2) return segments;
   const workingSegments = segments.map((s) => ({ ...s }));
   const result = [];
@@ -3868,8 +4016,11 @@ function refineSegmentConnections(points, segments, isClosed) {
     if (!nextSeg) continue;
     const gapSize = isLastSegment && isClosed ? points.length - 1 - seg.endIndex + nextSeg.startIndex : nextSeg.startIndex - seg.endIndex - 1;
     const nextSegIdx = isLastSegment && isClosed ? 0 : i + 1;
-    if (gapSize < 0) continue;
-    if (gapSize === 0) {
+    if (gapSize < 0) {
+      console.log(
+        `[Refine connections] Overlapping segments ${i} [${seg.startIndex}-${seg.endIndex}] and ${nextSegIdx} [${nextSeg.startIndex}-${nextSeg.endIndex}]: overlap=${-gapSize} points`
+      );
+    } else if (gapSize === 0) {
       console.log(
         `[Refine connections] Adjacent segments ${i} [${seg.startIndex}-${seg.endIndex}] and ${nextSegIdx} [${nextSeg.startIndex}-${nextSeg.endIndex}]`
       );
@@ -3890,27 +4041,69 @@ function refineSegmentConnections(points, segments, isClosed) {
     let intersection = null;
     if (seg.type === "line" && actualNextSeg.type === "line" && seg.lineFit && actualNextSeg.lineFit) {
       intersection = lineLineIntersection(seg.lineFit, actualNextSeg.lineFit);
+      console.log(
+        `[Refine connections] Line-to-line intersection: ${intersection ? `(${intersection.x.toFixed(1)}, ${intersection.y.toFixed(1)})` : "null"}`
+      );
     } else if (seg.type === "line" && actualNextSeg.type === "arc" && seg.lineFit && actualNextSeg.circleFit) {
       const intersections = lineCircleIntersection(
         seg.lineFit,
         actualNextSeg.circleFit
       );
-      const gapMidpoint = points[seg.endIndex];
-      intersection = closestIntersection(intersections, gapMidpoint);
+      if (actualGapSize > 0) {
+        const gapStartIdx = seg.endIndex + 1;
+        const gapEndIdx = actualNextSeg.startIndex - 1;
+        intersection = bestIntersectionForGap(
+          intersections,
+          points,
+          gapStartIdx,
+          gapEndIdx,
+          seg,
+          actualNextSeg
+        );
+      } else {
+        const gapMidpoint = points[seg.endIndex];
+        intersection = closestIntersection(intersections, gapMidpoint);
+      }
     } else if (seg.type === "arc" && actualNextSeg.type === "line" && seg.circleFit && actualNextSeg.lineFit) {
       const intersections = lineCircleIntersection(
         actualNextSeg.lineFit,
         seg.circleFit
       );
-      const gapMidpoint = points[seg.endIndex];
-      intersection = closestIntersection(intersections, gapMidpoint);
+      if (actualGapSize > 0) {
+        const gapStartIdx = seg.endIndex + 1;
+        const gapEndIdx = actualNextSeg.startIndex - 1;
+        intersection = bestIntersectionForGap(
+          intersections,
+          points,
+          gapStartIdx,
+          gapEndIdx,
+          seg,
+          actualNextSeg
+        );
+      } else {
+        const gapMidpoint = points[seg.endIndex];
+        intersection = closestIntersection(intersections, gapMidpoint);
+      }
     } else if (seg.type === "arc" && actualNextSeg.type === "arc" && seg.circleFit && actualNextSeg.circleFit) {
       const intersections = circleCircleIntersection(
         seg.circleFit,
         actualNextSeg.circleFit
       );
-      const gapMidpoint = points[seg.endIndex];
-      intersection = closestIntersection(intersections, gapMidpoint);
+      if (actualGapSize > 0) {
+        const gapStartIdx = seg.endIndex + 1;
+        const gapEndIdx = actualNextSeg.startIndex - 1;
+        intersection = bestIntersectionForGap(
+          intersections,
+          points,
+          gapStartIdx,
+          gapEndIdx,
+          seg,
+          actualNextSeg
+        );
+      } else {
+        const gapMidpoint = points[seg.endIndex];
+        intersection = closestIntersection(intersections, gapMidpoint);
+      }
     }
     if (intersection) {
       console.log(
@@ -3982,8 +4175,13 @@ function refineSegmentConnections(points, segments, isClosed) {
           `[Refine connections] Intersection gap fit error: ${gapFitError.toFixed(3)}px`
         );
       }
-      const intersectionAcceptable = maxExtensionError <= MAX_EXTENSION_ERROR && (skipIntersection ? gapFitError <= MAX_ERROR : true);
+      const isLineToLine = seg.type === "line" && actualNextSeg.type === "line";
+      const isSharpCorner = isLineToLine && maxExtensionError <= 0.5;
+      const intersectionAcceptable = isSharpCorner || maxExtensionError <= MAX_EXTENSION_ERROR && (skipIntersection ? gapFitError <= MAX_ERROR : true);
       if (intersectionAcceptable) {
+        if (isSharpCorner) {
+          console.log(`[Refine connections] Using line-to-line intersection (sharp corner, error=${maxExtensionError.toFixed(3)}px)`);
+        }
         console.log(`[Refine connections] Using intersection (good fit)`);
         seg.projectedEnd = intersection;
         result[result.length - 1] = seg;
@@ -3994,6 +4192,9 @@ function refineSegmentConnections(points, segments, isClosed) {
           skippedSegments.add(i + 1);
         }
         actualNextSeg.projectedStart = intersection;
+        console.log(
+          `[Refine connections] Set actualNextSeg [${actualNextSeg.startIndex}-${actualNextSeg.endIndex}] projectedStart to (${intersection.x.toFixed(2)}, ${intersection.y.toFixed(2)})`
+        );
         if (isLastSegment && isClosed) {
           result[0] = actualNextSeg;
         }
@@ -4299,9 +4500,19 @@ function refineSegmentConnections(points, segments, isClosed) {
       );
     }
   }
+  console.log(`[Refine connections] Returning ${result.length} segments with projected points:`);
+  result.forEach((s, idx) => {
+    if (s.projectedStart && s.projectedEnd) {
+      console.log(
+        `  Seg ${idx} [${s.startIndex}-${s.endIndex}]: start=(${s.projectedStart.x.toFixed(2)}, ${s.projectedStart.y.toFixed(2)}), end=(${s.projectedEnd.x.toFixed(2)}, ${s.projectedEnd.y.toFixed(2)})`
+      );
+    }
+  });
   return result;
 }
 function fitBoundaryGaps(points, segments, isClosed) {
+  const MAX_ERROR = TOLERANCE_LEVELS[TOLERANCE_LEVELS.length - 1].maxError;
+  const MAX_ERROR_P90 = TOLERANCE_LEVELS[TOLERANCE_LEVELS.length - 1].maxErrorP90;
   if (segments.length === 0) return segments;
   const N = points.length;
   const MIN_GAP_SIZE = 3;
@@ -4508,12 +4719,274 @@ function fitBoundaryGaps(points, segments, isClosed) {
   }
   return result;
 }
+function mergeCollinearSegments(points, segments) {
+  if (segments.length < 2) return segments;
+  const result = [];
+  let i = 0;
+  while (i < segments.length) {
+    const seg = segments[i];
+    if (seg.type !== "line" || !seg.lineFit) {
+      result.push(seg);
+      i++;
+      continue;
+    }
+    let mergedSeg = seg;
+    let j = i + 1;
+    while (j < segments.length) {
+      const nextSeg = segments[j];
+      if (nextSeg.type !== "line" || !nextSeg.lineFit) break;
+      const gap = nextSeg.startIndex - mergedSeg.endIndex - 1;
+      if (gap !== 0) break;
+      const dot = mergedSeg.lineFit.direction.x * nextSeg.lineFit.direction.x + mergedSeg.lineFit.direction.y * nextSeg.lineFit.direction.y;
+      if (Math.abs(dot) > 0.999) {
+        console.log(
+          `[Merge collinear] Merging line segments ${i} [${mergedSeg.startIndex}-${mergedSeg.endIndex}] and ${j} [${nextSeg.startIndex}-${nextSeg.endIndex}] (dot=${dot.toFixed(4)})`
+        );
+        mergedSeg = {
+          ...mergedSeg,
+          endIndex: nextSeg.endIndex,
+          projectedEnd: nextSeg.projectedEnd
+        };
+        j++;
+      } else {
+        break;
+      }
+    }
+    result.push(mergedSeg);
+    i = j;
+  }
+  return result;
+}
+function mergeCoincidentArcs(points, segments) {
+  if (segments.length < 2) return segments;
+  const result = [];
+  let i = 0;
+  while (i < segments.length) {
+    const seg = segments[i];
+    if (seg.type !== "arc" || !seg.circleFit) {
+      result.push(seg);
+      i++;
+      continue;
+    }
+    let mergedSeg = seg;
+    let j = i + 1;
+    while (j < segments.length) {
+      const nextSeg = segments[j];
+      if (nextSeg.type !== "arc" || !nextSeg.circleFit) break;
+      const gap = nextSeg.startIndex - mergedSeg.endIndex - 1;
+      if (gap > 1) break;
+      const dx = mergedSeg.circleFit.center.x - nextSeg.circleFit.center.x;
+      const dy = mergedSeg.circleFit.center.y - nextSeg.circleFit.center.y;
+      const centerDist = Math.sqrt(dx * dx + dy * dy);
+      const radiusDiff = Math.abs(mergedSeg.circleFit.radius - nextSeg.circleFit.radius);
+      const sameCircle = centerDist <= 5 && radiusDiff <= 5;
+      if (sameCircle) {
+        console.log(
+          `[Merge arcs] Merging arc segments ${i} [${mergedSeg.startIndex}-${mergedSeg.endIndex}] and ${j} [${nextSeg.startIndex}-${nextSeg.endIndex}] (centerDist=${centerDist.toFixed(1)}px, radiusDiff=${radiusDiff.toFixed(1)}px)`
+        );
+        const mergedPoints = extractSegmentPoints(points, {
+          ...mergedSeg,
+          endIndex: nextSeg.endIndex
+        }, false);
+        const mergedCircleFit = fitCircle(mergedPoints);
+        mergedSeg = {
+          ...mergedSeg,
+          endIndex: nextSeg.endIndex,
+          projectedEnd: nextSeg.projectedEnd,
+          circleFit: mergedCircleFit.valid ? mergedCircleFit : mergedSeg.circleFit
+        };
+        j++;
+      } else {
+        break;
+      }
+    }
+    result.push(mergedSeg);
+    i = j;
+  }
+  return result;
+}
+function absorbUnfittedSegments(points, segments, isClosed) {
+  const MAX_ERROR = TOLERANCE_LEVELS[TOLERANCE_LEVELS.length - 1].maxError;
+  const MAX_ERROR_P90 = TOLERANCE_LEVELS[TOLERANCE_LEVELS.length - 1].maxErrorP90;
+  if (segments.length < 2) return segments;
+  const result = [];
+  let i = 0;
+  while (i < segments.length) {
+    const seg = segments[i];
+    if (seg.type !== "polyline") {
+      result.push(seg);
+      i++;
+      continue;
+    }
+    console.log(
+      `[Absorb unfitted] Found polyline segment ${i} [${seg.startIndex}-${seg.endIndex}] (${seg.endIndex - seg.startIndex + 1} pixels)`
+    );
+    const prevSeg = result.length > 0 ? result[result.length - 1] : null;
+    const nextSeg = i + 1 < segments.length ? segments[i + 1] : null;
+    let absorbed = false;
+    if (prevSeg && prevSeg.type !== "polyline") {
+      const extendedEnd = seg.endIndex;
+      const testPoints = extractSegmentPoints(
+        points,
+        { ...prevSeg, endIndex: extendedEnd },
+        isClosed
+      );
+      if (testPoints.length >= MIN_POINTS) {
+        const lineFit = new IncrementalLineFit();
+        const circleFit = new IncrementalCircleFit();
+        for (const p of testPoints) {
+          lineFit.addPoint(p);
+          circleFit.addPoint(p);
+        }
+        const lineErrors = testPoints.map((p) => lineFit.distanceToPoint(p));
+        const lineMedian = percentile(lineErrors, 0.5);
+        const lineP90 = percentile(lineErrors, ERROR_PERCENTILE);
+        const circleResult = circleFit.getFit();
+        const circleErrors = testPoints.map(
+          (p) => circleFit.distanceToPoint(p)
+        );
+        const circleMedian = circleResult.valid ? percentile(circleErrors, 0.5) : Infinity;
+        const circleP90 = circleResult.valid ? percentile(circleErrors, ERROR_PERCENTILE) : Infinity;
+        const lineFits = lineMedian <= MAX_ERROR && lineP90 <= MAX_ERROR_P90;
+        const circleFits = circleMedian <= MAX_ERROR && circleP90 <= MAX_ERROR_P90;
+        if (lineFits || circleFits) {
+          const useArc = circleFits && circleMedian < lineMedian * ARC_PREFERENCE_FACTOR;
+          console.log(
+            `[Absorb unfitted] Extended previous segment to [${prevSeg.startIndex}-${extendedEnd}] as ${useArc ? "arc" : "line"} (line=${lineMedian.toFixed(3)}px, circle=${circleMedian.toFixed(3)}px)`
+          );
+          result[result.length - 1] = {
+            ...prevSeg,
+            endIndex: extendedEnd,
+            type: useArc ? "arc" : "line"
+          };
+          absorbed = true;
+        }
+      }
+    }
+    if (!absorbed && nextSeg && nextSeg.type !== "polyline") {
+      const extendedStart = seg.startIndex;
+      const testPoints = extractSegmentPoints(
+        points,
+        { ...nextSeg, startIndex: extendedStart },
+        isClosed
+      );
+      if (testPoints.length >= MIN_POINTS) {
+        const lineFit = new IncrementalLineFit();
+        const circleFit = new IncrementalCircleFit();
+        for (const p of testPoints) {
+          lineFit.addPoint(p);
+          circleFit.addPoint(p);
+        }
+        const lineErrors = testPoints.map((p) => lineFit.distanceToPoint(p));
+        const lineMedian = percentile(lineErrors, 0.5);
+        const lineP90 = percentile(lineErrors, ERROR_PERCENTILE);
+        const circleResult = circleFit.getFit();
+        const circleErrors = testPoints.map(
+          (p) => circleFit.distanceToPoint(p)
+        );
+        const circleMedian = circleResult.valid ? percentile(circleErrors, 0.5) : Infinity;
+        const circleP90 = circleResult.valid ? percentile(circleErrors, ERROR_PERCENTILE) : Infinity;
+        const lineFits = lineMedian <= MAX_ERROR && lineP90 <= MAX_ERROR_P90;
+        const circleFits = circleMedian <= MAX_ERROR && circleP90 <= MAX_ERROR_P90;
+        if (lineFits || circleFits) {
+          const useArc = circleFits && circleMedian < lineMedian * ARC_PREFERENCE_FACTOR;
+          console.log(
+            `[Absorb unfitted] Extended next segment to [${extendedStart}-${nextSeg.endIndex}] as ${useArc ? "arc" : "line"} (line=${lineMedian.toFixed(3)}px, circle=${circleMedian.toFixed(3)}px)`
+          );
+          segments[i + 1] = {
+            ...nextSeg,
+            startIndex: extendedStart,
+            type: useArc ? "arc" : "line"
+          };
+          absorbed = true;
+          i++;
+          continue;
+        }
+      }
+    }
+    if (!absorbed) {
+      console.log(
+        `[Absorb unfitted] Could not absorb polyline segment ${i}, keeping as unfitted`
+      );
+      result.push(seg);
+    }
+    i++;
+  }
+  return result;
+}
+function segmentPathMultiPass(points, isClosed) {
+  const allSegments = [];
+  const fittedIndices = /* @__PURE__ */ new Set();
+  for (const level of TOLERANCE_LEVELS) {
+    console.log(
+      `
+=== Pass: ${level.name} (maxError=${level.maxError}px, maxErrorP90=${level.maxErrorP90}px) ===`
+    );
+    const passSegments = segmentPathWithTolerance(
+      points,
+      isClosed,
+      level.maxError,
+      level.maxErrorP90,
+      level.minSegmentLength,
+      fittedIndices
+    );
+    console.log(
+      `  Found ${passSegments.length} segments in ${level.name} pass`
+    );
+    for (const seg of passSegments) {
+      for (let i = seg.startIndex; i <= seg.endIndex; i++) {
+        fittedIndices.add(i);
+      }
+      allSegments.push(seg);
+    }
+    console.log(
+      `  Total fitted: ${fittedIndices.size}/${points.length} pixels`
+    );
+  }
+  allSegments.sort((a, b) => a.startIndex - b.startIndex);
+  console.log(
+    `
+=== Multi-pass complete: ${allSegments.length} total raw segments ===`
+  );
+  allSegments.forEach(
+    (s, i) => console.log(`    Seg ${i}: [${s.startIndex}-${s.endIndex}]`)
+  );
+  const filteredSegments = [];
+  for (const seg of allSegments) {
+    const segLength = seg.endIndex - seg.startIndex + 1;
+    let isRedundant = false;
+    for (const other of allSegments) {
+      if (seg === other) continue;
+      const otherLength = other.endIndex - other.startIndex + 1;
+      if (otherLength <= segLength) continue;
+      const segFullyContained = seg.startIndex >= other.startIndex && seg.endIndex <= other.endIndex;
+      if (segFullyContained) {
+        console.log(
+          `  [Removing redundant] Seg [${seg.startIndex}-${seg.endIndex}] (${segLength} pts) contained by [${other.startIndex}-${other.endIndex}] (${otherLength} pts)`
+        );
+        isRedundant = true;
+        break;
+      }
+    }
+    if (!isRedundant) {
+      filteredSegments.push(seg);
+    }
+  }
+  console.log(
+    `
+=== After filtering: ${filteredSegments.length} segments ===`
+  );
+  filteredSegments.forEach(
+    (s, i) => console.log(`    Seg ${i}: [${s.startIndex}-${s.endIndex}]`)
+  );
+  return filteredSegments;
+}
 function vectorizeWithIncrementalSegmentation(points, isClosed) {
   console.log(
     `
 === Vectorizing path: ${points.length} points, ${isClosed ? "closed" : "open"} ===`
   );
-  const segments = segmentPath(points, isClosed);
+  const segments = segmentPathMultiPass(points, isClosed);
   console.log(`  After segmentPath: ${segments.length} segments`);
   segments.forEach(
     (s, i) => console.log(`    Seg ${i}: [${s.startIndex}-${s.endIndex}]`)
@@ -4555,13 +5028,36 @@ function vectorizeWithIncrementalSegmentation(points, isClosed) {
       `    Seg ${i}: [${s.startIndex}-${s.endIndex}] type=${s.type}`
     )
   );
-  console.log(`  Final: ${connected.length} segments`);
-  connected.forEach(
+  const absorbed = absorbUnfittedSegments(points, connected, isClosed);
+  console.log(
+    `  After absorbing unfitted segments: ${absorbed.length} segments`
+  );
+  absorbed.forEach(
     (s, i) => console.log(
       `    Seg ${i}: [${s.startIndex}-${s.endIndex}] type=${s.type}`
     )
   );
-  return connected;
+  const mergedLines = mergeCollinearSegments(points, absorbed);
+  console.log(`  After merging collinear segments: ${mergedLines.length} segments`);
+  mergedLines.forEach(
+    (s, i) => console.log(
+      `    Seg ${i}: [${s.startIndex}-${s.endIndex}] type=${s.type}`
+    )
+  );
+  const merged = mergeCoincidentArcs(points, mergedLines);
+  console.log(`  After merging coincident arcs: ${merged.length} segments`);
+  merged.forEach(
+    (s, i) => console.log(
+      `    Seg ${i}: [${s.startIndex}-${s.endIndex}] type=${s.type}`
+    )
+  );
+  console.log(`  Final: ${merged.length} segments`);
+  merged.forEach(
+    (s, i) => console.log(
+      `    Seg ${i}: [${s.startIndex}-${s.endIndex}] type=${s.type}`
+    )
+  );
+  return merged;
 }
 
 // browser-app/vectorize.ts
