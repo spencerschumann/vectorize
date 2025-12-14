@@ -3448,6 +3448,9 @@ function reconcileClosedPath(points, segments) {
 }
 function classifySegments(points, segments, isClosed) {
   return segments.map((seg) => {
+    if (seg.type === "polyline") {
+      return seg;
+    }
     const segPoints = extractSegmentPoints(points, seg, isClosed);
     if (segPoints.length < MIN_POINTS) {
       return { ...seg, type: "line" };
@@ -3885,31 +3888,29 @@ function refineSegmentConnections(points, segments, isClosed) {
       );
     }
     let intersection = null;
-    if (!skipIntersection) {
-      if (seg.type === "line" && actualNextSeg.type === "line" && seg.lineFit && actualNextSeg.lineFit) {
-        intersection = lineLineIntersection(seg.lineFit, actualNextSeg.lineFit);
-      } else if (seg.type === "line" && actualNextSeg.type === "arc" && seg.lineFit && actualNextSeg.circleFit) {
-        const intersections = lineCircleIntersection(
-          seg.lineFit,
-          actualNextSeg.circleFit
-        );
-        const gapMidpoint = points[seg.endIndex];
-        intersection = closestIntersection(intersections, gapMidpoint);
-      } else if (seg.type === "arc" && actualNextSeg.type === "line" && seg.circleFit && actualNextSeg.lineFit) {
-        const intersections = lineCircleIntersection(
-          actualNextSeg.lineFit,
-          seg.circleFit
-        );
-        const gapMidpoint = points[seg.endIndex];
-        intersection = closestIntersection(intersections, gapMidpoint);
-      } else if (seg.type === "arc" && actualNextSeg.type === "arc" && seg.circleFit && actualNextSeg.circleFit) {
-        const intersections = circleCircleIntersection(
-          seg.circleFit,
-          actualNextSeg.circleFit
-        );
-        const gapMidpoint = points[seg.endIndex];
-        intersection = closestIntersection(intersections, gapMidpoint);
-      }
+    if (seg.type === "line" && actualNextSeg.type === "line" && seg.lineFit && actualNextSeg.lineFit) {
+      intersection = lineLineIntersection(seg.lineFit, actualNextSeg.lineFit);
+    } else if (seg.type === "line" && actualNextSeg.type === "arc" && seg.lineFit && actualNextSeg.circleFit) {
+      const intersections = lineCircleIntersection(
+        seg.lineFit,
+        actualNextSeg.circleFit
+      );
+      const gapMidpoint = points[seg.endIndex];
+      intersection = closestIntersection(intersections, gapMidpoint);
+    } else if (seg.type === "arc" && actualNextSeg.type === "line" && seg.circleFit && actualNextSeg.lineFit) {
+      const intersections = lineCircleIntersection(
+        actualNextSeg.lineFit,
+        seg.circleFit
+      );
+      const gapMidpoint = points[seg.endIndex];
+      intersection = closestIntersection(intersections, gapMidpoint);
+    } else if (seg.type === "arc" && actualNextSeg.type === "arc" && seg.circleFit && actualNextSeg.circleFit) {
+      const intersections = circleCircleIntersection(
+        seg.circleFit,
+        actualNextSeg.circleFit
+      );
+      const gapMidpoint = points[seg.endIndex];
+      intersection = closestIntersection(intersections, gapMidpoint);
     }
     if (intersection) {
       console.log(
@@ -3956,7 +3957,33 @@ function refineSegmentConnections(points, segments, isClosed) {
       console.log(
         `[Refine connections] Extension errors: seg=${segExtensionError.toFixed(3)}px, nextSeg=${nextSegExtensionError.toFixed(3)}px, max=${maxExtensionError.toFixed(3)}px`
       );
-      if (maxExtensionError <= MAX_EXTENSION_ERROR) {
+      let gapFitError = 0;
+      if (skipIntersection && actualGapSize > 0) {
+        const gapStartIdx = seg.endIndex + 1;
+        const gapEndIdx = actualNextSeg.startIndex - 1;
+        let maxGapError = 0;
+        for (let k = gapStartIdx; k <= gapEndIdx; k++) {
+          const gapPoint = points[k];
+          const segEndPoint = points[seg.endIndex];
+          const dx1 = intersection.x - segEndPoint.x;
+          const dy1 = intersection.y - segEndPoint.y;
+          const len1 = Math.sqrt(dx1 * dx1 + dy1 * dy1);
+          if (len1 > 0) {
+            const nx1 = -dy1 / len1;
+            const ny1 = dx1 / len1;
+            const vx1 = gapPoint.x - segEndPoint.x;
+            const vy1 = gapPoint.y - segEndPoint.y;
+            const dist1 = Math.abs(nx1 * vx1 + ny1 * vy1);
+            maxGapError = Math.max(maxGapError, dist1);
+          }
+        }
+        gapFitError = maxGapError;
+        console.log(
+          `[Refine connections] Intersection gap fit error: ${gapFitError.toFixed(3)}px`
+        );
+      }
+      const intersectionAcceptable = maxExtensionError <= MAX_EXTENSION_ERROR && (skipIntersection ? gapFitError <= MAX_ERROR : true);
+      if (intersectionAcceptable) {
         console.log(`[Refine connections] Using intersection (good fit)`);
         seg.projectedEnd = intersection;
         result[result.length - 1] = seg;
@@ -3971,6 +3998,10 @@ function refineSegmentConnections(points, segments, isClosed) {
           result[0] = actualNextSeg;
         }
         continue;
+      } else if (skipIntersection && gapFitError > MAX_ERROR) {
+        console.log(
+          `[Refine connections] Intersection doesn't fit gap pixels well (${gapFitError.toFixed(3)}px > ${MAX_ERROR}px)`
+        );
       }
     }
     const shouldTryBridge = skipIntersection && actualGapSize > 0 || actualGapSize >= MIN_BRIDGE_SIZE;
@@ -3986,20 +4017,61 @@ function refineSegmentConnections(points, segments, isClosed) {
       }
       const bridgeStartIdx = seg.endIndex + 1;
       const bridgeEndIdx = actualNextSeg.startIndex - 1;
-      const EXPAND_SIZE = Math.min(
-        5,
+      let expandedStartIdx = bridgeStartIdx;
+      let expandedEndIdx = bridgeEndIdx;
+      let bestStartIdx = expandedStartIdx;
+      let bestEndIdx = expandedEndIdx;
+      let bestError = Infinity;
+      let bestIsLine = true;
+      const maxExpandLeft = Math.min(
+        10,
         Math.floor((seg.endIndex - seg.startIndex) / 3)
       );
-      const expandedStartIdx = Math.max(
-        seg.startIndex,
-        seg.endIndex - EXPAND_SIZE + 1
+      const maxExpandRight = Math.min(
+        10,
+        Math.floor((actualNextSeg.endIndex - actualNextSeg.startIndex) / 3)
       );
-      const expandedEndIdx = Math.min(
-        actualNextSeg.endIndex,
-        actualNextSeg.startIndex + EXPAND_SIZE - 1
-      );
+      for (let expandSize = 0; expandSize <= Math.min(maxExpandLeft, maxExpandRight); expandSize++) {
+        const tryStartIdx = Math.max(
+          seg.startIndex,
+          bridgeStartIdx - expandSize
+        );
+        const tryEndIdx = Math.min(
+          actualNextSeg.endIndex,
+          bridgeEndIdx + expandSize
+        );
+        const lineFit = new IncrementalLineFit();
+        const circleFit = new IncrementalCircleFit();
+        for (let j = tryStartIdx; j <= tryEndIdx; j++) {
+          lineFit.addPoint(points[j]);
+          circleFit.addPoint(points[j]);
+        }
+        const lineErrors = [];
+        const circleErrors = [];
+        for (let j = tryStartIdx; j <= tryEndIdx; j++) {
+          lineErrors.push(lineFit.distanceToPoint(points[j]));
+          const circleResult2 = circleFit.getFit();
+          if (circleResult2.valid) {
+            circleErrors.push(circleFit.distanceToPoint(points[j]));
+          }
+        }
+        const lineError2 = percentile(lineErrors, 0.5);
+        const circleResult = circleFit.getFit();
+        const circleError2 = circleResult.valid && circleErrors.length > 0 ? percentile(circleErrors, 0.5) : Infinity;
+        const bestFitError = Math.min(lineError2, circleError2);
+        if (bestFitError <= MAX_ERROR) {
+          bestError = bestFitError;
+          bestStartIdx = tryStartIdx;
+          bestEndIdx = tryEndIdx;
+          bestIsLine = lineError2 <= circleError2;
+        } else {
+          break;
+        }
+      }
+      expandedStartIdx = bestStartIdx;
+      expandedEndIdx = bestEndIdx;
       console.log(
-        `[Refine connections] Expanded range: [${expandedStartIdx}-${expandedEndIdx}] (${expandedEndIdx - expandedStartIdx + 1} points including ${actualGapSize} gap points)`
+        `[Refine connections] Optimal expanded range: [${expandedStartIdx}-${expandedEndIdx}] (${expandedEndIdx - expandedStartIdx + 1} points), best fit: ${bestError.toFixed(3)}px`
       );
       const expandedLineFit = new IncrementalLineFit();
       const expandedCircleFit = new IncrementalCircleFit();
@@ -4009,7 +4081,7 @@ function refineSegmentConnections(points, segments, isClosed) {
       }
       const expandedLineErrors = [];
       const expandedCircleErrors = [];
-      for (let j = bridgeStartIdx; j <= bridgeEndIdx; j++) {
+      for (let j = expandedStartIdx; j <= expandedEndIdx; j++) {
         expandedLineErrors.push(expandedLineFit.distanceToPoint(points[j]));
         expandedCircleErrors.push(
           expandedCircleFit.distanceToPoint(points[j])
@@ -4021,16 +4093,31 @@ function refineSegmentConnections(points, segments, isClosed) {
       console.log(
         `[Refine connections] Expanded fit errors: line=${lineError.toFixed(3)}px, circle=${circleError.toFixed(3)}px`
       );
+      if (circleFitResult.valid) {
+        console.log(
+          `[Refine connections] Circle fit: center=(${circleFitResult.center.x.toFixed(1)}, ${circleFitResult.center.y.toFixed(1)}), radius=${circleFitResult.radius.toFixed(1)}px`
+        );
+        console.log(
+          `[Refine connections] Circle error details: min=${Math.min(...expandedCircleErrors).toFixed(3)}px, median=${circleError.toFixed(3)}px, max=${Math.max(...expandedCircleErrors).toFixed(3)}px`
+        );
+      }
       if (lineError <= MAX_ERROR || circleError <= MAX_ERROR) {
-        const useLine = lineError <= circleError;
+        const expandedLength = expandedEndIdx - expandedStartIdx + 1;
+        const useLine = expandedLength <= 2 || lineError <= circleError;
         const bridgeLineFit = useLine ? expandedLineFit.getFit() : null;
         const bridgeCircleFit = !useLine && circleFitResult.valid ? {
           center: circleFitResult.center,
           radius: circleFitResult.radius
         } : null;
+        console.log(
+          `[Refine connections] Bridge fit choice: ${useLine ? "line" : "arc"} (expanded length: ${expandedLength} pixels, line error: ${lineError.toFixed(3)}px, circle error: ${circleError.toFixed(3)}px)`
+        );
         let bridgeStartPoint = null;
         if (seg.type === "line" && bridgeLineFit && seg.lineFit) {
           bridgeStartPoint = lineLineIntersection(seg.lineFit, bridgeLineFit);
+          console.log(
+            `[Refine connections] Bridge-seg intersection (line-line): ${bridgeStartPoint ? "found" : "parallel/no intersection"}`
+          );
         } else if (seg.type === "line" && bridgeCircleFit && seg.lineFit) {
           const intersections = lineCircleIntersection(
             seg.lineFit,
@@ -4039,6 +4126,9 @@ function refineSegmentConnections(points, segments, isClosed) {
           bridgeStartPoint = closestIntersection(
             intersections,
             points[seg.endIndex]
+          );
+          console.log(
+            `[Refine connections] Bridge-seg intersection (line-circle): ${intersections.length} candidates, selected: ${bridgeStartPoint ? "yes" : "none"}`
           );
         } else if (seg.type === "arc" && bridgeLineFit && seg.circleFit) {
           const intersections = lineCircleIntersection(
@@ -4049,6 +4139,9 @@ function refineSegmentConnections(points, segments, isClosed) {
             intersections,
             points[seg.endIndex]
           );
+          console.log(
+            `[Refine connections] Bridge-seg intersection (circle-line): ${intersections.length} candidates, selected: ${bridgeStartPoint ? "yes" : "none"}`
+          );
         } else if (seg.type === "arc" && bridgeCircleFit && seg.circleFit) {
           const intersections = circleCircleIntersection(
             seg.circleFit,
@@ -4058,12 +4151,18 @@ function refineSegmentConnections(points, segments, isClosed) {
             intersections,
             points[seg.endIndex]
           );
+          console.log(
+            `[Refine connections] Bridge-seg intersection (circle-circle): ${intersections.length} candidates, selected: ${bridgeStartPoint ? "yes" : "none"}`
+          );
         }
         let bridgeEndPoint = null;
         if (actualNextSeg.type === "line" && bridgeLineFit && actualNextSeg.lineFit) {
           bridgeEndPoint = lineLineIntersection(
             bridgeLineFit,
             actualNextSeg.lineFit
+          );
+          console.log(
+            `[Refine connections] Bridge-actualNextSeg intersection (line-line): ${bridgeEndPoint ? "found" : "parallel/no intersection"}`
           );
         } else if (actualNextSeg.type === "line" && bridgeCircleFit && actualNextSeg.lineFit) {
           const intersections = lineCircleIntersection(
@@ -4074,6 +4173,9 @@ function refineSegmentConnections(points, segments, isClosed) {
             intersections,
             points[actualNextSeg.startIndex]
           );
+          console.log(
+            `[Refine connections] Bridge-actualNextSeg intersection (line-circle): ${intersections.length} candidates, selected: ${bridgeEndPoint ? "yes" : "none"}`
+          );
         } else if (actualNextSeg.type === "arc" && bridgeLineFit && actualNextSeg.circleFit) {
           const intersections = lineCircleIntersection(
             bridgeLineFit,
@@ -4082,6 +4184,9 @@ function refineSegmentConnections(points, segments, isClosed) {
           bridgeEndPoint = closestIntersection(
             intersections,
             points[actualNextSeg.startIndex]
+          );
+          console.log(
+            `[Refine connections] Bridge-actualNextSeg intersection (circle-line): ${intersections.length} candidates, selected: ${bridgeEndPoint ? "yes" : "none"}`
           );
         } else if (actualNextSeg.type === "arc" && bridgeCircleFit && actualNextSeg.circleFit) {
           const intersections = circleCircleIntersection(
@@ -4092,54 +4197,97 @@ function refineSegmentConnections(points, segments, isClosed) {
             intersections,
             points[actualNextSeg.startIndex]
           );
-        }
-        if (bridgeStartPoint && bridgeEndPoint) {
           console.log(
-            `[Refine connections] Found bridge intersections: start=(${bridgeStartPoint.x.toFixed(1)}, ${bridgeStartPoint.y.toFixed(1)}), end=(${bridgeEndPoint.x.toFixed(1)}, ${bridgeEndPoint.y.toFixed(1)})`
+            `[Refine connections] Bridge-actualNextSeg intersection (circle-circle): ${intersections.length} candidates, selected: ${bridgeEndPoint ? "yes" : "none"}`
           );
-          seg.projectedEnd = bridgeStartPoint;
-          result[result.length - 1] = seg;
-          const bridgeSeg = {
-            startIndex: bridgeStartIdx,
-            endIndex: bridgeEndIdx,
-            type: useLine ? "line" : "arc",
-            projectedStart: bridgeStartPoint,
-            projectedEnd: bridgeEndPoint
+        }
+        if (!bridgeStartPoint || !bridgeEndPoint) {
+          console.log(
+            `[Refine connections] Could not find geometric intersections, using expanded range endpoints as fallback`
+          );
+          bridgeStartPoint = points[expandedStartIdx];
+          bridgeEndPoint = points[expandedEndIdx];
+        }
+        console.log(
+          `[Refine connections] Bridge connection points: start=(${bridgeStartPoint.x.toFixed(1)}, ${bridgeStartPoint.y.toFixed(1)}), end=(${bridgeEndPoint.x.toFixed(1)}, ${bridgeEndPoint.y.toFixed(1)})`
+        );
+        if (expandedStartIdx < seg.endIndex) {
+          seg.endIndex = expandedStartIdx - 1;
+          console.log(
+            `[Refine connections] Shortened seg to [${seg.startIndex}-${seg.endIndex}] to make room for bridge`
+          );
+        }
+        seg.projectedEnd = bridgeStartPoint;
+        result[result.length - 1] = seg;
+        const bridgeSeg = {
+          startIndex: expandedStartIdx,
+          endIndex: expandedEndIdx,
+          type: useLine ? "line" : "arc",
+          projectedStart: bridgeStartPoint,
+          projectedEnd: bridgeEndPoint
+        };
+        if (useLine) {
+          bridgeSeg.lineFit = {
+            ...bridgeLineFit,
+            error: lineError
           };
-          if (useLine) {
-            bridgeSeg.lineFit = {
-              ...bridgeLineFit,
-              error: lineError
-            };
-          } else {
-            bridgeSeg.circleFit = {
-              center: circleFitResult.center,
-              radius: circleFitResult.radius,
-              error: circleError,
-              sweepAngle: 0,
-              clockwise: false
-            };
-          }
-          result.push(bridgeSeg);
-          if (nextSeg.type === "polyline") {
-            console.log(
-              `[Refine connections] Polyline segment ${i + 1} replaced by bridge`
-            );
-            skippedSegments.add(i + 1);
-          }
-          actualNextSeg.projectedStart = bridgeEndPoint;
-          if (isLastSegment && isClosed) {
-            result[0] = actualNextSeg;
-          }
-          console.log(
-            `[Refine connections] Added expanded bridge [${bridgeStartIdx}-${bridgeEndIdx}] with intersections`
-          );
-          continue;
         } else {
+          const startAngle = Math.atan2(
+            bridgeStartPoint.y - circleFitResult.center.y,
+            bridgeStartPoint.x - circleFitResult.center.x
+          );
+          const endAngle = Math.atan2(
+            bridgeEndPoint.y - circleFitResult.center.y,
+            bridgeEndPoint.x - circleFitResult.center.x
+          );
+          let totalAngle = 0;
+          for (let j = expandedStartIdx; j < expandedEndIdx; j++) {
+            const angle1 = Math.atan2(
+              points[j].y - circleFitResult.center.y,
+              points[j].x - circleFitResult.center.x
+            );
+            const angle2 = Math.atan2(
+              points[j + 1].y - circleFitResult.center.y,
+              points[j + 1].x - circleFitResult.center.x
+            );
+            let deltaAngle = angle2 - angle1;
+            while (deltaAngle > Math.PI) deltaAngle -= 2 * Math.PI;
+            while (deltaAngle < -Math.PI) deltaAngle += 2 * Math.PI;
+            totalAngle += deltaAngle;
+          }
+          const clockwise = totalAngle > 0;
+          let sweepAngle = clockwise ? startAngle - endAngle : endAngle - startAngle;
+          while (sweepAngle < 0) sweepAngle += 2 * Math.PI;
+          while (sweepAngle > 2 * Math.PI) sweepAngle -= 2 * Math.PI;
+          bridgeSeg.circleFit = {
+            center: circleFitResult.center,
+            radius: circleFitResult.radius,
+            error: circleError,
+            sweepAngle: sweepAngle * 180 / Math.PI,
+            clockwise
+          };
+        }
+        result.push(bridgeSeg);
+        if (nextSeg.type === "polyline") {
           console.log(
-            `[Refine connections] Could not find valid intersections for bridge, leaving as gap`
+            `[Refine connections] Polyline segment ${i + 1} replaced by bridge`
+          );
+          skippedSegments.add(i + 1);
+        }
+        if (expandedEndIdx > actualNextSeg.startIndex) {
+          actualNextSeg.startIndex = expandedEndIdx + 1;
+          console.log(
+            `[Refine connections] Adjusted actualNextSeg to start at ${actualNextSeg.startIndex}`
           );
         }
+        actualNextSeg.projectedStart = bridgeEndPoint;
+        if (isLastSegment && isClosed) {
+          result[0] = actualNextSeg;
+        }
+        console.log(
+          `[Refine connections] Added expanded bridge [${expandedStartIdx}-${expandedEndIdx}]`
+        );
+        continue;
       } else {
         console.log(
           `[Refine connections] Expanded bridge fit too poor (line=${lineError.toFixed(3)}px, circle=${circleError.toFixed(3)}px), leaving as gap`
@@ -4796,9 +4944,17 @@ function renderVectorizedToSVG(vectorized, svgElement) {
             segment.projectedEnd.y - center.y,
             segment.projectedEnd.x - center.x
           );
-          let sweepAngle = clockwise ? endAngle - startAngle : startAngle - endAngle;
-          if (sweepAngle < 0) sweepAngle += 2 * Math.PI;
-          if (sweepAngle > 2 * Math.PI) sweepAngle -= 2 * Math.PI;
+          const dx = segment.projectedEnd.x - segment.projectedStart.x;
+          const dy = segment.projectedEnd.y - segment.projectedStart.y;
+          const isFullCircle = dx * dx + dy * dy < 0.01;
+          let sweepAngle;
+          if (isFullCircle) {
+            sweepAngle = 2 * Math.PI;
+          } else {
+            sweepAngle = clockwise ? endAngle - startAngle : startAngle - endAngle;
+            if (sweepAngle < 0) sweepAngle += 2 * Math.PI;
+            if (sweepAngle > 2 * Math.PI) sweepAngle -= 2 * Math.PI;
+          }
           const numPoints = Math.max(3, Math.ceil(sweepAngle / (Math.PI / 90)));
           for (let i = 1; i <= numPoints; i++) {
             const t = i / numPoints;

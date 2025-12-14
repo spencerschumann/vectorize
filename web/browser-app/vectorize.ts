@@ -1081,14 +1081,25 @@ export function renderVectorizedToSVG(
             segment.projectedEnd.x - center.x,
           );
 
-          // Calculate sweep angle between projected endpoints
-          let sweepAngle = clockwise
-            ? (endAngle - startAngle)
-            : (startAngle - endAngle);
+          // Check if this is a full circle (360° arc) - start and end points are the same
+          const dx = segment.projectedEnd.x - segment.projectedStart.x;
+          const dy = segment.projectedEnd.y - segment.projectedStart.y;
+          const isFullCircle = (dx * dx + dy * dy) < 0.01; // Essentially the same point
 
-          // Normalize to [0, 2π]
-          if (sweepAngle < 0) sweepAngle += 2 * Math.PI;
-          if (sweepAngle > 2 * Math.PI) sweepAngle -= 2 * Math.PI;
+          let sweepAngle: number;
+          if (isFullCircle) {
+            // Full circle: render complete 360°
+            sweepAngle = 2 * Math.PI;
+          } else {
+            // Calculate sweep angle between projected endpoints
+            sweepAngle = clockwise
+              ? (endAngle - startAngle)
+              : (startAngle - endAngle);
+
+            // Normalize to [0, 2π]
+            if (sweepAngle < 0) sweepAngle += 2 * Math.PI;
+            if (sweepAngle > 2 * Math.PI) sweepAngle -= 2 * Math.PI;
+          }
 
           // Generate points every ~2 degrees for smooth appearance
           const numPoints = Math.max(3, Math.ceil(sweepAngle / (Math.PI / 90)));
