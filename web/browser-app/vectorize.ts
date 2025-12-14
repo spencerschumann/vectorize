@@ -401,7 +401,6 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
 
     for (let segIdx = 0; segIdx < pathSegments.segments.length; segIdx++) {
       const seg = pathSegments.segments[segIdx];
-      const startIdx = points.length;
 
       // Get skeleton points for this segment (with wrap-around support)
       const skeletonPoints = extractSegmentPoints(seg.startIndex, seg.endIndex);
@@ -409,9 +408,12 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
       if (seg.type === "arc" || seg.type === "line") {
         // Fitted segment: use projected endpoints if available
         if (seg.projectedStart && seg.projectedEnd) {
+          let segmentStartIdx: number;
+          
           if (points.length === 0) {
             // First segment: add both start and end
             points.push(seg.projectedStart);
+            segmentStartIdx = 0;
             points.push(seg.projectedEnd);
           } else {
             // Subsequent segments: check if start matches previous end
@@ -423,18 +425,25 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
             if (!startMatches) {
               // Gap between segments - add the projected start
               points.push(seg.projectedStart);
+              segmentStartIdx = points.length - 1;
+            } else {
+              // Start matches previous end - reuse that point
+              segmentStartIdx = points.length - 1;
             }
             points.push(seg.projectedEnd);
           }
 
           adjustedSegments.push({
             ...seg,
-            startIndex: startIdx,
+            startIndex: segmentStartIdx,
             endIndex: points.length - 1,
           });
         } else {
           // Fitted segment but no projected endpoints - fallback to skeleton pixels
+          let segmentStartIdx: number;
+          
           if (points.length === 0) {
+            segmentStartIdx = 0;
             points.push(...skeletonPoints);
           } else {
             const lastPoint = points[points.length - 1];
@@ -443,22 +452,27 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
               lastPoint.x === firstSkeletonPoint.x &&
               lastPoint.y === firstSkeletonPoint.y
             ) {
+              segmentStartIdx = points.length - 1;
               points.push(...skeletonPoints.slice(1));
             } else {
+              segmentStartIdx = points.length;
               points.push(...skeletonPoints);
             }
           }
 
           adjustedSegments.push({
             ...seg,
-            startIndex: startIdx,
+            startIndex: segmentStartIdx,
             endIndex: points.length - 1,
           });
         }
       } else {
         // Unfitted segment (polyline): use skeleton pixels
+        let segmentStartIdx: number;
+        
         if (points.length === 0) {
           // First segment: add all skeleton points
+          segmentStartIdx = 0;
           points.push(...skeletonPoints);
         } else {
           // Subsequent segments: skip first point if it matches the last point in the array
@@ -468,15 +482,17 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
             lastPoint.x === firstSkeletonPoint.x &&
             lastPoint.y === firstSkeletonPoint.y
           ) {
+            segmentStartIdx = points.length - 1;
             points.push(...skeletonPoints.slice(1));
           } else {
+            segmentStartIdx = points.length;
             points.push(...skeletonPoints);
           }
         }
 
         adjustedSegments.push({
           ...seg,
-          startIndex: startIdx,
+          startIndex: segmentStartIdx,
           endIndex: points.length - 1,
         });
       }
