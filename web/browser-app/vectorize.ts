@@ -345,7 +345,10 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
     );
 
     // Helper to extract segment points with wrap-around support
-    const extractSegmentPoints = (startIdx: number, endIdx: number): Array<{ x: number; y: number }> => {
+    const extractSegmentPoints = (
+      startIdx: number,
+      endIdx: number,
+    ): Array<{ x: number; y: number }> => {
       const result: Array<{ x: number; y: number }> = [];
       if (endIdx >= startIdx) {
         // Normal case
@@ -1143,57 +1146,7 @@ export function renderVectorizedToSVG(
       const drawnVertices = new Set<string>();
 
       for (const segment of path.segments) {
-        if (segment.type === "line" || segment.type === "arc") {
-          // Draw projected endpoints for fitted segments
-          if (segment.projectedStart) {
-            const key = `${segment.projectedStart.x.toFixed(3)},${
-              segment.projectedStart.y.toFixed(3)
-            }`;
-            if (!drawnVertices.has(key)) {
-              drawnVertices.add(key);
-              const circle = document.createElementNS(
-                "http://www.w3.org/2000/svg",
-                "circle",
-              );
-              circle.setAttribute(
-                "cx",
-                (segment.projectedStart.x + 0.5).toString(),
-              );
-              circle.setAttribute(
-                "cy",
-                (segment.projectedStart.y + 0.5).toString(),
-              );
-              circle.setAttribute("r", "0.5");
-              circle.setAttribute("fill", "#00aa00");
-              circle.setAttribute("vector-effect", "non-scaling-stroke");
-              svgElement.appendChild(circle);
-            }
-          }
-          if (segment.projectedEnd) {
-            const key = `${segment.projectedEnd.x.toFixed(3)},${
-              segment.projectedEnd.y.toFixed(3)
-            }`;
-            if (!drawnVertices.has(key)) {
-              drawnVertices.add(key);
-              const circle = document.createElementNS(
-                "http://www.w3.org/2000/svg",
-                "circle",
-              );
-              circle.setAttribute(
-                "cx",
-                (segment.projectedEnd.x + 0.5).toString(),
-              );
-              circle.setAttribute(
-                "cy",
-                (segment.projectedEnd.y + 0.5).toString(),
-              );
-              circle.setAttribute("r", "0.5");
-              circle.setAttribute("fill", "#00aa00");
-              circle.setAttribute("vector-effect", "non-scaling-stroke");
-              svgElement.appendChild(circle);
-            }
-          }
-        } else {
+        if (segment.type === "polyline") {
           // Draw skeleton pixels for unfitted segments (polylines) in light blue
           const segPoints = path.points.slice(
             segment.startIndex,
@@ -1210,7 +1163,79 @@ export function renderVectorizedToSVG(
               circle.setAttribute("cx", (point.x + 0.5).toString());
               circle.setAttribute("cy", (point.y + 0.5).toString());
               circle.setAttribute("r", "0.5");
-              circle.setAttribute("fill", "#87ceeb"); // Light blue for unfitted skeleton pixels
+              circle.setAttribute("fill", "#4169e1"); // Royal blue for unfitted skeleton pixels
+              circle.setAttribute("vector-effect", "non-scaling-stroke");
+              svgElement.appendChild(circle);
+            }
+          }
+        } else if (
+          (segment.type === "line" || segment.type === "arc") &&
+          segment.projectedStart && segment.projectedEnd
+        ) {
+          // Draw projected endpoints for fitted segments (green)
+          const startKey = `${segment.projectedStart.x.toFixed(3)},${
+            segment.projectedStart.y.toFixed(3)
+          }`;
+          if (!drawnVertices.has(startKey)) {
+            drawnVertices.add(startKey);
+            const circle = document.createElementNS(
+              "http://www.w3.org/2000/svg",
+              "circle",
+            );
+            circle.setAttribute(
+              "cx",
+              (segment.projectedStart.x + 0.5).toString(),
+            );
+            circle.setAttribute(
+              "cy",
+              (segment.projectedStart.y + 0.5).toString(),
+            );
+            circle.setAttribute("r", "0.5");
+            circle.setAttribute("fill", "#00aa00");
+            circle.setAttribute("vector-effect", "non-scaling-stroke");
+            svgElement.appendChild(circle);
+          }
+
+          const endKey = `${segment.projectedEnd.x.toFixed(3)},${
+            segment.projectedEnd.y.toFixed(3)
+          }`;
+          if (!drawnVertices.has(endKey)) {
+            drawnVertices.add(endKey);
+            const circle = document.createElementNS(
+              "http://www.w3.org/2000/svg",
+              "circle",
+            );
+            circle.setAttribute(
+              "cx",
+              (segment.projectedEnd.x + 0.5).toString(),
+            );
+            circle.setAttribute(
+              "cy",
+              (segment.projectedEnd.y + 0.5).toString(),
+            );
+            circle.setAttribute("r", "0.5");
+            circle.setAttribute("fill", "#00aa00");
+            circle.setAttribute("vector-effect", "non-scaling-stroke");
+            svgElement.appendChild(circle);
+          }
+        } else {
+          // Fallback: if line/arc segment has no projected endpoints, draw skeleton pixels in blue
+          const segPoints = path.points.slice(
+            segment.startIndex,
+            segment.endIndex + 1,
+          );
+          for (const point of segPoints) {
+            const key = `${point.x},${point.y}`;
+            if (!drawnVertices.has(key)) {
+              drawnVertices.add(key);
+              const circle = document.createElementNS(
+                "http://www.w3.org/2000/svg",
+                "circle",
+              );
+              circle.setAttribute("cx", (point.x + 0.5).toString());
+              circle.setAttribute("cy", (point.y + 0.5).toString());
+              circle.setAttribute("r", "0.5");
+              circle.setAttribute("fill", "#4169e1"); // Royal blue for skeleton pixels
               circle.setAttribute("vector-effect", "non-scaling-stroke");
               svgElement.appendChild(circle);
             }

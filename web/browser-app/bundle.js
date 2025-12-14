@@ -3315,59 +3315,89 @@ function segmentPath(points, isClosed) {
   }
   return segments;
 }
+function tryExtendBoundary(points, startIndex, endIndex, direction, targetIndex) {
+  const baselinePoints = [];
+  for (let i = startIndex; i <= endIndex; i++) {
+    baselinePoints.push(points[i]);
+  }
+  const baselineFit = new IncrementalLineFit();
+  for (const p of baselinePoints) {
+    baselineFit.addPoint(p);
+  }
+  const baselineErrors = baselinePoints.map(
+    (p) => baselineFit.distanceToPoint(p)
+  );
+  let bestError = percentile(baselineErrors, 0.5);
+  let bestIndex = direction === "start" ? startIndex : endIndex;
+  const step = direction === "start" ? -1 : 1;
+  const shouldContinue = direction === "start" ? (idx) => idx >= targetIndex : (idx) => idx < targetIndex;
+  for (let testIdx = bestIndex + step; shouldContinue(testIdx); testIdx += step) {
+    const testPoints = [];
+    const testStart = direction === "start" ? testIdx : startIndex;
+    const testEnd = direction === "end" ? testIdx : endIndex;
+    for (let i = testStart; i <= testEnd; i++) {
+      testPoints.push(points[i]);
+    }
+    const lineFit = new IncrementalLineFit();
+    const circleFit = new IncrementalCircleFit();
+    for (const p of testPoints) {
+      lineFit.addPoint(p);
+      circleFit.addPoint(p);
+    }
+    const lineErrors = testPoints.map((p) => lineFit.distanceToPoint(p));
+    const circleErrors = testPoints.map((p) => circleFit.distanceToPoint(p));
+    const lineMedian = percentile(lineErrors, 0.5);
+    const circleMedian = percentile(circleErrors, 0.5);
+    const lineP90 = percentile(lineErrors, ERROR_PERCENTILE);
+    const circleP90 = percentile(circleErrors, ERROR_PERCENTILE);
+    const circleResult = circleFit.getFit();
+    const lineOk = lineMedian <= MAX_ERROR && lineP90 <= MAX_ERROR_P90;
+    const circleOk = circleResult.valid && circleMedian <= MAX_ERROR && circleP90 <= MAX_ERROR_P90;
+    const testMedian = lineOk && circleOk ? Math.min(lineMedian, circleMedian) : lineOk ? lineMedian : circleOk ? circleMedian : Infinity;
+    if (testMedian <= bestError && testMedian !== Infinity) {
+      bestIndex = testIdx;
+      bestError = testMedian;
+    } else {
+      break;
+    }
+  }
+  return bestIndex;
+}
 function extendBoundarySegments(points, segments) {
   if (segments.length === 0) return segments;
   const N = points.length;
   const result = [...segments];
   if (result[0].startIndex > 0) {
     const seg = result[0];
-    const extendedPoints = [];
-    for (let i = 0; i <= seg.endIndex; i++) {
-      extendedPoints.push(points[i]);
-    }
-    const lineFit = new IncrementalLineFit();
-    const circleFit = new IncrementalCircleFit();
-    for (const p of extendedPoints) {
-      lineFit.addPoint(p);
-      circleFit.addPoint(p);
-    }
-    const lineErrors = extendedPoints.map((p) => lineFit.distanceToPoint(p));
-    const circleErrors = extendedPoints.map((p) => circleFit.distanceToPoint(p));
-    const medianLineError = percentile(lineErrors, 0.5);
-    const medianCircleError = percentile(circleErrors, 0.5);
-    const p90LineError = percentile(lineErrors, ERROR_PERCENTILE);
-    const p90CircleError = percentile(circleErrors, ERROR_PERCENTILE);
-    const lineOk = medianLineError <= MAX_ERROR && p90LineError <= MAX_ERROR_P90;
-    const circleOk = medianCircleError <= MAX_ERROR && p90CircleError <= MAX_ERROR_P90;
-    if (lineOk || circleOk) {
-      result[0] = { ...seg, startIndex: 0 };
-      console.log(`[Extended first segment to path start] 0-${seg.endIndex}`);
+    const bestStartIndex = tryExtendBoundary(
+      points,
+      seg.startIndex,
+      seg.endIndex,
+      "start",
+      0
+    );
+    if (bestStartIndex < seg.startIndex) {
+      result[0] = { ...seg, startIndex: bestStartIndex };
+      console.log(
+        `[Extended first segment toward path start] ${bestStartIndex}-${seg.endIndex} (was ${seg.startIndex}-${seg.endIndex})`
+      );
     }
   }
   const lastIdx = result.length - 1;
   if (result[lastIdx].endIndex < N - 1) {
     const seg = result[lastIdx];
-    const extendedPoints = [];
-    for (let i = seg.startIndex; i < N; i++) {
-      extendedPoints.push(points[i]);
-    }
-    const lineFit = new IncrementalLineFit();
-    const circleFit = new IncrementalCircleFit();
-    for (const p of extendedPoints) {
-      lineFit.addPoint(p);
-      circleFit.addPoint(p);
-    }
-    const lineErrors = extendedPoints.map((p) => lineFit.distanceToPoint(p));
-    const circleErrors = extendedPoints.map((p) => circleFit.distanceToPoint(p));
-    const medianLineError = percentile(lineErrors, 0.5);
-    const medianCircleError = percentile(circleErrors, 0.5);
-    const p90LineError = percentile(lineErrors, ERROR_PERCENTILE);
-    const p90CircleError = percentile(circleErrors, ERROR_PERCENTILE);
-    const lineOk = medianLineError <= MAX_ERROR && p90LineError <= MAX_ERROR_P90;
-    const circleOk = medianCircleError <= MAX_ERROR && p90CircleError <= MAX_ERROR_P90;
-    if (lineOk || circleOk) {
-      result[lastIdx] = { ...seg, endIndex: N - 1 };
-      console.log(`[Extended last segment to path end] ${seg.startIndex}-${N - 1}`);
+    const bestEndIndex = tryExtendBoundary(
+      points,
+      seg.startIndex,
+      seg.endIndex,
+      "end",
+      N
+    );
+    if (bestEndIndex > seg.endIndex) {
+      result[lastIdx] = { ...seg, endIndex: bestEndIndex };
+      console.log(
+        `[Extended last segment toward path end] ${seg.startIndex}-${bestEndIndex} (was ${seg.startIndex}-${seg.endIndex})`
+      );
     }
   }
   return result;
@@ -3679,7 +3709,11 @@ function refineSegmentBoundaries(points, segments, isClosed) {
       if (testSegLength < MIN_POINTS) continue;
       const testPoints = extractSegmentPoints(
         points,
-        { startIndex: optimalStartIndex, endIndex: newEndIndex, type: seg.type },
+        {
+          startIndex: optimalStartIndex,
+          endIndex: newEndIndex,
+          type: seg.type
+        },
         isClosed
       );
       if (testPoints.length < MIN_POINTS) continue;
@@ -3732,6 +3766,192 @@ function refineSegmentBoundaries(points, segments, isClosed) {
   }
   return refined;
 }
+function fitBoundaryGaps(points, segments, isClosed) {
+  if (segments.length === 0) return segments;
+  const N = points.length;
+  const MIN_GAP_SIZE = 3;
+  const MIN_FIT_SIZE = 3;
+  const result = [];
+  if (!isClosed) {
+    const firstSeg = segments[0];
+    const startGapSize = firstSeg.startIndex;
+    if (startGapSize > 0) {
+      console.log(
+        `[Fit boundary gap] Start gap: ${startGapSize} points (0-${firstSeg.startIndex - 1})`
+      );
+      if (startGapSize < MIN_FIT_SIZE) {
+        console.log(
+          `[Fit boundary gap] Start gap too small to fit, marking as unfitted polyline [0-${firstSeg.startIndex - 1}]`
+        );
+        result.push({
+          startIndex: 0,
+          endIndex: firstSeg.startIndex - 1,
+          type: "polyline"
+        });
+      } else {
+        let bestSeg = null;
+        let bestError = Infinity;
+        for (let endIdx = MIN_FIT_SIZE - 1; endIdx < startGapSize; endIdx++) {
+          const lineFit = new IncrementalLineFit();
+          const circleFit = new IncrementalCircleFit();
+          for (let i = 0; i <= endIdx; i++) {
+            lineFit.addPoint(points[i]);
+            circleFit.addPoint(points[i]);
+          }
+          const lineErrors = [];
+          const circleErrors = [];
+          for (let i = 0; i <= endIdx; i++) {
+            lineErrors.push(lineFit.distanceToPoint(points[i]));
+            circleErrors.push(circleFit.distanceToPoint(points[i]));
+          }
+          const lineError = percentile(lineErrors, 0.5);
+          const circleFitResult = circleFit.getFit();
+          const circleError = circleFitResult.valid ? percentile(circleErrors, 0.5) : Infinity;
+          const error = Math.min(lineError, circleError);
+          if (error <= MAX_ERROR && error < bestError) {
+            bestError = error;
+            bestSeg = {
+              startIndex: 0,
+              endIndex: endIdx,
+              type: "line"
+              // will be classified later
+            };
+          }
+        }
+        if (bestSeg) {
+          console.log(
+            `[Fit boundary gap] Added start segment [0-${bestSeg.endIndex}] (error ${bestError.toFixed(3)}px)`
+          );
+          result.push(bestSeg);
+        }
+      }
+    }
+  }
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const expectedStart = result.length > 0 ? result[result.length - 1].endIndex + 1 : 0;
+    const gapSize = seg.startIndex - expectedStart;
+    if (gapSize > 0) {
+      console.log(
+        `[Fit boundary gap] Interior gap: ${gapSize} points (${expectedStart}-${seg.startIndex - 1})`
+      );
+      if (gapSize < MIN_FIT_SIZE) {
+        console.log(
+          `[Fit boundary gap] Gap too small to fit, marking as unfitted polyline [${expectedStart}-${seg.startIndex - 1}]`
+        );
+        result.push({
+          startIndex: expectedStart,
+          endIndex: seg.startIndex - 1,
+          type: "polyline"
+        });
+      } else {
+        let bestGapSeg = null;
+        let bestError = Infinity;
+        for (let endIdx = expectedStart + MIN_FIT_SIZE - 1; endIdx < seg.startIndex; endIdx++) {
+          for (let startIdx = expectedStart; startIdx <= endIdx - MIN_FIT_SIZE + 1; startIdx++) {
+            const lineFit = new IncrementalLineFit();
+            const circleFit = new IncrementalCircleFit();
+            for (let j = startIdx; j <= endIdx; j++) {
+              lineFit.addPoint(points[j]);
+              circleFit.addPoint(points[j]);
+            }
+            const lineErrors = [];
+            const circleErrors = [];
+            for (let j = startIdx; j <= endIdx; j++) {
+              lineErrors.push(lineFit.distanceToPoint(points[j]));
+              circleErrors.push(circleFit.distanceToPoint(points[j]));
+            }
+            const lineError = percentile(lineErrors, 0.5);
+            const circleFitResult = circleFit.getFit();
+            const circleError = circleFitResult.valid ? percentile(circleErrors, 0.5) : Infinity;
+            const error = Math.min(lineError, circleError);
+            if (error <= MAX_ERROR && error < bestError) {
+              bestError = error;
+              bestGapSeg = {
+                startIndex: startIdx,
+                endIndex: endIdx,
+                type: "line"
+                // will be classified later
+              };
+            }
+          }
+        }
+        if (bestGapSeg) {
+          console.log(
+            `[Fit boundary gap] Added interior segment [${bestGapSeg.startIndex}-${bestGapSeg.endIndex}] (error ${bestError.toFixed(3)}px)`
+          );
+          result.push(bestGapSeg);
+        } else {
+          console.log(
+            `[Fit boundary gap] Marking interior gap as unfitted polyline [${expectedStart}-${seg.startIndex - 1}]`
+          );
+          result.push({
+            startIndex: expectedStart,
+            endIndex: seg.startIndex - 1,
+            type: "polyline"
+          });
+        }
+      }
+    }
+    result.push(seg);
+  }
+  if (!isClosed) {
+    const lastResultSeg = result[result.length - 1];
+    const endGapSize = N - 1 - lastResultSeg.endIndex;
+    if (endGapSize > 0) {
+      console.log(
+        `[Fit boundary gap] End gap: ${endGapSize} points (${lastResultSeg.endIndex + 1}-${N - 1})`
+      );
+      if (endGapSize < MIN_FIT_SIZE) {
+        console.log(
+          `[Fit boundary gap] End gap too small to fit, marking as unfitted polyline [${lastResultSeg.endIndex + 1}-${N - 1}]`
+        );
+        result.push({
+          startIndex: lastResultSeg.endIndex + 1,
+          endIndex: N - 1,
+          type: "polyline"
+        });
+      } else {
+        let bestSeg = null;
+        let bestError = Infinity;
+        for (let startIdx = N - MIN_FIT_SIZE; startIdx > lastResultSeg.endIndex; startIdx--) {
+          const lineFit = new IncrementalLineFit();
+          const circleFit = new IncrementalCircleFit();
+          for (let i = startIdx; i < N; i++) {
+            lineFit.addPoint(points[i]);
+            circleFit.addPoint(points[i]);
+          }
+          const lineErrors = [];
+          const circleErrors = [];
+          for (let i = startIdx; i < N; i++) {
+            lineErrors.push(lineFit.distanceToPoint(points[i]));
+            circleErrors.push(circleFit.distanceToPoint(points[i]));
+          }
+          const lineError = percentile(lineErrors, 0.5);
+          const circleFitResult = circleFit.getFit();
+          const circleError = circleFitResult.valid ? percentile(circleErrors, 0.5) : Infinity;
+          const error = Math.min(lineError, circleError);
+          if (error <= MAX_ERROR && error < bestError) {
+            bestError = error;
+            bestSeg = {
+              startIndex: startIdx,
+              endIndex: N - 1,
+              type: "line"
+              // will be classified later
+            };
+          }
+        }
+        if (bestSeg) {
+          console.log(
+            `[Fit boundary gap] Added end segment [${bestSeg.startIndex}-${N - 1}] (error ${bestError.toFixed(3)}px)`
+          );
+          result.push(bestSeg);
+        }
+      }
+    }
+  }
+  return result;
+}
 function vectorizeWithIncrementalSegmentation(points, isClosed) {
   console.log(
     `
@@ -3756,7 +3976,16 @@ function vectorizeWithIncrementalSegmentation(points, isClosed) {
       `    Seg ${i}: [${s.startIndex}-${s.endIndex}] type=${s.type}`
     )
   );
-  const final = classifySegments(points, refined, isClosed);
+  const withBoundaryFits = fitBoundaryGaps(points, refined, isClosed);
+  console.log(
+    `  After boundary gap fitting: ${withBoundaryFits.length} segments`
+  );
+  withBoundaryFits.forEach(
+    (s, i) => console.log(
+      `    Seg ${i}: [${s.startIndex}-${s.endIndex}] type=${s.type}`
+    )
+  );
+  const final = classifySegments(points, withBoundaryFits, isClosed);
   console.log(`  Final: ${final.length} segments`);
   final.forEach(
     (s, i) => console.log(
@@ -4190,50 +4419,67 @@ function renderVectorizedToSVG(vectorized, svgElement) {
     if (path.segments && path.segments.length > 0) {
       const drawnVertices = /* @__PURE__ */ new Set();
       for (const segment of path.segments) {
-        if (segment.type === "line" || segment.type === "arc") {
-          if (segment.projectedStart) {
-            const key = `${segment.projectedStart.x.toFixed(3)},${segment.projectedStart.y.toFixed(3)}`;
+        if (segment.type === "polyline") {
+          const segPoints = path.points.slice(
+            segment.startIndex,
+            segment.endIndex + 1
+          );
+          for (const point of segPoints) {
+            const key = `${point.x},${point.y}`;
             if (!drawnVertices.has(key)) {
               drawnVertices.add(key);
               const circle = document.createElementNS(
                 "http://www.w3.org/2000/svg",
                 "circle"
               );
-              circle.setAttribute(
-                "cx",
-                (segment.projectedStart.x + 0.5).toString()
-              );
-              circle.setAttribute(
-                "cy",
-                (segment.projectedStart.y + 0.5).toString()
-              );
+              circle.setAttribute("cx", (point.x + 0.5).toString());
+              circle.setAttribute("cy", (point.y + 0.5).toString());
               circle.setAttribute("r", "0.5");
-              circle.setAttribute("fill", "#00aa00");
+              circle.setAttribute("fill", "#4169e1");
               circle.setAttribute("vector-effect", "non-scaling-stroke");
               svgElement.appendChild(circle);
             }
           }
-          if (segment.projectedEnd) {
-            const key = `${segment.projectedEnd.x.toFixed(3)},${segment.projectedEnd.y.toFixed(3)}`;
-            if (!drawnVertices.has(key)) {
-              drawnVertices.add(key);
-              const circle = document.createElementNS(
-                "http://www.w3.org/2000/svg",
-                "circle"
-              );
-              circle.setAttribute(
-                "cx",
-                (segment.projectedEnd.x + 0.5).toString()
-              );
-              circle.setAttribute(
-                "cy",
-                (segment.projectedEnd.y + 0.5).toString()
-              );
-              circle.setAttribute("r", "0.5");
-              circle.setAttribute("fill", "#00aa00");
-              circle.setAttribute("vector-effect", "non-scaling-stroke");
-              svgElement.appendChild(circle);
-            }
+        } else if ((segment.type === "line" || segment.type === "arc") && segment.projectedStart && segment.projectedEnd) {
+          const startKey = `${segment.projectedStart.x.toFixed(3)},${segment.projectedStart.y.toFixed(3)}`;
+          if (!drawnVertices.has(startKey)) {
+            drawnVertices.add(startKey);
+            const circle = document.createElementNS(
+              "http://www.w3.org/2000/svg",
+              "circle"
+            );
+            circle.setAttribute(
+              "cx",
+              (segment.projectedStart.x + 0.5).toString()
+            );
+            circle.setAttribute(
+              "cy",
+              (segment.projectedStart.y + 0.5).toString()
+            );
+            circle.setAttribute("r", "0.5");
+            circle.setAttribute("fill", "#00aa00");
+            circle.setAttribute("vector-effect", "non-scaling-stroke");
+            svgElement.appendChild(circle);
+          }
+          const endKey = `${segment.projectedEnd.x.toFixed(3)},${segment.projectedEnd.y.toFixed(3)}`;
+          if (!drawnVertices.has(endKey)) {
+            drawnVertices.add(endKey);
+            const circle = document.createElementNS(
+              "http://www.w3.org/2000/svg",
+              "circle"
+            );
+            circle.setAttribute(
+              "cx",
+              (segment.projectedEnd.x + 0.5).toString()
+            );
+            circle.setAttribute(
+              "cy",
+              (segment.projectedEnd.y + 0.5).toString()
+            );
+            circle.setAttribute("r", "0.5");
+            circle.setAttribute("fill", "#00aa00");
+            circle.setAttribute("vector-effect", "non-scaling-stroke");
+            svgElement.appendChild(circle);
           }
         } else {
           const segPoints = path.points.slice(
@@ -4251,7 +4497,7 @@ function renderVectorizedToSVG(vectorized, svgElement) {
               circle.setAttribute("cx", (point.x + 0.5).toString());
               circle.setAttribute("cy", (point.y + 0.5).toString());
               circle.setAttribute("r", "0.5");
-              circle.setAttribute("fill", "#87ceeb");
+              circle.setAttribute("fill", "#4169e1");
               circle.setAttribute("vector-effect", "non-scaling-stroke");
               svgElement.appendChild(circle);
             }
