@@ -13,10 +13,27 @@ src/vectorize/
 ├── line_fit_test.ts     # Line fitting tests
 ├── arc_fit.ts           # Arc/circle fitting algorithms
 ├── arc_fit_test.ts      # Arc fitting tests
+├── tracer.ts            # Path tracing from raster image
+├── tracer_test.ts       # Path tracing tests
 └── README.md            # This file
 ```
 
 ## Modules
+
+### `tracer.ts`
+
+Converts binary raster images into connected vector paths.
+
+**Features:**
+
+- 8-way connectivity tracing
+- Stair-step artifact avoidance (prefers cardinal connections)
+- Junction detection and splitting
+- Closed loop detection
+
+**Functions:**
+
+- `tracePaths(binary: BinaryImage): Path[]`
 
 ### `geometry.ts`
 
