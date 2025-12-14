@@ -1247,8 +1247,16 @@ function fitBoundaryGaps(
             : Infinity;
           const error = Math.min(lineError, circleError);
 
-          // Accept if it's a reasonable fit and better than what we have
-          if (error <= MAX_ERROR && error < bestError) {
+          console.log(
+            `[Fit boundary gap] Trying start [0-${endIdx}] (${endIdx + 1} points): lineError=${
+              lineError.toFixed(3)
+            }px, circleError=${circleError.toFixed(3)}px, best=${
+              error.toFixed(3)
+            }px`,
+          );
+
+          // Accept if it's a reasonable fit - prefer longer segments that still fit well
+          if (error <= MAX_ERROR) {
             bestError = error;
             bestSeg = {
               startIndex: 0,
@@ -1265,6 +1273,18 @@ function fitBoundaryGaps(
             }px)`,
           );
           result.push(bestSeg);
+        } else {
+          // Couldn't fit well, add entire gap as polyline
+          console.log(
+            `[Fit boundary gap] Could not fit start gap, marking as unfitted polyline [0-${
+              firstSeg.startIndex - 1
+            }]`,
+          );
+          result.push({
+            startIndex: 0,
+            endIndex: firstSeg.startIndex - 1,
+            type: "polyline",
+          });
         }
       }
     }
@@ -1339,8 +1359,8 @@ function fitBoundaryGaps(
               : Infinity;
             const error = Math.min(lineError, circleError);
 
-            // Accept if it's a reasonable fit and better than what we have
-            if (error <= MAX_ERROR && error < bestError) {
+            // Accept if it's a reasonable fit - prefer longer segments that still fit well
+            if (error <= MAX_ERROR) {
               bestError = error;
               bestGapSeg = {
                 startIndex: startIdx,
@@ -1436,8 +1456,8 @@ function fitBoundaryGaps(
             : Infinity;
           const error = Math.min(lineError, circleError);
 
-          // Accept if it's a reasonable fit and better than what we have
-          if (error <= MAX_ERROR && error < bestError) {
+          // Accept if it's a reasonable fit - prefer longer segments that still fit well
+          if (error <= MAX_ERROR) {
             bestError = error;
             bestSeg = {
               startIndex: startIdx,
@@ -1454,6 +1474,18 @@ function fitBoundaryGaps(
             }] (error ${bestError.toFixed(3)}px)`,
           );
           result.push(bestSeg);
+        } else {
+          // Couldn't fit well, add entire gap as polyline
+          console.log(
+            `[Fit boundary gap] Could not fit end gap, marking as unfitted polyline [${
+              lastResultSeg.endIndex + 1
+            }-${N - 1}]`,
+          );
+          result.push({
+            startIndex: lastResultSeg.endIndex + 1,
+            endIndex: N - 1,
+            type: "polyline",
+          });
         }
       }
     }

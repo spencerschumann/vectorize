@@ -3808,7 +3808,10 @@ function fitBoundaryGaps(points, segments, isClosed) {
           const circleFitResult = circleFit.getFit();
           const circleError = circleFitResult.valid ? percentile(circleErrors, 0.5) : Infinity;
           const error = Math.min(lineError, circleError);
-          if (error <= MAX_ERROR && error < bestError) {
+          console.log(
+            `[Fit boundary gap] Trying start [0-${endIdx}] (${endIdx + 1} points): lineError=${lineError.toFixed(3)}px, circleError=${circleError.toFixed(3)}px, best=${error.toFixed(3)}px`
+          );
+          if (error <= MAX_ERROR) {
             bestError = error;
             bestSeg = {
               startIndex: 0,
@@ -3823,6 +3826,15 @@ function fitBoundaryGaps(points, segments, isClosed) {
             `[Fit boundary gap] Added start segment [0-${bestSeg.endIndex}] (error ${bestError.toFixed(3)}px)`
           );
           result.push(bestSeg);
+        } else {
+          console.log(
+            `[Fit boundary gap] Could not fit start gap, marking as unfitted polyline [0-${firstSeg.startIndex - 1}]`
+          );
+          result.push({
+            startIndex: 0,
+            endIndex: firstSeg.startIndex - 1,
+            type: "polyline"
+          });
         }
       }
     }
@@ -3865,7 +3877,7 @@ function fitBoundaryGaps(points, segments, isClosed) {
             const circleFitResult = circleFit.getFit();
             const circleError = circleFitResult.valid ? percentile(circleErrors, 0.5) : Infinity;
             const error = Math.min(lineError, circleError);
-            if (error <= MAX_ERROR && error < bestError) {
+            if (error <= MAX_ERROR) {
               bestError = error;
               bestGapSeg = {
                 startIndex: startIdx,
@@ -3931,7 +3943,7 @@ function fitBoundaryGaps(points, segments, isClosed) {
           const circleFitResult = circleFit.getFit();
           const circleError = circleFitResult.valid ? percentile(circleErrors, 0.5) : Infinity;
           const error = Math.min(lineError, circleError);
-          if (error <= MAX_ERROR && error < bestError) {
+          if (error <= MAX_ERROR) {
             bestError = error;
             bestSeg = {
               startIndex: startIdx,
@@ -3946,6 +3958,15 @@ function fitBoundaryGaps(points, segments, isClosed) {
             `[Fit boundary gap] Added end segment [${bestSeg.startIndex}-${N - 1}] (error ${bestError.toFixed(3)}px)`
           );
           result.push(bestSeg);
+        } else {
+          console.log(
+            `[Fit boundary gap] Could not fit end gap, marking as unfitted polyline [${lastResultSeg.endIndex + 1}-${N - 1}]`
+          );
+          result.push({
+            startIndex: lastResultSeg.endIndex + 1,
+            endIndex: N - 1,
+            type: "polyline"
+          });
         }
       }
     }
