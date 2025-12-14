@@ -409,7 +409,7 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
         // Fitted segment: use projected endpoints if available
         if (seg.projectedStart && seg.projectedEnd) {
           let segmentStartIdx: number;
-          
+
           if (points.length === 0) {
             // First segment: add both start and end
             points.push(seg.projectedStart);
@@ -441,7 +441,7 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
         } else {
           // Fitted segment but no projected endpoints - fallback to skeleton pixels
           let segmentStartIdx: number;
-          
+
           if (points.length === 0) {
             segmentStartIdx = 0;
             points.push(...skeletonPoints);
@@ -469,7 +469,7 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
       } else {
         // Unfitted segment (polyline): use skeleton pixels
         let segmentStartIdx: number;
-        
+
         if (points.length === 0) {
           // First segment: add all skeleton points
           segmentStartIdx = 0;
@@ -1069,14 +1069,26 @@ export function renderVectorizedToSVG(
           // Arc segment: render as polyline approximation using projected endpoints
           const center = segment.circleFit.center;
           const radius = segment.circleFit.radius;
-          const sweepAngle = segment.circleFit.sweepAngle;
           const clockwise = segment.circleFit.clockwise;
 
-          // Calculate start angle from actual start point
+          // Calculate angles from projected endpoints (not skeleton points)
           const startAngle = Math.atan2(
-            startPoint.y - center.y,
-            startPoint.x - center.x,
+            segment.projectedStart.y - center.y,
+            segment.projectedStart.x - center.x,
           );
+          const endAngle = Math.atan2(
+            segment.projectedEnd.y - center.y,
+            segment.projectedEnd.x - center.x,
+          );
+
+          // Calculate sweep angle between projected endpoints
+          let sweepAngle = clockwise
+            ? (endAngle - startAngle)
+            : (startAngle - endAngle);
+
+          // Normalize to [0, 2π]
+          if (sweepAngle < 0) sweepAngle += 2 * Math.PI;
+          if (sweepAngle > 2 * Math.PI) sweepAngle -= 2 * Math.PI;
 
           // Generate points every ~2 degrees for smooth appearance
           const numPoints = Math.max(3, Math.ceil(sweepAngle / (Math.PI / 90)));
