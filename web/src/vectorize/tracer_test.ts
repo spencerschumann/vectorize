@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "@std/assert";
 import { createBinaryImage, setPixelBin } from "../formats/binary.ts";
 import { traceGraph } from "./tracer.ts";
 
