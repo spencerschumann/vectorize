@@ -466,3 +466,113 @@ export function arcArcIntersection(
     return isAngleInArc(arc1, angle1) && isAngleInArc(arc2, angle2);
   });
 }
+
+// ============================================================================
+// 3-Point Arc Operations
+// ============================================================================
+
+export interface Arc3Point {
+  start: Point;
+  end: Point;
+  mid: Point; // A point on the arc
+}
+
+/**
+ * Convert 3-point arc to center/radius representation
+ * Returns null if points are collinear (it's a line, not an arc)
+ */
+export function arc3PointToArc(arc3: Arc3Point): Arc | null {
+  const { start, end, mid } = arc3;
+
+  // Check for collinearity
+  // If area of triangle is 0, they are collinear
+  // Area = 0.5 * |x1(y2 - y3) + x2(y3 - y1) + x3(y1 - y2)|
+  const area = 0.5 * Math.abs(
+    start.x * (mid.y - end.y) +
+      mid.x * (end.y - start.y) +
+      end.x * (start.y - mid.y),
+  );
+
+  if (area < 1e-6) {
+    return null;
+  }
+
+  // Find center of circle passing through 3 points
+  // Perpendicular bisector of start-mid
+  const midStartMid = scale(add(start, mid), 0.5);
+  const dirStartMid = subtract(mid, start);
+  const perpStartMid = { x: -dirStartMid.y, y: dirStartMid.x };
+  const line1 = { point: midStartMid, direction: normalize(perpStartMid) };
+
+  // Perpendicular bisector of mid-end
+  const midMidEnd = scale(add(mid, end), 0.5);
+  const dirMidEnd = subtract(end, mid);
+  const perpMidEnd = { x: -dirMidEnd.y, y: dirMidEnd.x };
+  const line2 = { point: midMidEnd, direction: normalize(perpMidEnd) };
+
+  const center = lineLineIntersection(line1, line2);
+  if (!center) return null; // Should be caught by collinear check
+
+  const radius = distance(center, start);
+  const startAngle = angle(subtract(start, center));
+  const endAngle = angle(subtract(end, center));
+
+  // Determine direction (clockwise or counter-clockwise)
+  // Cross product of (mid-start) and (end-mid) tells us the turn direction
+  const v1 = subtract(mid, start);
+  const v2 = subtract(end, mid);
+  const crossProd = cross(v1, v2);
+  // In Y-down screen coords:
+  // cross > 0 => Right Turn (Clockwise)
+  // cross < 0 => Left Turn (Counter-Clockwise)
+
+  return {
+    center,
+    radius,
+    startAngle,
+    endAngle,
+    clockwise: crossProd > 0,
+  };
+}
+
+/**
+ * Calculate squared distance from a point to a line segment
+ */
+export function distancePointToLineSegmentSq(
+  p: Point,
+  a: Point,
+  b: Point,
+): number {
+  const l2 = distanceSquared(a, b);
+  if (l2 === 0) return distanceSquared(p, a);
+  let t = ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / l2;
+  t = Math.max(0, Math.min(1, t));
+  const proj = {
+    x: a.x + t * (b.x - a.x),
+    y: a.y + t * (b.y - a.y),
+  };
+  return distanceSquared(p, proj);
+}
+
+/**
+ * Calculate distance from a point to a line segment
+ */
+export function distancePointToLineSegment(
+  p: Point,
+  a: Point,
+  b: Point,
+): number {
+  return Math.sqrt(distancePointToLineSegmentSq(p, a, b));
+}
+
+/**
+ * Calculate distance from a point to a 3-point arc
+ */
+export function distancePointToArc3Point(p: Point, arc3: Arc3Point): number {
+  const arc = arc3PointToArc(arc3);
+  if (!arc) {
+    // Treat as line segment
+    return distancePointToLineSegment(p, arc3.start, arc3.end);
+  }
+  return distanceToArc(p, arc);
+}

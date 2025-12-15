@@ -2,6 +2,7 @@
     "nodeModulesDir": "auto",
     "tasks": {
         "build": "deno run -A npm:esbuild browser-app/main.ts --bundle --format=esm --outfile=browser-app/bundle.js --platform=browser --sourcemap",
+        "build:visualizer": "deno run -A npm:esbuild browser-app/test_visualizer.ts --bundle --format=esm --outfile=browser-app/test_visualizer_bundle.js --platform=browser --sourcemap",
         "build:watch": "deno run -A npm:esbuild browser-app/main.ts --bundle --format=esm --outfile=browser-app/bundle.js --platform=browser --sourcemap --watch",
         "dev": "deno task build:watch & deno run --allow-net --allow-read --allow-write --watch browser-app/server.ts",
         "start": "deno run --allow-net --allow-read browser-app/server.ts",

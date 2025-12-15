@@ -1,5 +1,6 @@
-import type { Graph } from "./tracer.ts";
+import type { Graph, GraphEdge } from "./tracer.ts";
 import type { Arc, Line, Point } from "./geometry.ts";
+import { optimizeEdge } from "./optimizer.ts";
 import { IncrementalLineFit } from "./line_fit.ts";
 import { IncrementalCircleFit } from "./arc_fit.ts";
 
@@ -8,7 +9,7 @@ export type Segment =
   | { type: "arc"; arc: Arc; start: Point; end: Point };
 
 export interface SimplifiedEdge {
-  originalEdgeId: number;
+  original: GraphEdge;
   segments: Segment[];
 }
 
@@ -20,7 +21,7 @@ export interface SimplifiedGraph {
 function segmentEdge(points: Point[]): Segment[] {
   const segments: Segment[] = [];
   let startIndex = 0;
-  const TOLERANCE = 1.0; // Maximum pixel error allowed
+  const TOLERANCE = 2.0; // Higher tolerance for initial pass
 
   while (startIndex < points.length - 1) {
     let bestEndIndex = startIndex + 1;
@@ -101,13 +102,7 @@ function segmentEdge(points: Point[]): Segment[] {
     const endP = points[bestEndIndex];
 
     if (bestType === "line") {
-      // If we only have 2 points, lFit might be null if we didn't capture it in the loop?
-      // No, loop runs at least once for i=startIndex+1.
-      // If lValid was true, bestLineFit is set.
-      // Fallback for safety: re-fit if null (shouldn't happen)
       if (!bestLineFit) {
-        // Should only happen if logic is wrong or 2 points failed line fit (impossible)
-        // Just create a line between points
         const dx = endP.x - startP.x;
         const dy = endP.y - startP.y;
         const len = Math.sqrt(dx * dx + dy * dy);
@@ -154,18 +149,21 @@ export function simplifyGraph(graph: Graph): SimplifiedGraph {
   const simplifiedEdges: SimplifiedEdge[] = [];
 
   for (const edge of graph.edges) {
-    const points = edge.points;
-
-    if (points.length < 2) {
+    if (edge.points.length < 2) {
       continue;
     }
 
-    const segments = segmentEdge(points);
+    // 1. Initial Greedy Pass
+    const initialSegments = segmentEdge(edge.points);
 
-    simplifiedEdges.push({
-      originalEdgeId: edge.id,
-      segments,
-    });
+    const initial: SimplifiedEdge = {
+      original: edge,
+      segments: initialSegments,
+    };
+
+    // 2. Optimization Pass
+    const optimized = optimizeEdge(initial, initialSegments);
+    simplifiedEdges.push(optimized);
   }
 
   return {
