@@ -549,6 +549,20 @@ export function convertToSegments(
       // Convert to Arc
       const chord = subtract(end, start);
       const chordLen = magnitude(chord);
+
+      if (chordLen < 1e-6) {
+        // Fallback to line (point) to avoid NaN if start ~= end
+        return {
+          type: "line",
+          start: { x: start.x, y: start.y },
+          end: { x: end.x, y: end.y },
+          line: {
+            point: { x: start.x, y: start.y },
+            direction: { x: 1, y: 0 },
+          },
+        } as any;
+      }
+
       const R = (Math.pow(chordLen / 2, 2) + seg.sagitta * seg.sagitta) /
         (2 * Math.abs(seg.sagitta));
       const midChord = scale(add(start, end), 0.5);

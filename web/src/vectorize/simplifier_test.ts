@@ -116,3 +116,29 @@ Deno.test("simplifyGraph - L-shape (corner)", () => {
   assertEquals(hasVertical, true);
   assertEquals(hasHorizontal, true);
 });
+
+Deno.test("simplifyGraph - Circle (Small)", () => {
+  const ascii = `
+    ...###...
+    ..#...#..
+    .#.....#.
+    .#.....#.
+    .#.....#.
+    ..#...#..
+    ...###...
+    `;
+  const bin = binaryFromAscii(ascii);
+  const graph = traceGraph(bin);
+  
+  const simplified = simplifyGraph(graph);
+  const edge = simplified.edges[0];
+  
+  // Check for NaNs
+  for (const seg of edge.segments) {
+    if (seg.type === "arc") {
+      if (Number.isNaN(seg.arc.center.x) || Number.isNaN(seg.arc.center.y)) {
+        throw new Error("Arc center is NaN");
+      }
+    }
+  }
+});

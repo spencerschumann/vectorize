@@ -317,14 +317,26 @@ function optimizeEdge(edge, initialSegments, onIteration) {
       points: edge.original.points
     });
   }
-  if (onIteration) onIteration(JSON.parse(JSON.stringify(nodes)), JSON.parse(JSON.stringify(segments)), "Initial");
+  if (onIteration) {
+    onIteration(
+      JSON.parse(JSON.stringify(nodes)),
+      JSON.parse(JSON.stringify(segments)),
+      "Initial"
+    );
+  }
   let changed = true;
   let loopCount = 0;
   while (changed && loopCount < 5) {
     changed = false;
     loopCount++;
     optimizeParameters(nodes, segments);
-    if (onIteration) onIteration(JSON.parse(JSON.stringify(nodes)), JSON.parse(JSON.stringify(segments)), `Iteration ${loopCount} - Optimized`);
+    if (onIteration) {
+      onIteration(
+        JSON.parse(JSON.stringify(nodes)),
+        JSON.parse(JSON.stringify(segments)),
+        `Iteration ${loopCount} - Optimized`
+      );
+    }
     const newSegments = [];
     let splitOccurred = false;
     for (const seg of segments) {
@@ -341,13 +353,31 @@ function optimizeEdge(edge, initialSegments, onIteration) {
     }
     segments = newSegments;
     if (splitOccurred) {
-      if (onIteration) onIteration(JSON.parse(JSON.stringify(nodes)), JSON.parse(JSON.stringify(segments)), `Iteration ${loopCount} - Split`);
+      if (onIteration) {
+        onIteration(
+          JSON.parse(JSON.stringify(nodes)),
+          JSON.parse(JSON.stringify(segments)),
+          `Iteration ${loopCount} - Split`
+        );
+      }
       optimizeParameters(nodes, segments);
-      if (onIteration) onIteration(JSON.parse(JSON.stringify(nodes)), JSON.parse(JSON.stringify(segments)), `Iteration ${loopCount} - Re-optimized`);
+      if (onIteration) {
+        onIteration(
+          JSON.parse(JSON.stringify(nodes)),
+          JSON.parse(JSON.stringify(segments)),
+          `Iteration ${loopCount} - Re-optimized`
+        );
+      }
     }
   }
   optimizeParameters(nodes, segments);
-  if (onIteration) onIteration(JSON.parse(JSON.stringify(nodes)), JSON.parse(JSON.stringify(segments)), "Final");
+  if (onIteration) {
+    onIteration(
+      JSON.parse(JSON.stringify(nodes)),
+      JSON.parse(JSON.stringify(segments)),
+      "Final"
+    );
+  }
   return {
     original: edge.original,
     segments: convertToSegments(nodes, segments)
@@ -566,6 +596,17 @@ function convertToSegments(nodes, optSegments) {
     } else {
       const chord = subtract(end, start);
       const chordLen = magnitude(chord);
+      if (chordLen < 1e-6) {
+        return {
+          type: "line",
+          start: { x: start.x, y: start.y },
+          end: { x: end.x, y: end.y },
+          line: {
+            point: { x: start.x, y: start.y },
+            direction: { x: 1, y: 0 }
+          }
+        };
+      }
       const R = (Math.pow(chordLen / 2, 2) + seg.sagitta * seg.sagitta) / (2 * Math.abs(seg.sagitta));
       const midChord = scale(add(start, end), 0.5);
       const normal = { x: -chord.y / chordLen, y: chord.x / chordLen };
@@ -859,7 +900,9 @@ function segmentEdge(points) {
         aFit = arcFit.getFit();
         if (aFit) {
           const maxErr = Math.max(...aFit.errors);
-          if (maxErr <= TOLERANCE) aValid = true;
+          if (maxErr <= TOLERANCE && Math.abs(aFit.sweepAngle) <= Math.PI) {
+            aValid = true;
+          }
         }
       }
       if (!lValid && !aValid) {
@@ -936,9 +979,13 @@ function simplifyGraph(graph, onIteration) {
       original: edge,
       segments: initialSegments
     };
-    const optimized = optimizeEdge(initial, initialSegments, (nodes, segments, label) => {
-      if (onIteration) onIteration(edge.id, nodes, segments, label);
-    });
+    const optimized = optimizeEdge(
+      initial,
+      initialSegments,
+      (nodes, segments, label) => {
+        if (onIteration) onIteration(edge.id, nodes, segments, label);
+      }
+    );
     simplifiedEdges.push(optimized);
   }
   return {

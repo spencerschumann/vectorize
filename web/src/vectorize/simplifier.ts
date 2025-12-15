@@ -63,7 +63,11 @@ function segmentEdge(points: Point[]): Segment[] {
         aFit = arcFit.getFit();
         if (aFit) {
           const maxErr = Math.max(...aFit.errors);
-          if (maxErr <= TOLERANCE) aValid = true;
+          // Limit arc to 180 degrees to avoid ambiguity in sagitta representation
+          // and degenerate cases with closed loops.
+          if (maxErr <= TOLERANCE && Math.abs(aFit.sweepAngle) <= Math.PI) {
+            aValid = true;
+          }
         }
       }
 
