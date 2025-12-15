@@ -62,19 +62,19 @@ Deno.test("simplifyGraph - horizontal line", () => {
 
     // Let's check coordinates
     // y should be 1
-    assertEquals(segment.start.y, 1);
-    assertEquals(segment.end.y, 1);
+    assertAlmostEquals(segment.start.y, 1, 0.2);
+    assertAlmostEquals(segment.end.y, 1, 0.2);
 
     // x should be 1 and 5 (or 5 and 1)
     const minX = Math.min(segment.start.x, segment.end.x);
     const maxX = Math.max(segment.start.x, segment.end.x);
-    assertEquals(minX, 1);
-    assertEquals(maxX, 5);
+    assertAlmostEquals(minX, 1, 0.2);
+    assertAlmostEquals(maxX, 5, 0.2);
 
     // Check direction
     // Horizontal line: direction should be (1, 0) or (-1, 0)
-    assertAlmostEquals(Math.abs(segment.line.direction.x), 1);
-    assertAlmostEquals(segment.line.direction.y, 0);
+    assertAlmostEquals(Math.abs(segment.line.direction.x), 1, 1e-3);
+    assertAlmostEquals(segment.line.direction.y, 0, 1e-3);
   }
 });
 

@@ -247,14 +247,17 @@ var CONFIG = {
 function optimizeEdge(edge, initialSegments, onIteration) {
   let nodes = [];
   let segments = [];
+  const startP = edge.original.points[0];
+  const endP = edge.original.points[edge.original.points.length - 1];
+  const isClosed = distance(startP, endP) < 1e-4;
   if (initialSegments && initialSegments.length > 0) {
     const firstP = initialSegments[0].start;
-    nodes.push({ x: firstP.x, y: firstP.y, fixed: true });
+    nodes.push({ x: firstP.x, y: firstP.y, fixed: false });
     for (let i = 0; i < initialSegments.length; i++) {
       const seg = initialSegments[i];
-      const endP = seg.end;
+      const endP2 = seg.end;
       const isLast = i === initialSegments.length - 1;
-      nodes.push({ x: endP.x, y: endP.y, fixed: isLast });
+      nodes.push({ x: endP2.x, y: endP2.y, fixed: false });
       const segmentPoints = seg.points;
       let sagitta = 0;
       if (seg.type === "arc") {
@@ -285,10 +288,10 @@ function optimizeEdge(edge, initialSegments, onIteration) {
       });
     }
   } else {
-    const startP = edge.original.points[0];
-    const endP = edge.original.points[edge.original.points.length - 1];
-    nodes.push({ x: startP.x, y: startP.y, fixed: true });
-    nodes.push({ x: endP.x, y: endP.y, fixed: true });
+    const startP2 = edge.original.points[0];
+    const endP2 = edge.original.points[edge.original.points.length - 1];
+    nodes.push({ x: startP2.x, y: startP2.y, fixed: false });
+    nodes.push({ x: endP2.x, y: endP2.y, fixed: false });
     segments.push({
       startIdx: 0,
       endIdx: 1,
@@ -308,7 +311,7 @@ function optimizeEdge(edge, initialSegments, onIteration) {
   while (changed && loopCount < 5) {
     changed = false;
     loopCount++;
-    optimizeParameters(nodes, segments);
+    optimizeParameters(nodes, segments, isClosed);
     if (onIteration) {
       onIteration(
         JSON.parse(JSON.stringify(nodes)),
@@ -339,7 +342,7 @@ function optimizeEdge(edge, initialSegments, onIteration) {
           `Iteration ${loopCount} - Split`
         );
       }
-      optimizeParameters(nodes, segments);
+      optimizeParameters(nodes, segments, isClosed);
       if (onIteration) {
         onIteration(
           JSON.parse(JSON.stringify(nodes)),
@@ -349,7 +352,7 @@ function optimizeEdge(edge, initialSegments, onIteration) {
       }
     }
   }
-  optimizeParameters(nodes, segments);
+  optimizeParameters(nodes, segments, isClosed);
   if (onIteration) {
     onIteration(
       JSON.parse(JSON.stringify(nodes)),
@@ -362,7 +365,7 @@ function optimizeEdge(edge, initialSegments, onIteration) {
     segments: convertToSegments(nodes, segments)
   };
 }
-function optimizeParameters(nodes, segments) {
+function optimizeParameters(nodes, segments, isClosed = false) {
   for (let iter = 0; iter < CONFIG.ITERATIONS; iter++) {
     const nodeGrads = nodes.map(() => ({ x: 0, y: 0 }));
     const sagittaGrads = segments.map(() => 0);
@@ -417,11 +420,30 @@ function optimizeParameters(nodes, segments) {
         }
       }
     }
+    if (isClosed && nodes.length > 1) {
+      const last = nodes.length - 1;
+      const gx = (nodeGrads[0].x + nodeGrads[last].x) / 2;
+      const sumX = nodeGrads[0].x + nodeGrads[last].x;
+      const sumY = nodeGrads[0].y + nodeGrads[last].y;
+      nodeGrads[0].x = sumX;
+      nodeGrads[0].y = sumY;
+      nodeGrads[last].x = sumX;
+      nodeGrads[last].y = sumY;
+    }
     for (let i = 0; i < nodes.length; i++) {
       if (!nodes[i].fixed) {
         nodes[i].x -= nodeGrads[i].x * CONFIG.LEARNING_RATE;
         nodes[i].y -= nodeGrads[i].y * CONFIG.LEARNING_RATE;
       }
+    }
+    if (isClosed && nodes.length > 1) {
+      const last = nodes.length - 1;
+      const avgX = (nodes[0].x + nodes[last].x) / 2;
+      const avgY = (nodes[0].y + nodes[last].y) / 2;
+      nodes[0].x = avgX;
+      nodes[0].y = avgY;
+      nodes[last].x = avgX;
+      nodes[last].y = avgY;
     }
     for (let i = 0; i < segments.length; i++) {
       segments[i].sagitta -= sagittaGrads[i] * CONFIG.LEARNING_RATE;

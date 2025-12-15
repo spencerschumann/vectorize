@@ -48,11 +48,16 @@ export function optimizeEdge(
   let nodes: OptNode[] = [];
   let segments: OptSegment[] = [];
 
+  // Determine if the edge is a closed loop
+  const startP = edge.original.points[0];
+  const endP = edge.original.points[edge.original.points.length - 1];
+  const isClosed = distance(startP, endP) < 1e-4;
+
   if (initialSegments && initialSegments.length > 0) {
     // Initialize from existing segments
     // Add first node
     const firstP = initialSegments[0].start;
-    nodes.push({ x: firstP.x, y: firstP.y, fixed: true });
+    nodes.push({ x: firstP.x, y: firstP.y, fixed: false });
 
     for (let i = 0; i < initialSegments.length; i++) {
       const seg = initialSegments[i];
@@ -61,7 +66,7 @@ export function optimizeEdge(
       // Add end node
       // Last node is fixed, intermediate nodes are free
       const isLast = i === initialSegments.length - 1;
-      nodes.push({ x: endP.x, y: endP.y, fixed: isLast });
+      nodes.push({ x: endP.x, y: endP.y, fixed: false });
 
       // Use points directly from the segment
       const segmentPoints = seg.points;
@@ -122,8 +127,8 @@ export function optimizeEdge(
     const startP = edge.original.points[0];
     const endP = edge.original.points[edge.original.points.length - 1];
 
-    nodes.push({ x: startP.x, y: startP.y, fixed: true });
-    nodes.push({ x: endP.x, y: endP.y, fixed: true });
+    nodes.push({ x: startP.x, y: startP.y, fixed: false });
+    nodes.push({ x: endP.x, y: endP.y, fixed: false });
 
     segments.push({
       startIdx: 0,
@@ -150,7 +155,7 @@ export function optimizeEdge(
     loopCount++;
 
     // A. Optimize Parameters (Gradient Descent)
-    optimizeParameters(nodes, segments);
+    optimizeParameters(nodes, segments, isClosed);
     if (onIteration) {
       onIteration(
         JSON.parse(JSON.stringify(nodes)),
@@ -185,7 +190,7 @@ export function optimizeEdge(
         );
       }
       // Re-optimize after split
-      optimizeParameters(nodes, segments);
+      optimizeParameters(nodes, segments, isClosed);
       if (onIteration) {
         onIteration(
           JSON.parse(JSON.stringify(nodes)),
@@ -202,7 +207,7 @@ export function optimizeEdge(
   }
 
   // Final Polish
-  optimizeParameters(nodes, segments);
+  optimizeParameters(nodes, segments, isClosed);
   if (onIteration) {
     onIteration(
       JSON.parse(JSON.stringify(nodes)),
@@ -217,7 +222,11 @@ export function optimizeEdge(
   };
 }
 
-function optimizeParameters(nodes: OptNode[], segments: OptSegment[]) {
+function optimizeParameters(
+  nodes: OptNode[],
+  segments: OptSegment[],
+  isClosed: boolean = false,
+) {
   for (let iter = 0; iter < CONFIG.ITERATIONS; iter++) {
     // Calculate Gradients
     const nodeGrads = nodes.map(() => ({ x: 0, y: 0 }));
@@ -302,6 +311,24 @@ function optimizeParameters(nodes: OptNode[], segments: OptSegment[]) {
       }
     }
 
+    // Sync gradients for closed loops
+    if (isClosed && nodes.length > 1) {
+      const last = nodes.length - 1;
+      const gx = (nodeGrads[0].x + nodeGrads[last].x) / 2; // Average? Or sum?
+      // If we treat them as one node, the gradient is the sum of forces on that node.
+      // But we apply it to two nodes.
+      // If we sum, we get double the force if we apply to both?
+      // No, if they are the same node, the total force is sum.
+      // And we move that one node by learning_rate * sum.
+      // Here we have two nodes. If we move both by learning_rate * sum, it's correct.
+      const sumX = nodeGrads[0].x + nodeGrads[last].x;
+      const sumY = nodeGrads[0].y + nodeGrads[last].y;
+      nodeGrads[0].x = sumX;
+      nodeGrads[0].y = sumY;
+      nodeGrads[last].x = sumX;
+      nodeGrads[last].y = sumY;
+    }
+
     // Apply Gradients
     for (let i = 0; i < nodes.length; i++) {
       if (!nodes[i].fixed) {
@@ -309,6 +336,18 @@ function optimizeParameters(nodes: OptNode[], segments: OptSegment[]) {
         nodes[i].y -= nodeGrads[i].y * CONFIG.LEARNING_RATE;
       }
     }
+
+    // Sync positions for closed loops (to correct any drift)
+    if (isClosed && nodes.length > 1) {
+      const last = nodes.length - 1;
+      const avgX = (nodes[0].x + nodes[last].x) / 2;
+      const avgY = (nodes[0].y + nodes[last].y) / 2;
+      nodes[0].x = avgX;
+      nodes[0].y = avgY;
+      nodes[last].x = avgX;
+      nodes[last].y = avgY;
+    }
+
     for (let i = 0; i < segments.length; i++) {
       segments[i].sagitta -= sagittaGrads[i] * CONFIG.LEARNING_RATE;
 
