@@ -1,13 +1,13 @@
 import {
-  type Point,
-  distance,
   add,
-  subtract,
-  scale,
+  cross,
+  distance,
+  dot,
   magnitude,
   normalize,
-  dot,
-  cross,
+  type Point,
+  scale,
+  subtract,
 } from "./geometry.ts";
 import { type Segment, type SimplifiedEdge } from "./simplifier.ts";
 
@@ -22,53 +22,61 @@ const CONFIG = {
   FIDELITY_WEIGHT: 1.0,
 };
 
-interface OptNode {
+export interface OptNode {
   x: number;
   y: number;
   fixed: boolean;
 }
 
-interface OptSegment {
+export interface OptSegment {
   startIdx: number; // Index into nodes array
-  endIdx: number;   // Index into nodes array
-  sagitta: number;  // Height of arc (0 = line)
-  points: Point[];  // Original pixels
+  endIdx: number; // Index into nodes array
+  sagitta: number; // Height of arc (0 = line)
+  points: Point[]; // Original pixels
 }
 
-export function optimizeEdge(edge: SimplifiedEdge, initialSegments?: Segment[]): SimplifiedEdge {
+export function optimizeEdge(
+  edge: SimplifiedEdge,
+  initialSegments?: Segment[],
+  onIteration?: (
+    nodes: OptNode[],
+    segments: OptSegment[],
+    label: string,
+  ) => void,
+): SimplifiedEdge {
   // 1. Initialize Optimization Model
   let nodes: OptNode[] = [];
   let segments: OptSegment[] = [];
-  
+
   if (initialSegments && initialSegments.length > 0) {
     // Initialize from existing segments
     // Add first node
     const firstP = initialSegments[0].start;
     nodes.push({ x: firstP.x, y: firstP.y, fixed: true });
-    
+
     let currentPointIdx = 0;
-    
+
     for (let i = 0; i < initialSegments.length; i++) {
       const seg = initialSegments[i];
       const endP = seg.end;
-      
+
       // Add end node
       // Last node is fixed, intermediate nodes are free
       const isLast = i === initialSegments.length - 1;
       nodes.push({ x: endP.x, y: endP.y, fixed: isLast });
-      
+
       // Find points belonging to this segment
       // We need to map the geometric segment back to the original points
       // This is tricky because Segment doesn't store indices.
       // We assume segments are contiguous and cover the whole edge.
       // We can find the closest point in the original array to the segment end
       // to determine the split index.
-      
+
       // Simple heuristic: find the index of the point closest to seg.end
       // starting from currentPointIdx
       let bestIdx = currentPointIdx;
       let minD = Infinity;
-      
+
       // Search forward
       for (let k = currentPointIdx; k < edge.original.points.length; k++) {
         const d = distanceSquared(edge.original.points[k], endP);
@@ -80,16 +88,19 @@ export function optimizeEdge(edge: SimplifiedEdge, initialSegments?: Segment[]):
           break;
         }
       }
-      
+
       // Ensure we make progress but don't overshoot if it's the last one
       if (isLast) {
         bestIdx = edge.original.points.length - 1;
       } else {
         bestIdx = Math.max(bestIdx, currentPointIdx + 1);
       }
-      
-      const segmentPoints = edge.original.points.slice(currentPointIdx, bestIdx + 1);
-      
+
+      const segmentPoints = edge.original.points.slice(
+        currentPointIdx,
+        bestIdx + 1,
+      );
+
       // Calculate initial sagitta
       let sagitta = 0;
       if (seg.type === "arc") {
@@ -97,82 +108,98 @@ export function optimizeEdge(edge: SimplifiedEdge, initialSegments?: Segment[]):
         // s = R - sqrt(R^2 - (L/2)^2)  (for small arcs)
         // or just distance from midpoint of chord to arc center minus radius?
         // Sagitta is signed distance from chord to arc.
-        
+
         const chord = subtract(seg.end, seg.start);
         const chordLen = magnitude(chord);
         const midChord = scale(add(seg.start, seg.end), 0.5);
-        
+
         // Vector from midChord to center
         const toCenter = subtract(seg.arc.center, midChord);
         const distToCenter = magnitude(toCenter);
-        
+
         // Check if center is on the "left" or "right" of the chord
         // Cross product of chord and toCenter
         const cp = cross(chord, toCenter);
-        
+
         // If arc is "small" (less than semicircle), sagitta has same sign as cross product?
         // Let's use the convention: sagitta is positive if arc is to the "left" of chord vector?
         // Our optimizer uses: center = midChord + (R-|s|) * (-sign(s)*normal)
         // where normal = (-dy, dx) / L.
-        
+
         // Let's just estimate it numerically from the midpoint of the arc
         const midAngle = (seg.arc.startAngle + seg.arc.endAngle) / 2; // Careful with wrapping
         // Better: use the midpoint of the segment points
         if (segmentPoints.length > 0) {
-           const midIdx = Math.floor(segmentPoints.length / 2);
-           const pMid = segmentPoints[midIdx];
-           // Distance from pMid to chord
-           const d = Math.sqrt(distancePointToLineSegmentSq(pMid, seg.start, seg.end));
-           
-           // Determine sign
-           const normal = { x: -chord.y, y: chord.x };
-           const toP = subtract(pMid, seg.start);
-           const dotN = dot(toP, normal);
-           sagitta = d * (dotN > 0 ? 1 : -1);
+          const midIdx = Math.floor(segmentPoints.length / 2);
+          const pMid = segmentPoints[midIdx];
+          // Distance from pMid to chord
+          const d = Math.sqrt(
+            distancePointToLineSegmentSq(pMid, seg.start, seg.end),
+          );
+
+          // Determine sign
+          const normal = { x: -chord.y, y: chord.x };
+          const toP = subtract(pMid, seg.start);
+          const dotN = dot(toP, normal);
+          sagitta = d * (dotN > 0 ? 1 : -1);
         }
       }
-      
+
       segments.push({
         startIdx: i,
         endIdx: i + 1,
         sagitta: sagitta,
-        points: segmentPoints
+        points: segmentPoints,
       });
-      
+
       currentPointIdx = bestIdx;
     }
-    
   } else {
     // Create initial single segment
     const startP = edge.original.points[0];
     const endP = edge.original.points[edge.original.points.length - 1];
-    
+
     nodes.push({ x: startP.x, y: startP.y, fixed: true });
     nodes.push({ x: endP.x, y: endP.y, fixed: true });
-    
+
     segments.push({
       startIdx: 0,
       endIdx: 1,
       sagitta: 0,
-      points: edge.original.points
+      points: edge.original.points,
     });
+  }
+
+  if (onIteration) {
+    onIteration(
+      JSON.parse(JSON.stringify(nodes)),
+      JSON.parse(JSON.stringify(segments)),
+      "Initial",
+    );
   }
 
   // 2. Iterative Refinement Loop
   let changed = true;
   let loopCount = 0;
-  
+
   while (changed && loopCount < 5) {
     changed = false;
     loopCount++;
 
     // A. Optimize Parameters (Gradient Descent)
     optimizeParameters(nodes, segments);
+    if (onIteration) {
+      onIteration(
+        JSON.parse(JSON.stringify(nodes)),
+        JSON.parse(JSON.stringify(segments)),
+        `Iteration ${loopCount} - Optimized`,
+      );
+    }
 
     // B. Split Pass
     const newSegments: OptSegment[] = [];
     let splitOccurred = false;
-    
+
     for (const seg of segments) {
       const maxErr = getMaxError(seg, nodes);
       if (maxErr > CONFIG.SPLIT_THRESHOLD && seg.points.length > 4) {
@@ -189,18 +216,39 @@ export function optimizeEdge(edge: SimplifiedEdge, initialSegments?: Segment[]):
     segments = newSegments;
 
     if (splitOccurred) {
+      if (onIteration) {
+        onIteration(
+          JSON.parse(JSON.stringify(nodes)),
+          JSON.parse(JSON.stringify(segments)),
+          `Iteration ${loopCount} - Split`,
+        );
+      }
       // Re-optimize after split
       optimizeParameters(nodes, segments);
+      if (onIteration) {
+        onIteration(
+          JSON.parse(JSON.stringify(nodes)),
+          JSON.parse(JSON.stringify(segments)),
+          `Iteration ${loopCount} - Re-optimized`,
+        );
+      }
     }
 
     // C. Merge Pass (TODO: Implement if needed, for now split-only + optimize is powerful)
-    // Merging is tricky with the node indices. 
+    // Merging is tricky with the node indices.
     // For the L-shape case, splitting is the key.
     // Merging helps if we over-split.
   }
 
   // Final Polish
   optimizeParameters(nodes, segments);
+  if (onIteration) {
+    onIteration(
+      JSON.parse(JSON.stringify(nodes)),
+      JSON.parse(JSON.stringify(segments)),
+      "Final",
+    );
+  }
 
   return {
     original: edge.original,
@@ -219,7 +267,7 @@ function optimizeParameters(nodes: OptNode[], segments: OptSegment[]) {
       const seg = segments[i];
       const pStart = nodes[seg.startIdx];
       const pEnd = nodes[seg.endIdx];
-      
+
       // Numerical gradient for sagitta
       const h = 0.1;
       const errBase = getSegmentError(seg, pStart, pEnd, seg.sagitta);
@@ -230,21 +278,25 @@ function optimizeParameters(nodes: OptNode[], segments: OptSegment[]) {
       if (!pStart.fixed) {
         const pStartX = { ...pStart, x: pStart.x + h };
         const errX = getSegmentError(seg, pStartX, pEnd, seg.sagitta);
-        nodeGrads[seg.startIdx].x += (errX - errBase) / h * CONFIG.FIDELITY_WEIGHT;
+        nodeGrads[seg.startIdx].x += (errX - errBase) / h *
+          CONFIG.FIDELITY_WEIGHT;
 
         const pStartY = { ...pStart, y: pStart.y + h };
         const errY = getSegmentError(seg, pStartY, pEnd, seg.sagitta);
-        nodeGrads[seg.startIdx].y += (errY - errBase) / h * CONFIG.FIDELITY_WEIGHT;
+        nodeGrads[seg.startIdx].y += (errY - errBase) / h *
+          CONFIG.FIDELITY_WEIGHT;
       }
-      
+
       if (!pEnd.fixed) {
         const pEndX = { ...pEnd, x: pEnd.x + h };
         const errX = getSegmentError(seg, pStart, pEndX, seg.sagitta);
-        nodeGrads[seg.endIdx].x += (errX - errBase) / h * CONFIG.FIDELITY_WEIGHT;
+        nodeGrads[seg.endIdx].x += (errX - errBase) / h *
+          CONFIG.FIDELITY_WEIGHT;
 
         const pEndY = { ...pEnd, y: pEnd.y + h };
         const errY = getSegmentError(seg, pStart, pEndY, seg.sagitta);
-        nodeGrads[seg.endIdx].y += (errY - errBase) / h * CONFIG.FIDELITY_WEIGHT;
+        nodeGrads[seg.endIdx].y += (errY - errBase) / h *
+          CONFIG.FIDELITY_WEIGHT;
       }
     }
 
@@ -254,32 +306,36 @@ function optimizeParameters(nodes: OptNode[], segments: OptSegment[]) {
       const pStart = nodes[seg.startIdx];
       const pEnd = nodes[seg.endIdx];
       const h = 0.1;
-      
+
       // Only apply if sagitta is small (line-like)
       if (Math.abs(seg.sagitta) < 1.0) {
         const dx = pEnd.x - pStart.x;
         const dy = pEnd.y - pStart.y;
-        const len = Math.sqrt(dx*dx + dy*dy);
+        const len = Math.sqrt(dx * dx + dy * dy);
         if (len > 1e-4) {
           // Cost = sin^2(2*angle) ? No, we want 0, 90, 180, 270.
           // sin(angle) is 0 at 0, 180. cos(angle) is 0 at 90, 270.
           // Cost = (dx/len)^2 * (dy/len)^2  <-- 0 if horizontal (dy=0) or vertical (dx=0)
           // This is sin^2 * cos^2 = (1/4)sin^2(2*theta)
-          
+
           // Let's use numerical gradient for simplicity
           const costBase = alignmentCost(pStart, pEnd);
-          
+
           if (!pStart.fixed) {
-             const costX = alignmentCost({ ...pStart, x: pStart.x + h }, pEnd);
-             nodeGrads[seg.startIdx].x += (costX - costBase) / h * CONFIG.ALIGNMENT_STRENGTH;
-             const costY = alignmentCost({ ...pStart, y: pStart.y + h }, pEnd);
-             nodeGrads[seg.startIdx].y += (costY - costBase) / h * CONFIG.ALIGNMENT_STRENGTH;
+            const costX = alignmentCost({ ...pStart, x: pStart.x + h }, pEnd);
+            nodeGrads[seg.startIdx].x += (costX - costBase) / h *
+              CONFIG.ALIGNMENT_STRENGTH;
+            const costY = alignmentCost({ ...pStart, y: pStart.y + h }, pEnd);
+            nodeGrads[seg.startIdx].y += (costY - costBase) / h *
+              CONFIG.ALIGNMENT_STRENGTH;
           }
           if (!pEnd.fixed) {
-             const costX = alignmentCost(pStart, { ...pEnd, x: pEnd.x + h });
-             nodeGrads[seg.endIdx].x += (costX - costBase) / h * CONFIG.ALIGNMENT_STRENGTH;
-             const costY = alignmentCost(pStart, { ...pEnd, y: pEnd.y + h });
-             nodeGrads[seg.endIdx].y += (costY - costBase) / h * CONFIG.ALIGNMENT_STRENGTH;
+            const costX = alignmentCost(pStart, { ...pEnd, x: pEnd.x + h });
+            nodeGrads[seg.endIdx].x += (costX - costBase) / h *
+              CONFIG.ALIGNMENT_STRENGTH;
+            const costY = alignmentCost(pStart, { ...pEnd, y: pEnd.y + h });
+            nodeGrads[seg.endIdx].y += (costY - costBase) / h *
+              CONFIG.ALIGNMENT_STRENGTH;
           }
         }
       }
@@ -301,19 +357,24 @@ function optimizeParameters(nodes: OptNode[], segments: OptSegment[]) {
 function alignmentCost(p1: Point, p2: Point): number {
   const dx = p2.x - p1.x;
   const dy = p2.y - p1.y;
-  const lenSq = dx*dx + dy*dy;
+  const lenSq = dx * dx + dy * dy;
   if (lenSq < 1e-6) return 0;
   // (dx*dy / lenSq)^2 is minimized when dx=0 or dy=0
   return Math.pow((dx * dy) / lenSq, 2) * 100; // Scale up
 }
 
-function getSegmentError(seg: OptSegment, start: Point, end: Point, sagitta: number): number {
+function getSegmentError(
+  seg: OptSegment,
+  start: Point,
+  end: Point,
+  sagitta: number,
+): number {
   let error = 0;
   // Pre-calculate arc parameters
   const chord = subtract(end, start);
   const chordLen = magnitude(chord);
   if (chordLen < 1e-6) return 0;
-  
+
   const midChord = scale(add(start, end), 0.5);
   const normal = { x: -chord.y / chordLen, y: chord.x / chordLen };
   const arcMid = add(midChord, scale(normal, sagitta));
@@ -327,15 +388,19 @@ function getSegmentError(seg: OptSegment, start: Point, end: Point, sagitta: num
     // Arc distance
     // Find center and radius
     // R^2 = (L/2)^2 + (R-s)^2  => R^2 = L^2/4 + R^2 - 2Rs + s^2 => 2Rs = L^2/4 + s^2 => R = (L^2/4 + s^2) / (2s)
-    const R = (Math.pow(chordLen/2, 2) + sagitta*sagitta) / (2 * Math.abs(sagitta));
+    const R = (Math.pow(chordLen / 2, 2) + sagitta * sagitta) /
+      (2 * Math.abs(sagitta));
     const centerDist = R - Math.abs(sagitta); // Distance from chord to center
     // Center is along normal direction (flipped if sagitta < 0?)
-    // If sagitta > 0, center is "below" chord (away from arcMid). 
+    // If sagitta > 0, center is "below" chord (away from arcMid).
     // Wait, if sagitta > 0, arcMid is at +s*normal. Center is at (R-s)*(-normal) ?
     // Let's use geometric construction.
     // Center is at midChord + (R - |s|) * (-sign(s) * normal)
-    const center = add(midChord, scale(normal, (R - Math.abs(sagitta)) * (sagitta > 0 ? -1 : 1)));
-    
+    const center = add(
+      midChord,
+      scale(normal, (R - Math.abs(sagitta)) * (sagitta > 0 ? -1 : 1)),
+    );
+
     for (const p of seg.points) {
       const d = Math.abs(distance(p, center) - R);
       error += d * d;
@@ -348,23 +413,27 @@ function getMaxError(seg: OptSegment, nodes: OptNode[]): number {
   const start = nodes[seg.startIdx];
   const end = nodes[seg.endIdx];
   let maxErr = 0;
-  
+
   // Re-calculate geometry
   const chord = subtract(end, start);
   const chordLen = magnitude(chord);
   if (chordLen < 1e-6) return 0;
-  
+
   const midChord = scale(add(start, end), 0.5);
   const normal = { x: -chord.y / chordLen, y: chord.x / chordLen };
-  
+
   if (Math.abs(seg.sagitta) < 0.1) {
     for (const p of seg.points) {
       const d = Math.sqrt(distancePointToLineSegmentSq(p, start, end));
       if (d > maxErr) maxErr = d;
     }
   } else {
-    const R = (Math.pow(chordLen/2, 2) + seg.sagitta*seg.sagitta) / (2 * Math.abs(seg.sagitta));
-    const center = add(midChord, scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1)));
+    const R = (Math.pow(chordLen / 2, 2) + seg.sagitta * seg.sagitta) /
+      (2 * Math.abs(seg.sagitta));
+    const center = add(
+      midChord,
+      scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1)),
+    );
     for (const p of seg.points) {
       const d = Math.abs(distance(p, center) - R);
       if (d > maxErr) maxErr = d;
@@ -373,13 +442,16 @@ function getMaxError(seg: OptSegment, nodes: OptNode[]): number {
   return maxErr;
 }
 
-function splitSegment(seg: OptSegment, nodes: OptNode[]): { left: OptSegment, right: OptSegment } {
+function splitSegment(
+  seg: OptSegment,
+  nodes: OptNode[],
+): { left: OptSegment; right: OptSegment } {
   // Find split point (max error point)
   const start = nodes[seg.startIdx];
   const end = nodes[seg.endIdx];
   let maxErr = -1;
   let splitIdx = -1;
-  
+
   // Re-calculate geometry for distance check
   const chord = subtract(end, start);
   const chordLen = magnitude(chord);
@@ -388,10 +460,14 @@ function splitSegment(seg: OptSegment, nodes: OptNode[]): { left: OptSegment, ri
   let center = { x: 0, y: 0 };
   let R = 0;
   const isLine = Math.abs(seg.sagitta) < 0.1;
-  
+
   if (!isLine) {
-    R = (Math.pow(chordLen/2, 2) + seg.sagitta*seg.sagitta) / (2 * Math.abs(seg.sagitta));
-    center = add(midChord, scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1)));
+    R = (Math.pow(chordLen / 2, 2) + seg.sagitta * seg.sagitta) /
+      (2 * Math.abs(seg.sagitta));
+    center = add(
+      midChord,
+      scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1)),
+    );
   }
 
   for (let i = 0; i < seg.points.length; i++) {
@@ -402,7 +478,7 @@ function splitSegment(seg: OptSegment, nodes: OptNode[]): { left: OptSegment, ri
     } else {
       d = Math.abs(distance(p, center) - R);
     }
-    
+
     if (d > maxErr) {
       maxErr = d;
       splitIdx = i;
@@ -422,14 +498,14 @@ function splitSegment(seg: OptSegment, nodes: OptNode[]): { left: OptSegment, ri
       startIdx: seg.startIdx,
       endIdx: newNodeIdx,
       sagitta: seg.sagitta / 2, // Initial guess
-      points: leftPoints
+      points: leftPoints,
     },
     right: {
       startIdx: newNodeIdx,
       endIdx: seg.endIdx,
       sagitta: seg.sagitta / 2, // Initial guess
-      points: rightPoints
-    }
+      points: rightPoints,
+    },
   };
 }
 
@@ -440,7 +516,7 @@ function distancePointToLineSegmentSq(p: Point, a: Point, b: Point): number {
   t = Math.max(0, Math.min(1, t));
   const proj = {
     x: a.x + t * (b.x - a.x),
-    y: a.y + t * (b.y - a.y)
+    y: a.y + t * (b.y - a.y),
   };
   return distanceSquared(p, proj);
 }
@@ -451,11 +527,14 @@ function distanceSquared(p1: Point, p2: Point): number {
   return dx * dx + dy * dy;
 }
 
-function convertToSegments(nodes: OptNode[], optSegments: OptSegment[]): Segment[] {
-  return optSegments.map(seg => {
+export function convertToSegments(
+  nodes: OptNode[],
+  optSegments: OptSegment[],
+): Segment[] {
+  return optSegments.map((seg) => {
     const start = nodes[seg.startIdx];
     const end = nodes[seg.endIdx];
-    
+
     if (Math.abs(seg.sagitta) < 0.5) {
       return {
         type: "line",
@@ -463,22 +542,26 @@ function convertToSegments(nodes: OptNode[], optSegments: OptSegment[]): Segment
         end: { x: end.x, y: end.y },
         line: {
           point: { x: start.x, y: start.y },
-          direction: normalize(subtract(end, start))
-        }
+          direction: normalize(subtract(end, start)),
+        },
       } as any; // Cast to satisfy Segment type which expects LineFitResult
     } else {
       // Convert to Arc
       const chord = subtract(end, start);
       const chordLen = magnitude(chord);
-      const R = (Math.pow(chordLen/2, 2) + seg.sagitta*seg.sagitta) / (2 * Math.abs(seg.sagitta));
+      const R = (Math.pow(chordLen / 2, 2) + seg.sagitta * seg.sagitta) /
+        (2 * Math.abs(seg.sagitta));
       const midChord = scale(add(start, end), 0.5);
       const normal = { x: -chord.y / chordLen, y: chord.x / chordLen };
-      const center = add(midChord, scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1)));
-      
+      const center = add(
+        midChord,
+        scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1)),
+      );
+
       // Calculate angles
       const startAngle = Math.atan2(start.y - center.y, start.x - center.x);
       const endAngle = Math.atan2(end.y - center.y, end.x - center.x);
-      
+
       return {
         type: "arc",
         start: { x: start.x, y: start.y },
@@ -488,8 +571,8 @@ function convertToSegments(nodes: OptNode[], optSegments: OptSegment[]): Segment
           radius: R,
           startAngle,
           endAngle,
-          clockwise: seg.sagitta < 0 // Convention: positive sagitta = CCW? Need to verify
-        }
+          clockwise: seg.sagitta < 0, // Convention: positive sagitta = CCW? Need to verify
+        },
       } as any;
     }
   });

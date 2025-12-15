@@ -142,10 +142,20 @@ function segmentEdge(points: Point[]): Segment[] {
   return segments;
 }
 
+import type { OptNode, OptSegment } from "./optimizer.ts";
+
 /**
  * Simplifies the edges in the graph into geometric segments (lines and arcs).
  */
-export function simplifyGraph(graph: Graph): SimplifiedGraph {
+export function simplifyGraph(
+  graph: Graph,
+  onIteration?: (
+    edgeId: number,
+    nodes: OptNode[],
+    segments: OptSegment[],
+    label: string,
+  ) => void,
+): SimplifiedGraph {
   const simplifiedEdges: SimplifiedEdge[] = [];
 
   for (const edge of graph.edges) {
@@ -162,7 +172,13 @@ export function simplifyGraph(graph: Graph): SimplifiedGraph {
     };
 
     // 2. Optimization Pass
-    const optimized = optimizeEdge(initial, initialSegments);
+    const optimized = optimizeEdge(
+      initial,
+      initialSegments,
+      (nodes, segments, label) => {
+        if (onIteration) onIteration(edge.id, nodes, segments, label);
+      },
+    );
     simplifiedEdges.push(optimized);
   }
 

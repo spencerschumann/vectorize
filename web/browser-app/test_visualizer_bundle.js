@@ -244,7 +244,7 @@ var CONFIG = {
   // Weight for tangent continuity
   FIDELITY_WEIGHT: 1
 };
-function optimizeEdge(edge, initialSegments) {
+function optimizeEdge(edge, initialSegments, onIteration) {
   let nodes = [];
   let segments = [];
   if (initialSegments && initialSegments.length > 0) {
@@ -272,7 +272,10 @@ function optimizeEdge(edge, initialSegments) {
       } else {
         bestIdx = Math.max(bestIdx, currentPointIdx + 1);
       }
-      const segmentPoints = edge.original.points.slice(currentPointIdx, bestIdx + 1);
+      const segmentPoints = edge.original.points.slice(
+        currentPointIdx,
+        bestIdx + 1
+      );
       let sagitta = 0;
       if (seg.type === "arc") {
         const chord = subtract(seg.end, seg.start);
@@ -285,7 +288,9 @@ function optimizeEdge(edge, initialSegments) {
         if (segmentPoints.length > 0) {
           const midIdx = Math.floor(segmentPoints.length / 2);
           const pMid = segmentPoints[midIdx];
-          const d = Math.sqrt(distancePointToLineSegmentSq(pMid, seg.start, seg.end));
+          const d = Math.sqrt(
+            distancePointToLineSegmentSq(pMid, seg.start, seg.end)
+          );
           const normal = { x: -chord.y, y: chord.x };
           const toP = subtract(pMid, seg.start);
           const dotN = dot(toP, normal);
@@ -312,12 +317,14 @@ function optimizeEdge(edge, initialSegments) {
       points: edge.original.points
     });
   }
+  if (onIteration) onIteration(JSON.parse(JSON.stringify(nodes)), JSON.parse(JSON.stringify(segments)), "Initial");
   let changed = true;
   let loopCount = 0;
   while (changed && loopCount < 5) {
     changed = false;
     loopCount++;
     optimizeParameters(nodes, segments);
+    if (onIteration) onIteration(JSON.parse(JSON.stringify(nodes)), JSON.parse(JSON.stringify(segments)), `Iteration ${loopCount} - Optimized`);
     const newSegments = [];
     let splitOccurred = false;
     for (const seg of segments) {
@@ -334,10 +341,13 @@ function optimizeEdge(edge, initialSegments) {
     }
     segments = newSegments;
     if (splitOccurred) {
+      if (onIteration) onIteration(JSON.parse(JSON.stringify(nodes)), JSON.parse(JSON.stringify(segments)), `Iteration ${loopCount} - Split`);
       optimizeParameters(nodes, segments);
+      if (onIteration) onIteration(JSON.parse(JSON.stringify(nodes)), JSON.parse(JSON.stringify(segments)), `Iteration ${loopCount} - Re-optimized`);
     }
   }
   optimizeParameters(nodes, segments);
+  if (onIteration) onIteration(JSON.parse(JSON.stringify(nodes)), JSON.parse(JSON.stringify(segments)), "Final");
   return {
     original: edge.original,
     segments: convertToSegments(nodes, segments)
@@ -431,7 +441,10 @@ function getSegmentError(seg, start, end, sagitta) {
   } else {
     const R = (Math.pow(chordLen / 2, 2) + sagitta * sagitta) / (2 * Math.abs(sagitta));
     const centerDist = R - Math.abs(sagitta);
-    const center = add(midChord, scale(normal, (R - Math.abs(sagitta)) * (sagitta > 0 ? -1 : 1)));
+    const center = add(
+      midChord,
+      scale(normal, (R - Math.abs(sagitta)) * (sagitta > 0 ? -1 : 1))
+    );
     for (const p of seg.points) {
       const d = Math.abs(distance(p, center) - R);
       error += d * d;
@@ -455,7 +468,10 @@ function getMaxError(seg, nodes) {
     }
   } else {
     const R = (Math.pow(chordLen / 2, 2) + seg.sagitta * seg.sagitta) / (2 * Math.abs(seg.sagitta));
-    const center = add(midChord, scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1)));
+    const center = add(
+      midChord,
+      scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1))
+    );
     for (const p of seg.points) {
       const d = Math.abs(distance(p, center) - R);
       if (d > maxErr) maxErr = d;
@@ -477,7 +493,10 @@ function splitSegment(seg, nodes) {
   const isLine = Math.abs(seg.sagitta) < 0.1;
   if (!isLine) {
     R = (Math.pow(chordLen / 2, 2) + seg.sagitta * seg.sagitta) / (2 * Math.abs(seg.sagitta));
-    center = add(midChord, scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1)));
+    center = add(
+      midChord,
+      scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1))
+    );
   }
   for (let i = 0; i < seg.points.length; i++) {
     const p = seg.points[i];
@@ -550,7 +569,10 @@ function convertToSegments(nodes, optSegments) {
       const R = (Math.pow(chordLen / 2, 2) + seg.sagitta * seg.sagitta) / (2 * Math.abs(seg.sagitta));
       const midChord = scale(add(start, end), 0.5);
       const normal = { x: -chord.y / chordLen, y: chord.x / chordLen };
-      const center = add(midChord, scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1)));
+      const center = add(
+        midChord,
+        scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1))
+      );
       const startAngle = Math.atan2(start.y - center.y, start.x - center.x);
       const endAngle = Math.atan2(end.y - center.y, end.x - center.x);
       return {
@@ -903,7 +925,7 @@ function segmentEdge(points) {
   }
   return segments;
 }
-function simplifyGraph(graph) {
+function simplifyGraph(graph, onIteration) {
   const simplifiedEdges = [];
   for (const edge of graph.edges) {
     if (edge.points.length < 2) {
@@ -914,7 +936,9 @@ function simplifyGraph(graph) {
       original: edge,
       segments: initialSegments
     };
-    const optimized = optimizeEdge(initial, initialSegments);
+    const optimized = optimizeEdge(initial, initialSegments, (nodes, segments, label) => {
+      if (onIteration) onIteration(edge.id, nodes, segments, label);
+    });
     simplifiedEdges.push(optimized);
   }
   return {
@@ -995,45 +1019,94 @@ function renderTestCase(container, testCase) {
   div.appendChild(h2);
   const bin = binaryFromAscii(testCase.ascii);
   const graph = traceGraph(bin);
-  const simplified = simplifyGraph(graph);
+  const history = [];
+  const simplified = simplifyGraph(graph, (edgeId, nodes, segments, label) => {
+    history.push({ label, nodes, segments });
+  });
   const SCALE = 20;
   const canvas = document.createElement("canvas");
   canvas.width = bin.width * SCALE;
   canvas.height = bin.height * SCALE;
   div.appendChild(canvas);
+  const controls = document.createElement("div");
+  controls.className = "controls";
+  div.appendChild(controls);
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = "0";
+  slider.max = String(Math.max(0, history.length - 1));
+  slider.value = String(Math.max(0, history.length - 1));
+  slider.style.width = "300px";
+  controls.appendChild(slider);
+  const labelSpan = document.createElement("span");
+  labelSpan.style.marginLeft = "10px";
+  labelSpan.style.fontWeight = "bold";
+  controls.appendChild(labelSpan);
+  const infoDiv = document.createElement("div");
+  infoDiv.style.fontFamily = "monospace";
+  infoDiv.style.whiteSpace = "pre";
+  infoDiv.style.marginTop = "10px";
+  div.appendChild(infoDiv);
   const ctx = canvas.getContext("2d");
-  ctx.strokeStyle = "#eee";
-  ctx.lineWidth = 1;
-  for (let x = 0; x <= bin.width; x++) {
-    ctx.beginPath();
-    ctx.moveTo(x * SCALE, 0);
-    ctx.lineTo(x * SCALE, bin.height * SCALE);
-    ctx.stroke();
-  }
-  for (let y = 0; y <= bin.height; y++) {
-    ctx.beginPath();
-    ctx.moveTo(0, y * SCALE);
-    ctx.lineTo(bin.width * SCALE, y * SCALE);
-    ctx.stroke();
-  }
-  ctx.fillStyle = "rgba(0, 0, 0, 0.1)";
-  for (let y = 0; y < bin.height; y++) {
-    for (let x = 0; x < bin.width; x++) {
-      if (getPixelBin(bin, x, y)) {
-        ctx.fillRect(x * SCALE, y * SCALE, SCALE, SCALE);
-        ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
-        ctx.beginPath();
-        ctx.arc((x + 0.5) * SCALE, (y + 0.5) * SCALE, 2, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = "rgba(0, 0, 0, 0.1)";
+  function draw(stepIndex) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = "#eee";
+    ctx.lineWidth = 1;
+    for (let x = 0; x <= bin.width; x++) {
+      ctx.beginPath();
+      ctx.moveTo(x * SCALE, 0);
+      ctx.lineTo(x * SCALE, bin.height * SCALE);
+      ctx.stroke();
+    }
+    for (let y = 0; y <= bin.height; y++) {
+      ctx.beginPath();
+      ctx.moveTo(0, y * SCALE);
+      ctx.lineTo(bin.width * SCALE, y * SCALE);
+      ctx.stroke();
+    }
+    ctx.fillStyle = "rgba(0, 0, 0, 0.1)";
+    for (let y = 0; y < bin.height; y++) {
+      for (let x = 0; x < bin.width; x++) {
+        if (getPixelBin(bin, x, y)) {
+          ctx.fillRect(x * SCALE, y * SCALE, SCALE, SCALE);
+          ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
+          ctx.beginPath();
+          ctx.arc((x + 0.5) * SCALE, (y + 0.5) * SCALE, 2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "rgba(0, 0, 0, 0.1)";
+        }
       }
     }
-  }
-  simplified.edges.forEach((edge, edgeIdx) => {
+    if (history.length === 0) return;
+    const step = history[stepIndex];
+    labelSpan.textContent = `${stepIndex + 1}/${history.length}: ${step.label}`;
+    const segments = convertToSegments(step.nodes, step.segments);
+    let info = "";
+    segments.forEach((seg, i) => {
+      info += `Segment ${i}: ${seg.type.toUpperCase()}
+`;
+      info += `  Start: (${seg.start.x.toFixed(2)}, ${seg.start.y.toFixed(2)})
+`;
+      info += `  End:   (${seg.end.x.toFixed(2)}, ${seg.end.y.toFixed(2)})
+`;
+      if (seg.type === "arc") {
+        info += `  Radius: ${seg.arc.radius.toFixed(2)}
+`;
+        info += `  Center: (${seg.arc.center.x.toFixed(2)}, ${seg.arc.center.y.toFixed(2)})
+`;
+      }
+      const optSeg = step.segments[i];
+      if (optSeg) {
+        info += `  Sagitta: ${optSeg.sagitta.toFixed(4)}
+`;
+      }
+      info += "\n";
+    });
+    infoDiv.textContent = info;
     const colors = ["#e74c3c", "#3498db", "#2ecc71", "#9b59b6", "#f1c40f"];
-    ctx.strokeStyle = colors[edgeIdx % colors.length];
-    ctx.lineWidth = 3;
-    for (const seg of edge.segments) {
+    segments.forEach((seg, i) => {
+      ctx.strokeStyle = colors[i % colors.length];
+      ctx.lineWidth = 3;
       ctx.beginPath();
       if (seg.type === "line") {
         const startX2 = (seg.start.x + 0.5) * SCALE;
@@ -1061,8 +1134,14 @@ function renderTestCase(container, testCase) {
       ctx.beginPath();
       ctx.arc(endX, endY, 4, 0, Math.PI * 2);
       ctx.fill();
-    }
+    });
+  }
+  slider.addEventListener("input", () => {
+    draw(parseInt(slider.value));
   });
+  if (history.length > 0) {
+    draw(history.length - 1);
+  }
   container.appendChild(div);
 }
 function init() {
