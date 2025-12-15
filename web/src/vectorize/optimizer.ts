@@ -54,8 +54,6 @@ export function optimizeEdge(
     const firstP = initialSegments[0].start;
     nodes.push({ x: firstP.x, y: firstP.y, fixed: true });
 
-    let currentPointIdx = 0;
-
     for (let i = 0; i < initialSegments.length; i++) {
       const seg = initialSegments[i];
       const endP = seg.end;
@@ -65,41 +63,8 @@ export function optimizeEdge(
       const isLast = i === initialSegments.length - 1;
       nodes.push({ x: endP.x, y: endP.y, fixed: isLast });
 
-      // Find points belonging to this segment
-      // We need to map the geometric segment back to the original points
-      // This is tricky because Segment doesn't store indices.
-      // We assume segments are contiguous and cover the whole edge.
-      // We can find the closest point in the original array to the segment end
-      // to determine the split index.
-
-      // Simple heuristic: find the index of the point closest to seg.end
-      // starting from currentPointIdx
-      let bestIdx = currentPointIdx;
-      let minD = Infinity;
-
-      // Search forward
-      for (let k = currentPointIdx; k < edge.original.points.length; k++) {
-        const d = distanceSquared(edge.original.points[k], endP);
-        if (d < minD) {
-          minD = d;
-          bestIdx = k;
-        } else if (d > minD + 2.0) {
-          // If distance starts increasing significantly, stop
-          break;
-        }
-      }
-
-      // Ensure we make progress but don't overshoot if it's the last one
-      if (isLast) {
-        bestIdx = edge.original.points.length - 1;
-      } else {
-        bestIdx = Math.max(bestIdx, currentPointIdx + 1);
-      }
-
-      const segmentPoints = edge.original.points.slice(
-        currentPointIdx,
-        bestIdx + 1,
-      );
+      // Use points directly from the segment
+      const segmentPoints = seg.points;
 
       // Calculate initial sagitta
       let sagitta = 0;
@@ -138,7 +103,7 @@ export function optimizeEdge(
           );
 
           // Determine sign
-          const normal = { x: -chord.y, y: chord.x };
+          const normal = { x: chord.y, y: -chord.x };
           const toP = subtract(pMid, seg.start);
           const dotN = dot(toP, normal);
           sagitta = d * (dotN > 0 ? 1 : -1);
@@ -151,8 +116,6 @@ export function optimizeEdge(
         sagitta: sagitta,
         points: segmentPoints,
       });
-
-      currentPointIdx = bestIdx;
     }
   } else {
     // Create initial single segment
@@ -194,9 +157,7 @@ export function optimizeEdge(
         JSON.parse(JSON.stringify(segments)),
         `Iteration ${loopCount} - Optimized`,
       );
-    }
-
-    // B. Split Pass
+    } // B. Split Pass
     const newSegments: OptSegment[] = [];
     let splitOccurred = false;
 
@@ -350,6 +311,15 @@ function optimizeParameters(nodes: OptNode[], segments: OptSegment[]) {
     }
     for (let i = 0; i < segments.length; i++) {
       segments[i].sagitta -= sagittaGrads[i] * CONFIG.LEARNING_RATE;
+
+      // Limit sagitta to half chord length (180 degrees max)
+      const start = nodes[segments[i].startIdx];
+      const end = nodes[segments[i].endIdx];
+      const chordLen = distance(start, end);
+      const maxSagitta = chordLen / 2 * 0.9999; // Slightly less than half to avoid singularity
+
+      if (segments[i].sagitta > maxSagitta) segments[i].sagitta = maxSagitta;
+      if (segments[i].sagitta < -maxSagitta) segments[i].sagitta = -maxSagitta;
     }
   }
 }
@@ -376,7 +346,7 @@ function getSegmentError(
   if (chordLen < 1e-6) return 0;
 
   const midChord = scale(add(start, end), 0.5);
-  const normal = { x: -chord.y / chordLen, y: chord.x / chordLen };
+  const normal = { x: chord.y / chordLen, y: -chord.x / chordLen };
   const arcMid = add(midChord, scale(normal, sagitta));
 
   // If sagitta is small, use line distance
@@ -420,7 +390,7 @@ function getMaxError(seg: OptSegment, nodes: OptNode[]): number {
   if (chordLen < 1e-6) return 0;
 
   const midChord = scale(add(start, end), 0.5);
-  const normal = { x: -chord.y / chordLen, y: chord.x / chordLen };
+  const normal = { x: chord.y / chordLen, y: -chord.x / chordLen };
 
   if (Math.abs(seg.sagitta) < 0.1) {
     for (const p of seg.points) {
@@ -456,7 +426,7 @@ function splitSegment(
   const chord = subtract(end, start);
   const chordLen = magnitude(chord);
   const midChord = scale(add(start, end), 0.5);
-  const normal = { x: -chord.y / chordLen, y: chord.x / chordLen };
+  const normal = { x: chord.y / chordLen, y: -chord.x / chordLen };
   let center = { x: 0, y: 0 };
   let R = 0;
   const isLine = Math.abs(seg.sagitta) < 0.1;
@@ -535,16 +505,17 @@ export function convertToSegments(
     const start = nodes[seg.startIdx];
     const end = nodes[seg.endIdx];
 
-    if (Math.abs(seg.sagitta) < 0.5) {
+    if (Math.abs(seg.sagitta) < 1.0) {
       return {
         type: "line",
         start: { x: start.x, y: start.y },
         end: { x: end.x, y: end.y },
+        points: seg.points,
         line: {
           point: { x: start.x, y: start.y },
           direction: normalize(subtract(end, start)),
         },
-      } as any; // Cast to satisfy Segment type which expects LineFitResult
+      };
     } else {
       // Convert to Arc
       const chord = subtract(end, start);
@@ -556,17 +527,18 @@ export function convertToSegments(
           type: "line",
           start: { x: start.x, y: start.y },
           end: { x: end.x, y: end.y },
+          points: seg.points,
           line: {
             point: { x: start.x, y: start.y },
             direction: { x: 1, y: 0 },
           },
-        } as any;
+        };
       }
 
       const R = (Math.pow(chordLen / 2, 2) + seg.sagitta * seg.sagitta) /
         (2 * Math.abs(seg.sagitta));
       const midChord = scale(add(start, end), 0.5);
-      const normal = { x: -chord.y / chordLen, y: chord.x / chordLen };
+      const normal = { x: chord.y / chordLen, y: -chord.x / chordLen };
       const center = add(
         midChord,
         scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1)),
@@ -580,14 +552,15 @@ export function convertToSegments(
         type: "arc",
         start: { x: start.x, y: start.y },
         end: { x: end.x, y: end.y },
+        points: seg.points,
         arc: {
           center,
           radius: R,
           startAngle,
           endAngle,
-          clockwise: seg.sagitta < 0, // Convention: positive sagitta = CCW? Need to verify
+          clockwise: seg.sagitta > 0, // Convention: positive sagitta = CW (Bulge Right relative to chord)
         },
-      } as any;
+      };
     }
   });
 }

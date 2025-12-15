@@ -5,8 +5,8 @@ import { IncrementalLineFit } from "./line_fit.ts";
 import { IncrementalCircleFit } from "./arc_fit.ts";
 
 export type Segment =
-  | { type: "line"; line: Line; start: Point; end: Point }
-  | { type: "arc"; arc: Arc; start: Point; end: Point };
+  | { type: "line"; line: Line; start: Point; end: Point; points: Point[] }
+  | { type: "arc"; arc: Arc; start: Point; end: Point; points: Point[] };
 
 export interface SimplifiedEdge {
   original: GraphEdge;
@@ -104,6 +104,7 @@ function segmentEdge(points: Point[]): Segment[] {
     // Create segment
     const startP = points[startIndex];
     const endP = points[bestEndIndex];
+    const segmentPoints = points.slice(startIndex, bestEndIndex + 1);
 
     if (bestType === "line") {
       if (!bestLineFit) {
@@ -124,6 +125,7 @@ function segmentEdge(points: Point[]): Segment[] {
         line: bestLineFit!.line,
         start: startP,
         end: endP,
+        points: segmentPoints,
       });
     } else {
       segments.push({
@@ -137,6 +139,7 @@ function segmentEdge(points: Point[]): Segment[] {
         },
         start: startP,
         end: endP,
+        points: segmentPoints,
       });
     }
 

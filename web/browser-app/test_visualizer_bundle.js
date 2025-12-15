@@ -250,32 +250,12 @@ function optimizeEdge(edge, initialSegments, onIteration) {
   if (initialSegments && initialSegments.length > 0) {
     const firstP = initialSegments[0].start;
     nodes.push({ x: firstP.x, y: firstP.y, fixed: true });
-    let currentPointIdx = 0;
     for (let i = 0; i < initialSegments.length; i++) {
       const seg = initialSegments[i];
       const endP = seg.end;
       const isLast = i === initialSegments.length - 1;
       nodes.push({ x: endP.x, y: endP.y, fixed: isLast });
-      let bestIdx = currentPointIdx;
-      let minD = Infinity;
-      for (let k = currentPointIdx; k < edge.original.points.length; k++) {
-        const d = distanceSquared(edge.original.points[k], endP);
-        if (d < minD) {
-          minD = d;
-          bestIdx = k;
-        } else if (d > minD + 2) {
-          break;
-        }
-      }
-      if (isLast) {
-        bestIdx = edge.original.points.length - 1;
-      } else {
-        bestIdx = Math.max(bestIdx, currentPointIdx + 1);
-      }
-      const segmentPoints = edge.original.points.slice(
-        currentPointIdx,
-        bestIdx + 1
-      );
+      const segmentPoints = seg.points;
       let sagitta = 0;
       if (seg.type === "arc") {
         const chord = subtract(seg.end, seg.start);
@@ -291,7 +271,7 @@ function optimizeEdge(edge, initialSegments, onIteration) {
           const d = Math.sqrt(
             distancePointToLineSegmentSq(pMid, seg.start, seg.end)
           );
-          const normal = { x: -chord.y, y: chord.x };
+          const normal = { x: chord.y, y: -chord.x };
           const toP = subtract(pMid, seg.start);
           const dotN = dot(toP, normal);
           sagitta = d * (dotN > 0 ? 1 : -1);
@@ -303,7 +283,6 @@ function optimizeEdge(edge, initialSegments, onIteration) {
         sagitta,
         points: segmentPoints
       });
-      currentPointIdx = bestIdx;
     }
   } else {
     const startP = edge.original.points[0];
@@ -446,6 +425,12 @@ function optimizeParameters(nodes, segments) {
     }
     for (let i = 0; i < segments.length; i++) {
       segments[i].sagitta -= sagittaGrads[i] * CONFIG.LEARNING_RATE;
+      const start = nodes[segments[i].startIdx];
+      const end = nodes[segments[i].endIdx];
+      const chordLen = distance(start, end);
+      const maxSagitta = chordLen / 2 * 0.9999;
+      if (segments[i].sagitta > maxSagitta) segments[i].sagitta = maxSagitta;
+      if (segments[i].sagitta < -maxSagitta) segments[i].sagitta = -maxSagitta;
     }
   }
 }
@@ -462,7 +447,7 @@ function getSegmentError(seg, start, end, sagitta) {
   const chordLen = magnitude(chord);
   if (chordLen < 1e-6) return 0;
   const midChord = scale(add(start, end), 0.5);
-  const normal = { x: -chord.y / chordLen, y: chord.x / chordLen };
+  const normal = { x: chord.y / chordLen, y: -chord.x / chordLen };
   const arcMid = add(midChord, scale(normal, sagitta));
   if (Math.abs(sagitta) < 0.1) {
     for (const p of seg.points) {
@@ -490,7 +475,7 @@ function getMaxError(seg, nodes) {
   const chordLen = magnitude(chord);
   if (chordLen < 1e-6) return 0;
   const midChord = scale(add(start, end), 0.5);
-  const normal = { x: -chord.y / chordLen, y: chord.x / chordLen };
+  const normal = { x: chord.y / chordLen, y: -chord.x / chordLen };
   if (Math.abs(seg.sagitta) < 0.1) {
     for (const p of seg.points) {
       const d = Math.sqrt(distancePointToLineSegmentSq(p, start, end));
@@ -517,7 +502,7 @@ function splitSegment(seg, nodes) {
   const chord = subtract(end, start);
   const chordLen = magnitude(chord);
   const midChord = scale(add(start, end), 0.5);
-  const normal = { x: -chord.y / chordLen, y: chord.x / chordLen };
+  const normal = { x: chord.y / chordLen, y: -chord.x / chordLen };
   let center = { x: 0, y: 0 };
   let R = 0;
   const isLine = Math.abs(seg.sagitta) < 0.1;
@@ -583,11 +568,12 @@ function convertToSegments(nodes, optSegments) {
   return optSegments.map((seg) => {
     const start = nodes[seg.startIdx];
     const end = nodes[seg.endIdx];
-    if (Math.abs(seg.sagitta) < 0.5) {
+    if (Math.abs(seg.sagitta) < 1) {
       return {
         type: "line",
         start: { x: start.x, y: start.y },
         end: { x: end.x, y: end.y },
+        points: seg.points,
         line: {
           point: { x: start.x, y: start.y },
           direction: normalize(subtract(end, start))
@@ -601,6 +587,7 @@ function convertToSegments(nodes, optSegments) {
           type: "line",
           start: { x: start.x, y: start.y },
           end: { x: end.x, y: end.y },
+          points: seg.points,
           line: {
             point: { x: start.x, y: start.y },
             direction: { x: 1, y: 0 }
@@ -609,7 +596,7 @@ function convertToSegments(nodes, optSegments) {
       }
       const R = (Math.pow(chordLen / 2, 2) + seg.sagitta * seg.sagitta) / (2 * Math.abs(seg.sagitta));
       const midChord = scale(add(start, end), 0.5);
-      const normal = { x: -chord.y / chordLen, y: chord.x / chordLen };
+      const normal = { x: chord.y / chordLen, y: -chord.x / chordLen };
       const center = add(
         midChord,
         scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1))
@@ -620,13 +607,14 @@ function convertToSegments(nodes, optSegments) {
         type: "arc",
         start: { x: start.x, y: start.y },
         end: { x: end.x, y: end.y },
+        points: seg.points,
         arc: {
           center,
           radius: R,
           startAngle,
           endAngle,
-          clockwise: seg.sagitta < 0
-          // Convention: positive sagitta = CCW? Need to verify
+          clockwise: seg.sagitta > 0
+          // Convention: positive sagitta = CW (Bulge Right relative to chord)
         }
       };
     }
@@ -931,6 +919,7 @@ function segmentEdge(points) {
     }
     const startP = points[startIndex];
     const endP = points[bestEndIndex];
+    const segmentPoints = points.slice(startIndex, bestEndIndex + 1);
     if (bestType === "line") {
       if (!bestLineFit) {
         const dx = endP.x - startP.x;
@@ -948,7 +937,8 @@ function segmentEdge(points) {
         type: "line",
         line: bestLineFit.line,
         start: startP,
-        end: endP
+        end: endP,
+        points: segmentPoints
       });
     } else {
       segments.push({
@@ -961,7 +951,8 @@ function segmentEdge(points) {
           clockwise: bestArcFit.clockwise
         },
         start: startP,
-        end: endP
+        end: endP,
+        points: segmentPoints
       });
     }
     startIndex = bestEndIndex;
