@@ -77,13 +77,14 @@ export function fitCircle(points: Point[]): ArcFitResult | null {
   Mzz /= n;
 
   // Solve for center offset
+  // The equations are: 2*Mxx*cx + 2*Mxy*cy = Mxz, 2*Mxy*cx + 2*Myy*cy = Myz
   const det = Mxx * Myy - Mxy * Mxy;
   if (Math.abs(det) < 1e-10) {
     return null; // Degenerate case
   }
 
-  const cx = (Mxz * Myy - Myz * Mxy) / det;
-  const cy = (Myz * Mxx - Mxz * Mxy) / det;
+  const cx = (Mxz * Myy - Myz * Mxy) / (2 * det);
+  const cy = (Myz * Mxx - Mxz * Mxy) / (2 * det);
 
   const center = {
     x: cx + meanX,
@@ -228,8 +229,8 @@ export class IncrementalCircleFit {
       return null;
     }
 
-    const cx = (Mxz * Myy - Myz * Mxy) / det;
-    const cy = (Myz * Mxx - Mxz * Mxy) / det;
+    const cx = (Mxz * Myy - Myz * Mxy) / (2 * det);
+    const cy = (Myz * Mxx - Mxz * Mxy) / (2 * det);
 
     const center = {
       x: cx + meanX,

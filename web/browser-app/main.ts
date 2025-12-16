@@ -195,6 +195,9 @@ const processZoomLevel = document.getElementById(
 const processFitToScreenBtn = document.getElementById(
   "processFitToScreenBtn",
 ) as HTMLButtonElement;
+const copyImageBtn = document.getElementById(
+  "copyImageBtn",
+) as HTMLButtonElement;
 const processStatusText = document.getElementById(
   "processStatusText",
 ) as HTMLDivElement;
@@ -307,6 +310,72 @@ processZoomOutBtn.addEventListener("click", () => {
 
 processFitToScreenBtn.addEventListener("click", () => {
   processFitToScreen();
+});
+
+copyImageBtn.addEventListener("click", async () => {
+  // Get current stage image
+  const image = state.processedImages.get(state.currentStage);
+  if (!image) {
+    showStatus("No image to copy", true);
+    return;
+  }
+
+  // Create a temporary canvas with the image
+  const tempCanvas = document.createElement("canvas");
+  tempCanvas.width = image.width;
+  tempCanvas.height = image.height;
+  const tempCtx = tempCanvas.getContext("2d")!;
+
+  // Convert image to RGBA and draw
+  const numPixels = image.width * image.height;
+  const rgbaData = new Uint8ClampedArray(numPixels * 4);
+
+  // Check if it's a binary image
+  const expectedBinaryLength = Math.ceil(numPixels / 8);
+  if (
+    image.data instanceof Uint8Array &&
+    image.data.length === expectedBinaryLength
+  ) {
+    // BinaryImage - convert bit-packed 1-bit to RGBA
+    for (let y = 0; y < image.height; y++) {
+      for (let x = 0; x < image.width; x++) {
+        const pixelIndex = y * image.width + x;
+        const byteIndex = Math.floor(pixelIndex / 8);
+        const bitIndex = 7 - (pixelIndex % 8);
+        const bitValue = (image.data[byteIndex] >> bitIndex) & 1;
+        const value = bitValue ? 0 : 255; // 1=black, 0=white
+        const offset = pixelIndex * 4;
+        rgbaData[offset] = value;
+        rgbaData[offset + 1] = value;
+        rgbaData[offset + 2] = value;
+        rgbaData[offset + 3] = 255;
+      }
+    }
+  } else {
+    // Assume RGBA
+    for (let i = 0; i < image.data.length; i++) {
+      rgbaData[i] = image.data[i];
+    }
+  }
+
+  const imageData = new ImageData(rgbaData, image.width, image.height);
+  tempCtx.putImageData(imageData, 0, 0);
+
+  // Convert to base64 PNG
+  const dataUrl = tempCanvas.toDataURL("image/png");
+
+  try {
+    await navigator.clipboard.writeText(dataUrl);
+    showStatus(
+      `Copied ${image.width}x${image.height} image as base64 PNG to clipboard`,
+    );
+  } catch (err) {
+    console.error("Failed to copy to clipboard:", err);
+    // Fallback: log to console
+    console.log("Base64 PNG data URL:");
+    console.log(dataUrl);
+    showStatus("Logged base64 PNG to console (clipboard failed)");
+  }
 });
 
 // Navigation step click handlers

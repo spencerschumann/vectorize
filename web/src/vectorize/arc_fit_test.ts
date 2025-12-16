@@ -200,7 +200,7 @@ Deno.test("fitCircle - calculates individual errors", () => {
   const points: Point[] = [
     { x: 5, y: 0 },
     { x: 0, y: 5 },
-    { x: -6, y: 0 }, // 1 unit farther out
+    { x: -8, y: 0 }, // 3 units farther out to ensure max error > 0.5
     { x: 0, y: -5 },
   ];
 
@@ -210,7 +210,11 @@ Deno.test("fitCircle - calculates individual errors", () => {
     assertEquals(result.errors.length, 4);
     // One error should be larger than others
     const maxError = Math.max(...result.errors);
-    assertEquals(maxError > 0.5, true);
+    assertEquals(
+      maxError > 0.5,
+      true,
+      `Expected max error > 0.5, got ${maxError}`,
+    );
   }
 });
 

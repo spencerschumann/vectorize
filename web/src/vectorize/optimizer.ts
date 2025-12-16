@@ -13,12 +13,12 @@ import { type Segment, type SimplifiedEdge } from "./simplifier.ts";
 
 // Configuration
 const CONFIG = {
-  LEARNING_RATE: 0.01, // Reduced from 0.05 to prevent explosions
+  LEARNING_RATE: 0.01,
   ITERATIONS: 50,
-  SPLIT_THRESHOLD: 0.7, // Max error to trigger split
-  MERGE_THRESHOLD: 0.2, // Error increase allowed for merge
-  ALIGNMENT_STRENGTH: 0.5, // Reduced from 1.0
-  SMOOTHNESS_STRENGTH: 0.2, // Weight for tangent continuity
+  SPLIT_THRESHOLD: 1.0, // Lower threshold to catch corners like L-shapes
+  MERGE_THRESHOLD: 0.2,
+  ALIGNMENT_STRENGTH: 0.5,
+  SMOOTHNESS_STRENGTH: 0.2,
   FIDELITY_WEIGHT: 1.0,
 };
 
@@ -31,8 +31,84 @@ export interface OptNode {
 export interface OptSegment {
   startIdx: number; // Index into nodes array
   endIdx: number; // Index into nodes array
-  sagitta: number; // Height of arc (0 = line)
+  sagittaPoint: Point; // Point on the curve at the "bulge" - defines the arc curvature
   points: Point[]; // Original pixels
+}
+
+/**
+ * Compute circle center and radius from 3 points (start, sagittaPoint, end).
+ * Returns null if points are collinear (line case).
+ * Special case: if start == end (full circle), returns circle with sagittaPoint as diameter opposite.
+ */
+function circleFrom3Points(
+  p1: Point,
+  p2: Point,
+  p3: Point,
+): { center: Point; radius: number } | null {
+  // Special case: full circle (p1 == p3)
+  const startEndDist = distance(p1, p3);
+  if (startEndDist < 1e-6) {
+    // Full circle: p1 and p3 are the same point, p2 is the opposite point on the circle
+    // Center is midpoint of p1 and p2, radius is half the distance
+    const center = scale(add(p1, p2), 0.5);
+    const radius = distance(p1, p2) / 2;
+    if (radius < 1e-6) return null; // Degenerate
+    return { center, radius };
+  }
+
+  // Check for collinearity using cross product
+  const v1 = subtract(p2, p1);
+  const v2 = subtract(p3, p1);
+  const crossProd = cross(v1, v2);
+
+  if (Math.abs(crossProd) < 1e-6) {
+    return null; // Collinear - treat as line
+  }
+
+  // Circle through 3 points using perpendicular bisector intersection
+  const ax = p1.x, ay = p1.y;
+  const bx = p2.x, by = p2.y;
+  const cx = p3.x, cy = p3.y;
+
+  const d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+  if (Math.abs(d) < 1e-10) {
+    return null;
+  }
+
+  const ux = ((ax * ax + ay * ay) * (by - cy) +
+    (bx * bx + by * by) * (cy - ay) +
+    (cx * cx + cy * cy) * (ay - by)) /
+    d;
+  const uy = ((ax * ax + ay * ay) * (cx - bx) +
+    (bx * bx + by * by) * (ax - cx) +
+    (cx * cx + cy * cy) * (bx - ax)) /
+    d;
+
+  const center = { x: ux, y: uy };
+  const radius = distance(center, p1);
+
+  return { center, radius };
+}
+
+/**
+ * Compute the signed sagitta (scalar) from start, sagittaPoint, end.
+ * This is used for determining if segment is line-like.
+ */
+function computeSagitta(start: Point, sagittaPoint: Point, end: Point): number {
+  const chord = subtract(end, start);
+  const chordLen = magnitude(chord);
+  if (chordLen < 1e-6) {
+    // start == end (closed loop) - sagitta is distance to sagittaPoint
+    return distance(start, sagittaPoint);
+  }
+
+  const midChord = scale(add(start, end), 0.5);
+  const toSagitta = subtract(sagittaPoint, midChord);
+
+  // Normal to chord (pointing "left")
+  const normal = { x: -chord.y / chordLen, y: chord.x / chordLen };
+  // Signed distance along normal
+  return dot(toSagitta, normal);
 }
 
 export function optimizeEdge(
@@ -55,85 +131,75 @@ export function optimizeEdge(
 
   if (initialSegments && initialSegments.length > 0) {
     // Initialize from existing segments
-    // Add first node
-    const firstP = initialSegments[0].start;
-    nodes.push({ x: firstP.x, y: firstP.y, fixed: false });
+    const firstSeg = initialSegments[0];
 
-    for (let i = 0; i < initialSegments.length; i++) {
-      const seg = initialSegments[i];
-      const endP = seg.end;
+    // Handle circle specially - it has no start/end points
+    if (firstSeg.type === "circle") {
+      // For a circle, create a single segment with start=end (same node index)
+      const circleCenter = firstSeg.circle.center;
+      const circleRadius = firstSeg.circle.radius;
+      const circlePoints = firstSeg.points;
 
-      // Add end node
-      // Last node is fixed, intermediate nodes are free
-      const isLast = i === initialSegments.length - 1;
-      nodes.push({ x: endP.x, y: endP.y, fixed: false });
+      // Project first point onto the fitted circle to get exact start point
+      const p0 = circlePoints[0];
+      const dirToP0 = normalize(subtract(p0, circleCenter));
+      const startOnCircle = add(circleCenter, scale(dirToP0, circleRadius));
 
-      // Use points directly from the segment
-      const segmentPoints = seg.points;
+      nodes.push({ x: startOnCircle.x, y: startOnCircle.y, fixed: false });
 
-      // Calculate initial sagitta
-      let sagitta = 0;
-      if (seg.type === "arc") {
-        // Calculate sagitta from arc parameters
-        // s = R - sqrt(R^2 - (L/2)^2)  (for small arcs)
-        // or just distance from midpoint of chord to arc center minus radius?
-        // Sagitta is signed distance from chord to arc.
-
-        const chord = subtract(seg.end, seg.start);
-        const chordLen = magnitude(chord);
-        const midChord = scale(add(seg.start, seg.end), 0.5);
-
-        // Vector from midChord to center
-        const toCenter = subtract(seg.arc.center, midChord);
-        const distToCenter = magnitude(toCenter);
-
-        // Check if center is on the "left" or "right" of the chord
-        // Cross product of chord and toCenter
-        const cp = cross(chord, toCenter);
-
-        // If arc is "small" (less than semicircle), sagitta has same sign as cross product?
-        // Let's use the convention: sagitta is positive if arc is to the "left" of chord vector?
-        // Our optimizer uses: center = midChord + (R-|s|) * (-sign(s)*normal)
-        // where normal = (-dy, dx) / L.
-
-        // Let's just estimate it numerically from the midpoint of the arc
-        const midAngle = (seg.arc.startAngle + seg.arc.endAngle) / 2; // Careful with wrapping
-        // Better: use the midpoint of the segment points
-        if (segmentPoints.length > 0) {
-          const midIdx = Math.floor(segmentPoints.length / 2);
-          const pMid = segmentPoints[midIdx];
-          // Distance from pMid to chord
-          const d = Math.sqrt(
-            distancePointToLineSegmentSq(pMid, seg.start, seg.end),
-          );
-
-          // Determine sign
-          const normal = { x: chord.y, y: -chord.x };
-          const toP = subtract(pMid, seg.start);
-          const dotN = dot(toP, normal);
-          sagitta = d * (dotN > 0 ? 1 : -1);
-        }
-      }
+      // SagittaPoint is opposite side of circle (at exact radius)
+      const opposite = add(circleCenter, scale(dirToP0, -circleRadius));
 
       segments.push({
-        startIdx: i,
-        endIdx: i + 1,
-        sagitta: sagitta,
-        points: segmentPoints,
+        startIdx: 0,
+        endIdx: 0, // Same node index for full circle
+        sagittaPoint: opposite,
+        points: circlePoints,
       });
+    } else {
+      // Normal case: lines and arcs with start/end
+      const firstP = firstSeg.start;
+      nodes.push({ x: firstP.x, y: firstP.y, fixed: false });
+
+      for (let i = 0; i < initialSegments.length; i++) {
+        const seg = initialSegments[i];
+        if (seg.type === "circle") continue; // Skip circles in mixed lists
+
+        const segEnd = seg.end;
+        nodes.push({ x: segEnd.x, y: segEnd.y, fixed: false });
+
+        // Calculate sagittaPoint from the segment
+        let sagittaPoint: Point;
+        if (seg.type === "arc") {
+          // Use the midpoint of the arc (point on arc at middle angle)
+          const midIdx = Math.floor(seg.points.length / 2);
+          sagittaPoint = seg.points[midIdx];
+        } else {
+          // Line: sagittaPoint is on the chord (midpoint)
+          sagittaPoint = scale(add(seg.start, seg.end), 0.5);
+        }
+
+        segments.push({
+          startIdx: i,
+          endIdx: i + 1,
+          sagittaPoint,
+          points: seg.points,
+        });
+      }
     }
   } else {
     // Create initial single segment
-    const startP = edge.original.points[0];
-    const endP = edge.original.points[edge.original.points.length - 1];
-
     nodes.push({ x: startP.x, y: startP.y, fixed: false });
     nodes.push({ x: endP.x, y: endP.y, fixed: false });
+
+    // Initial sagittaPoint: midpoint of points (not chord)
+    const midIdx = Math.floor(edge.original.points.length / 2);
+    const sagittaPoint = edge.original.points[midIdx];
 
     segments.push({
       startIdx: 0,
       endIdx: 1,
-      sagitta: 0,
+      sagittaPoint,
       points: edge.original.points,
     });
   }
@@ -162,14 +228,15 @@ export function optimizeEdge(
         JSON.parse(JSON.stringify(segments)),
         `Iteration ${loopCount} - Optimized`,
       );
-    } // B. Split Pass
+    }
+
+    // B. Split Pass
     const newSegments: OptSegment[] = [];
     let splitOccurred = false;
 
     for (const seg of segments) {
       const maxErr = getMaxError(seg, nodes);
       if (maxErr > CONFIG.SPLIT_THRESHOLD && seg.points.length > 4) {
-        // Split at max error point
         const splitRes = splitSegment(seg, nodes);
         newSegments.push(splitRes.left);
         newSegments.push(splitRes.right);
@@ -189,7 +256,6 @@ export function optimizeEdge(
           `Iteration ${loopCount} - Split`,
         );
       }
-      // Re-optimize after split
       optimizeParameters(nodes, segments, isClosed);
       if (onIteration) {
         onIteration(
@@ -199,11 +265,6 @@ export function optimizeEdge(
         );
       }
     }
-
-    // C. Merge Pass (TODO: Implement if needed, for now split-only + optimize is powerful)
-    // Merging is tricky with the node indices.
-    // For the L-shape case, splitting is the key.
-    // Merging helps if we over-split.
   }
 
   // Final Polish
@@ -227,10 +288,27 @@ function optimizeParameters(
   segments: OptSegment[],
   isClosed: boolean = false,
 ) {
+  const MAX_GRAD = 1000; // Gradient clipping threshold
+
   for (let iter = 0; iter < CONFIG.ITERATIONS; iter++) {
+    // Check for NaN/Inf at start of iteration
+    for (let ni = 0; ni < nodes.length; ni++) {
+      if (!isFinite(nodes[ni].x) || !isFinite(nodes[ni].y)) {
+        return; // Stop optimization on numerical explosion
+      }
+    }
+    for (let si = 0; si < segments.length; si++) {
+      const sp = segments[si].sagittaPoint;
+      if (!isFinite(sp.x) || !isFinite(sp.y)) {
+        return; // Stop optimization on numerical explosion
+      }
+    }
+
     // Calculate Gradients
     const nodeGrads = nodes.map(() => ({ x: 0, y: 0 }));
-    const sagittaGrads = segments.map(() => 0);
+    const sagittaGrads = segments.map(() => ({ x: 0, y: 0 }));
+
+    const h = 0.01;
 
     // 1. Fidelity Gradients
     for (let i = 0; i < segments.length; i++) {
@@ -238,66 +316,143 @@ function optimizeParameters(
       const pStart = nodes[seg.startIdx];
       const pEnd = nodes[seg.endIdx];
 
-      // Numerical gradient for sagitta
-      const h = 0.01;
-      const errPlus = getSegmentError(seg, pStart, pEnd, seg.sagitta + h);
-      const errMinus = getSegmentError(seg, pStart, pEnd, seg.sagitta - h);
-      sagittaGrads[i] += (errPlus - errMinus) / (2 * h) *
+      // Numerical gradient for sagittaPoint
+      const errBase = getSegmentErrorWithPoints(
+        seg.points,
+        pStart,
+        seg.sagittaPoint,
+        pEnd,
+      );
+
+      // Gradient for sagittaPoint.x
+      const sagPlusX = { ...seg.sagittaPoint, x: seg.sagittaPoint.x + h };
+      const sagMinusX = { ...seg.sagittaPoint, x: seg.sagittaPoint.x - h };
+      const errSagXPlus = getSegmentErrorWithPoints(
+        seg.points,
+        pStart,
+        sagPlusX,
+        pEnd,
+      );
+      const errSagXMinus = getSegmentErrorWithPoints(
+        seg.points,
+        pStart,
+        sagMinusX,
+        pEnd,
+      );
+      sagittaGrads[i].x += ((errSagXPlus - errSagXMinus) / (2 * h)) *
         CONFIG.FIDELITY_WEIGHT;
 
-      // Numerical gradient for nodes (if not fixed)
+      // Gradient for sagittaPoint.y
+      const sagPlusY = { ...seg.sagittaPoint, y: seg.sagittaPoint.y + h };
+      const sagMinusY = { ...seg.sagittaPoint, y: seg.sagittaPoint.y - h };
+      const errSagYPlus = getSegmentErrorWithPoints(
+        seg.points,
+        pStart,
+        sagPlusY,
+        pEnd,
+      );
+      const errSagYMinus = getSegmentErrorWithPoints(
+        seg.points,
+        pStart,
+        sagMinusY,
+        pEnd,
+      );
+      sagittaGrads[i].y += ((errSagYPlus - errSagYMinus) / (2 * h)) *
+        CONFIG.FIDELITY_WEIGHT;
+
+      // For full circle (startIdx == endIdx), the node defines a point on the circle
+      // and must be perturbed together with end (same node).
+      // For regular segments, perturb start and end separately.
+      const isFullCircle = seg.startIdx === seg.endIdx;
+
+      // Gradient for start node (and end if full circle)
       if (!pStart.fixed) {
         const pStartXPlus = { ...pStart, x: pStart.x + h };
         const pStartXMinus = { ...pStart, x: pStart.x - h };
-        const errXPlus = getSegmentError(seg, pStartXPlus, pEnd, seg.sagitta);
-        const errXMinus = getSegmentError(seg, pStartXMinus, pEnd, seg.sagitta);
-        nodeGrads[seg.startIdx].x += (errXPlus - errXMinus) / (2 * h) *
+        // For full circle: end moves with start
+        const errXPlus = getSegmentErrorWithPoints(
+          seg.points,
+          pStartXPlus,
+          seg.sagittaPoint,
+          isFullCircle ? pStartXPlus : pEnd,
+        );
+        const errXMinus = getSegmentErrorWithPoints(
+          seg.points,
+          pStartXMinus,
+          seg.sagittaPoint,
+          isFullCircle ? pStartXMinus : pEnd,
+        );
+        nodeGrads[seg.startIdx].x += ((errXPlus - errXMinus) / (2 * h)) *
           CONFIG.FIDELITY_WEIGHT;
 
         const pStartYPlus = { ...pStart, y: pStart.y + h };
         const pStartYMinus = { ...pStart, y: pStart.y - h };
-        const errYPlus = getSegmentError(seg, pStartYPlus, pEnd, seg.sagitta);
-        const errYMinus = getSegmentError(seg, pStartYMinus, pEnd, seg.sagitta);
-        nodeGrads[seg.startIdx].y += (errYPlus - errYMinus) / (2 * h) *
+        const errYPlus = getSegmentErrorWithPoints(
+          seg.points,
+          pStartYPlus,
+          seg.sagittaPoint,
+          isFullCircle ? pStartYPlus : pEnd,
+        );
+        const errYMinus = getSegmentErrorWithPoints(
+          seg.points,
+          pStartYMinus,
+          seg.sagittaPoint,
+          isFullCircle ? pStartYMinus : pEnd,
+        );
+        nodeGrads[seg.startIdx].y += ((errYPlus - errYMinus) / (2 * h)) *
           CONFIG.FIDELITY_WEIGHT;
       }
 
-      if (!pEnd.fixed) {
+      // Gradient for end node (skip if full circle - already handled above)
+      if (!isFullCircle && !pEnd.fixed) {
         const pEndXPlus = { ...pEnd, x: pEnd.x + h };
         const pEndXMinus = { ...pEnd, x: pEnd.x - h };
-        const errXPlus = getSegmentError(seg, pStart, pEndXPlus, seg.sagitta);
-        const errXMinus = getSegmentError(seg, pStart, pEndXMinus, seg.sagitta);
-        nodeGrads[seg.endIdx].x += (errXPlus - errXMinus) / (2 * h) *
+        const errXPlus = getSegmentErrorWithPoints(
+          seg.points,
+          pStart,
+          seg.sagittaPoint,
+          pEndXPlus,
+        );
+        const errXMinus = getSegmentErrorWithPoints(
+          seg.points,
+          pStart,
+          seg.sagittaPoint,
+          pEndXMinus,
+        );
+        nodeGrads[seg.endIdx].x += ((errXPlus - errXMinus) / (2 * h)) *
           CONFIG.FIDELITY_WEIGHT;
 
         const pEndYPlus = { ...pEnd, y: pEnd.y + h };
         const pEndYMinus = { ...pEnd, y: pEnd.y - h };
-        const errYPlus = getSegmentError(seg, pStart, pEndYPlus, seg.sagitta);
-        const errYMinus = getSegmentError(seg, pStart, pEndYMinus, seg.sagitta);
-        nodeGrads[seg.endIdx].y += (errYPlus - errYMinus) / (2 * h) *
+        const errYPlus = getSegmentErrorWithPoints(
+          seg.points,
+          pStart,
+          seg.sagittaPoint,
+          pEndYPlus,
+        );
+        const errYMinus = getSegmentErrorWithPoints(
+          seg.points,
+          pStart,
+          seg.sagittaPoint,
+          pEndYMinus,
+        );
+        nodeGrads[seg.endIdx].y += ((errYPlus - errYMinus) / (2 * h)) *
           CONFIG.FIDELITY_WEIGHT;
       }
     }
 
-    // 2. Alignment Gradients (Axis snapping)
+    // 2. Alignment Gradients (only for line-like segments)
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
       const pStart = nodes[seg.startIdx];
       const pEnd = nodes[seg.endIdx];
-      const h = 0.01;
 
-      // Only apply if sagitta is small (line-like)
-      if (Math.abs(seg.sagitta) < 1.0) {
+      const sagitta = computeSagitta(pStart, seg.sagittaPoint, pEnd);
+      if (Math.abs(sagitta) < 1.0) {
         const dx = pEnd.x - pStart.x;
         const dy = pEnd.y - pStart.y;
         const len = Math.sqrt(dx * dx + dy * dy);
         if (len > 1e-4) {
-          // Cost = sin^2(2*angle) ? No, we want 0, 90, 180, 270.
-          // sin(angle) is 0 at 0, 180. cos(angle) is 0 at 90, 270.
-          // Cost = (dx/len)^2 * (dy/len)^2  <-- 0 if horizontal (dy=0) or vertical (dx=0)
-          // This is sin^2 * cos^2 = (1/4)sin^2(2*theta)
-
-          // Let's use numerical gradient for simplicity
           if (!pStart.fixed) {
             const costXPlus = alignmentCost(
               { ...pStart, x: pStart.x + h },
@@ -307,7 +462,7 @@ function optimizeParameters(
               { ...pStart, x: pStart.x - h },
               pEnd,
             );
-            nodeGrads[seg.startIdx].x += (costXPlus - costXMinus) / (2 * h) *
+            nodeGrads[seg.startIdx].x += ((costXPlus - costXMinus) / (2 * h)) *
               CONFIG.ALIGNMENT_STRENGTH;
 
             const costYPlus = alignmentCost(
@@ -318,7 +473,7 @@ function optimizeParameters(
               { ...pStart, y: pStart.y - h },
               pEnd,
             );
-            nodeGrads[seg.startIdx].y += (costYPlus - costYMinus) / (2 * h) *
+            nodeGrads[seg.startIdx].y += ((costYPlus - costYMinus) / (2 * h)) *
               CONFIG.ALIGNMENT_STRENGTH;
           }
           if (!pEnd.fixed) {
@@ -327,7 +482,7 @@ function optimizeParameters(
               ...pEnd,
               x: pEnd.x - h,
             });
-            nodeGrads[seg.endIdx].x += (costXPlus - costXMinus) / (2 * h) *
+            nodeGrads[seg.endIdx].x += ((costXPlus - costXMinus) / (2 * h)) *
               CONFIG.ALIGNMENT_STRENGTH;
 
             const costYPlus = alignmentCost(pStart, { ...pEnd, y: pEnd.y + h });
@@ -335,23 +490,32 @@ function optimizeParameters(
               ...pEnd,
               y: pEnd.y - h,
             });
-            nodeGrads[seg.endIdx].y += (costYPlus - costYMinus) / (2 * h) *
+            nodeGrads[seg.endIdx].y += ((costYPlus - costYMinus) / (2 * h)) *
               CONFIG.ALIGNMENT_STRENGTH;
           }
         }
       }
     }
 
+    // Clip gradients to prevent explosion
+    for (let i = 0; i < nodeGrads.length; i++) {
+      nodeGrads[i].x = Math.max(-MAX_GRAD, Math.min(MAX_GRAD, nodeGrads[i].x));
+      nodeGrads[i].y = Math.max(-MAX_GRAD, Math.min(MAX_GRAD, nodeGrads[i].y));
+    }
+    for (let i = 0; i < sagittaGrads.length; i++) {
+      sagittaGrads[i].x = Math.max(
+        -MAX_GRAD,
+        Math.min(MAX_GRAD, sagittaGrads[i].x),
+      );
+      sagittaGrads[i].y = Math.max(
+        -MAX_GRAD,
+        Math.min(MAX_GRAD, sagittaGrads[i].y),
+      );
+    }
+
     // Sync gradients for closed loops
     if (isClosed && nodes.length > 1) {
       const last = nodes.length - 1;
-      const gx = (nodeGrads[0].x + nodeGrads[last].x) / 2; // Average? Or sum?
-      // If we treat them as one node, the gradient is the sum of forces on that node.
-      // But we apply it to two nodes.
-      // If we sum, we get double the force if we apply to both?
-      // No, if they are the same node, the total force is sum.
-      // And we move that one node by learning_rate * sum.
-      // Here we have two nodes. If we move both by learning_rate * sum, it's correct.
       const sumX = nodeGrads[0].x + nodeGrads[last].x;
       const sumY = nodeGrads[0].y + nodeGrads[last].y;
       nodeGrads[0].x = sumX;
@@ -360,7 +524,7 @@ function optimizeParameters(
       nodeGrads[last].y = sumY;
     }
 
-    // Apply Gradients
+    // Apply Gradients to nodes
     for (let i = 0; i < nodes.length; i++) {
       if (!nodes[i].fixed) {
         nodes[i].x -= nodeGrads[i].x * CONFIG.LEARNING_RATE;
@@ -368,7 +532,7 @@ function optimizeParameters(
       }
     }
 
-    // Sync positions for closed loops (to correct any drift)
+    // Sync positions for closed loops
     if (isClosed && nodes.length > 1) {
       const last = nodes.length - 1;
       const avgX = (nodes[0].x + nodes[last].x) / 2;
@@ -379,17 +543,10 @@ function optimizeParameters(
       nodes[last].y = avgY;
     }
 
+    // Apply Gradients to sagittaPoints
     for (let i = 0; i < segments.length; i++) {
-      segments[i].sagitta -= sagittaGrads[i] * CONFIG.LEARNING_RATE;
-
-      // Limit sagitta to half chord length (180 degrees max)
-      const start = nodes[segments[i].startIdx];
-      const end = nodes[segments[i].endIdx];
-      const chordLen = distance(start, end);
-      const maxSagitta = chordLen / 2 * 0.9999; // Slightly less than half to avoid singularity
-
-      if (segments[i].sagitta > maxSagitta) segments[i].sagitta = maxSagitta;
-      if (segments[i].sagitta < -maxSagitta) segments[i].sagitta = -maxSagitta;
+      segments[i].sagittaPoint.x -= sagittaGrads[i].x * CONFIG.LEARNING_RATE;
+      segments[i].sagittaPoint.y -= sagittaGrads[i].y * CONFIG.LEARNING_RATE;
     }
   }
 }
@@ -399,54 +556,35 @@ function alignmentCost(p1: Point, p2: Point): number {
   const dy = p2.y - p1.y;
   const lenSq = dx * dx + dy * dy;
   if (lenSq < 1e-6) return 0;
-  // (dx*dy / lenSq)^2 is minimized when dx=0 or dy=0
-  // Scale up, but not too much. 100 was causing explosions.
   return Math.pow((dx * dy) / lenSq, 2) * 10;
 }
 
-function getSegmentError(
-  seg: OptSegment,
+/**
+ * Compute segment error using 3 points (start, sagittaPoint, end) to define the curve.
+ */
+function getSegmentErrorWithPoints(
+  points: Point[],
   start: Point,
+  sagittaPoint: Point,
   end: Point,
-  sagitta: number,
 ): number {
   let error = 0;
-  // Pre-calculate arc parameters
-  const chord = subtract(end, start);
-  const chordLen = magnitude(chord);
-  if (chordLen < 1e-6) return 0;
 
-  const midChord = scale(add(start, end), 0.5);
-  const normal = { x: chord.y / chordLen, y: -chord.x / chordLen };
-  const arcMid = add(midChord, scale(normal, sagitta));
+  const circle = circleFrom3Points(start, sagittaPoint, end);
 
-  // If sagitta is small, use line distance
-  if (Math.abs(sagitta) < 0.1) {
-    for (const p of seg.points) {
+  if (!circle) {
+    // Collinear - use line distance
+    for (const p of points) {
       error += distancePointToLineSegmentSq(p, start, end);
     }
   } else {
-    // Arc distance
-    // Find center and radius
-    // R^2 = (L/2)^2 + (R-s)^2  => R^2 = L^2/4 + R^2 - 2Rs + s^2 => 2Rs = L^2/4 + s^2 => R = (L^2/4 + s^2) / (2s)
-    const R = (Math.pow(chordLen / 2, 2) + sagitta * sagitta) /
-      (2 * Math.abs(sagitta));
-    const centerDist = R - Math.abs(sagitta); // Distance from chord to center
-    // Center is along normal direction (flipped if sagitta < 0?)
-    // If sagitta > 0, center is "below" chord (away from arcMid).
-    // Wait, if sagitta > 0, arcMid is at +s*normal. Center is at (R-s)*(-normal) ?
-    // Let's use geometric construction.
-    // Center is at midChord + (R - |s|) * (-sign(s) * normal)
-    const center = add(
-      midChord,
-      scale(normal, (R - Math.abs(sagitta)) * (sagitta > 0 ? -1 : 1)),
-    );
-
-    for (const p of seg.points) {
-      const d = Math.abs(distance(p, center) - R);
+    // Arc distance - distance to circle
+    for (const p of points) {
+      const d = Math.abs(distance(p, circle.center) - circle.radius);
       error += d * d;
     }
   }
+
   return error;
 }
 
@@ -455,31 +593,20 @@ function getMaxError(seg: OptSegment, nodes: OptNode[]): number {
   const end = nodes[seg.endIdx];
   let maxErr = 0;
 
-  // Re-calculate geometry
-  const chord = subtract(end, start);
-  const chordLen = magnitude(chord);
-  if (chordLen < 1e-6) return 0;
+  const circle = circleFrom3Points(start, seg.sagittaPoint, end);
 
-  const midChord = scale(add(start, end), 0.5);
-  const normal = { x: chord.y / chordLen, y: -chord.x / chordLen };
-
-  if (Math.abs(seg.sagitta) < 0.1) {
+  if (!circle) {
     for (const p of seg.points) {
       const d = Math.sqrt(distancePointToLineSegmentSq(p, start, end));
       if (d > maxErr) maxErr = d;
     }
   } else {
-    const R = (Math.pow(chordLen / 2, 2) + seg.sagitta * seg.sagitta) /
-      (2 * Math.abs(seg.sagitta));
-    const center = add(
-      midChord,
-      scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1)),
-    );
     for (const p of seg.points) {
-      const d = Math.abs(distance(p, center) - R);
+      const d = Math.abs(distance(p, circle.center) - circle.radius);
       if (d > maxErr) maxErr = d;
     }
   }
+
   return maxErr;
 }
 
@@ -487,37 +614,20 @@ function splitSegment(
   seg: OptSegment,
   nodes: OptNode[],
 ): { left: OptSegment; right: OptSegment } {
-  // Find split point (max error point)
   const start = nodes[seg.startIdx];
   const end = nodes[seg.endIdx];
   let maxErr = -1;
   let splitIdx = -1;
 
-  // Re-calculate geometry for distance check
-  const chord = subtract(end, start);
-  const chordLen = magnitude(chord);
-  const midChord = scale(add(start, end), 0.5);
-  const normal = { x: chord.y / chordLen, y: -chord.x / chordLen };
-  let center = { x: 0, y: 0 };
-  let R = 0;
-  const isLine = Math.abs(seg.sagitta) < 0.1;
-
-  if (!isLine) {
-    R = (Math.pow(chordLen / 2, 2) + seg.sagitta * seg.sagitta) /
-      (2 * Math.abs(seg.sagitta));
-    center = add(
-      midChord,
-      scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1)),
-    );
-  }
+  const circle = circleFrom3Points(start, seg.sagittaPoint, end);
 
   for (let i = 0; i < seg.points.length; i++) {
     const p = seg.points[i];
     let d = 0;
-    if (isLine) {
+    if (!circle) {
       d = Math.sqrt(distancePointToLineSegmentSq(p, start, end));
     } else {
-      d = Math.abs(distance(p, center) - R);
+      d = Math.abs(distance(p, circle.center) - circle.radius);
     }
 
     if (d > maxErr) {
@@ -526,7 +636,7 @@ function splitSegment(
     }
   }
 
-  // Create new node
+  // Create new node at split point
   const splitPoint = seg.points[splitIdx];
   const newNodeIdx = nodes.length;
   nodes.push({ x: splitPoint.x, y: splitPoint.y, fixed: false });
@@ -534,17 +644,21 @@ function splitSegment(
   const leftPoints = seg.points.slice(0, splitIdx + 1);
   const rightPoints = seg.points.slice(splitIdx);
 
+  // Compute sagittaPoints for each half (midpoint of their points)
+  const leftMidIdx = Math.floor(leftPoints.length / 2);
+  const rightMidIdx = Math.floor(rightPoints.length / 2);
+
   return {
     left: {
       startIdx: seg.startIdx,
       endIdx: newNodeIdx,
-      sagitta: seg.sagitta / 2, // Initial guess
+      sagittaPoint: leftPoints[leftMidIdx],
       points: leftPoints,
     },
     right: {
       startIdx: newNodeIdx,
       endIdx: seg.endIdx,
-      sagitta: seg.sagitta / 2, // Initial guess
+      sagittaPoint: rightPoints[rightMidIdx],
       points: rightPoints,
     },
   };
@@ -573,78 +687,83 @@ export function convertToSegments(
   optSegments: OptSegment[],
 ): Segment[] {
   return optSegments.map((seg) => {
-    const start = nodes[seg.startIdx];
-    const end = nodes[seg.endIdx];
+    const start: Point = { x: nodes[seg.startIdx].x, y: nodes[seg.startIdx].y };
+    const end: Point = { x: nodes[seg.endIdx].x, y: nodes[seg.endIdx].y };
 
-    if (Math.abs(seg.sagitta) < 0.5) {
+    // Compute the sagitta (perpendicular distance from sagittaPoint to chord)
+    const sagitta = computeSagitta(start, seg.sagittaPoint, end);
+    const chordLen = distance(start, end);
+
+    // Treat as line if:
+    // - sagitta is very small (nearly collinear points)
+    // - or sagitta relative to chord length is tiny (nearly straight)
+    const isLine = Math.abs(sagitta) < 0.5 ||
+      (chordLen > 1e-4 && Math.abs(sagitta) / chordLen < 0.05);
+
+    if (isLine) {
+      // Line
+      const dir = chordLen > 1e-6
+        ? normalize(subtract(end, start))
+        : { x: 1, y: 0 };
+
       return {
-        type: "line",
-        start: { x: start.x, y: start.y },
-        end: { x: end.x, y: end.y },
+        type: "line" as const,
+        start,
+        end,
         points: seg.points,
         line: {
-          point: { x: start.x, y: start.y },
-          direction: normalize(subtract(end, start)),
+          point: start,
+          direction: dir,
+        },
+      };
+    }
+
+    const circle = circleFrom3Points(start, seg.sagittaPoint, end);
+
+    if (!circle || circle.radius > 10000) {
+      // Fallback to line
+      const dir = magnitude(subtract(end, start)) > 1e-6
+        ? normalize(subtract(end, start))
+        : { x: 1, y: 0 };
+
+      return {
+        type: "line" as const,
+        start,
+        end,
+        points: seg.points,
+        line: {
+          point: start,
+          direction: dir,
         },
       };
     } else {
-      // Convert to Arc
-      const chord = subtract(end, start);
-      const chordLen = magnitude(chord);
-
-      // If chord is very small, treat as line to avoid huge radii
-      if (chordLen < 0.1) {
-        return {
-          type: "line",
-          start: { x: start.x, y: start.y },
-          end: { x: end.x, y: end.y },
-          points: seg.points,
-          line: {
-            point: { x: start.x, y: start.y },
-            direction: { x: 1, y: 0 },
-          },
-        };
-      }
-
-      const R = (Math.pow(chordLen / 2, 2) + seg.sagitta * seg.sagitta) /
-        (2 * Math.abs(seg.sagitta));
-
-      // Safety check for huge radii
-      if (R > 10000) {
-        return {
-          type: "line",
-          start: { x: start.x, y: start.y },
-          end: { x: end.x, y: end.y },
-          points: seg.points,
-          line: {
-            point: { x: start.x, y: start.y },
-            direction: normalize(subtract(end, start)),
-          },
-        };
-      }
-
-      const midChord = scale(add(start, end), 0.5);
-      const normal = { x: chord.y / chordLen, y: -chord.x / chordLen };
-      const center = add(
-        midChord,
-        scale(normal, (R - Math.abs(seg.sagitta)) * (seg.sagitta > 0 ? -1 : 1)),
+      // Arc
+      const startAngle = Math.atan2(
+        start.y - circle.center.y,
+        start.x - circle.center.x,
+      );
+      const endAngle = Math.atan2(
+        end.y - circle.center.y,
+        end.x - circle.center.x,
       );
 
-      // Calculate angles
-      const startAngle = Math.atan2(start.y - center.y, start.x - center.x);
-      const endAngle = Math.atan2(end.y - center.y, end.x - center.x);
+      // Determine clockwise by checking if sagittaPoint is on left or right of chord
+      const chord = subtract(end, start);
+      const toSagitta = subtract(seg.sagittaPoint, start);
+      const crossProd = cross(chord, toSagitta);
+      const clockwise = crossProd < 0;
 
       return {
-        type: "arc",
-        start: { x: start.x, y: start.y },
-        end: { x: end.x, y: end.y },
+        type: "arc" as const,
+        start,
+        end,
         points: seg.points,
         arc: {
-          center,
-          radius: R,
+          center: circle.center,
+          radius: circle.radius,
           startAngle,
           endAngle,
-          clockwise: seg.sagitta > 0, // Convention: positive sagitta = CW (Bulge Right relative to chord)
+          clockwise,
         },
       };
     }

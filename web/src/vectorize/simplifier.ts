@@ -1,12 +1,14 @@
 import type { Graph, GraphEdge } from "./tracer.ts";
-import type { Arc, Line, Point } from "./geometry.ts";
+import type { Arc, Circle, Line, Point } from "./geometry.ts";
+import { distance } from "./geometry.ts";
 import { optimizeEdge } from "./optimizer.ts";
 import { IncrementalLineFit } from "./line_fit.ts";
-import { IncrementalCircleFit } from "./arc_fit.ts";
+import { fitCircle, IncrementalCircleFit, percentile } from "./arc_fit.ts";
 
 export type Segment =
   | { type: "line"; line: Line; start: Point; end: Point; points: Point[] }
-  | { type: "arc"; arc: Arc; start: Point; end: Point; points: Point[] };
+  | { type: "arc"; arc: Arc; start: Point; end: Point; points: Point[] }
+  | { type: "circle"; circle: Circle; points: Point[] };
 
 export interface SimplifiedEdge {
   original: GraphEdge;
@@ -21,7 +23,28 @@ export interface SimplifiedGraph {
 function segmentEdge(points: Point[]): Segment[] {
   const segments: Segment[] = [];
   let startIndex = 0;
-  const TOLERANCE = 2.0; // Higher tolerance for initial pass
+  // Use median + percentile thresholds to encourage longer segments
+  const MEDIAN_TOLERANCE = 1.5; // Median error threshold (allows for pixel aliasing)
+  const P90_TOLERANCE = 3.0; // 90th percentile threshold
+
+  // Check for closed loop - if start and end are very close, try fitting a circle first
+  const isClosedLoop = points.length >= 10 &&
+    distance(points[0], points[points.length - 1]) < 2.0;
+
+  if (isClosedLoop) {
+    const circleFit = fitCircle(points);
+    if (circleFit) {
+      const p90 = percentile(circleFit.errors, 0.9);
+      if (circleFit.medianError <= MEDIAN_TOLERANCE && p90 <= P90_TOLERANCE) {
+        // Good circle fit! Return single circle segment
+        return [{
+          type: "circle",
+          circle: circleFit.circle,
+          points: points,
+        }];
+      }
+    }
+  }
 
   while (startIndex < points.length - 1) {
     let bestEndIndex = startIndex + 1;
@@ -53,8 +76,10 @@ function segmentEdge(points: Point[]): Segment[] {
       if (count >= 2) {
         lFit = lineFit.getFit();
         if (lFit) {
-          const maxErr = Math.max(...lFit.errors);
-          if (maxErr <= TOLERANCE) lValid = true;
+          const p90 = percentile(lFit.errors, 0.9);
+          if (lFit.medianError <= MEDIAN_TOLERANCE && p90 <= P90_TOLERANCE) {
+            lValid = true;
+          }
         }
       }
 
@@ -62,10 +87,13 @@ function segmentEdge(points: Point[]): Segment[] {
       if (count >= 3) {
         aFit = arcFit.getFit();
         if (aFit) {
-          const maxErr = Math.max(...aFit.errors);
-          // Limit arc to 180 degrees to avoid ambiguity in sagitta representation
-          // and degenerate cases with closed loops.
-          if (maxErr <= TOLERANCE && Math.abs(aFit.sweepAngle) <= Math.PI) {
+          const p90 = percentile(aFit.errors, 0.9);
+          const errOk = aFit.medianError <= MEDIAN_TOLERANCE &&
+            p90 <= P90_TOLERANCE;
+          // For closed loops (sweep approaching 360°), limit to ~350° to leave room for closing
+          // This avoids the degenerate case where start == end (zero chord length)
+          const sweepOk = aFit.sweepAngle < 2 * Math.PI - 0.2; // ~350° max
+          if (errOk && sweepOk) {
             aValid = true;
           }
         }
