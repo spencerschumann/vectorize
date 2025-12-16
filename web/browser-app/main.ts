@@ -173,6 +173,9 @@ const processingScreen = document.getElementById(
 const processCanvasContainer = document.getElementById(
   "processCanvasContainer",
 ) as HTMLDivElement;
+const processContent = document.getElementById(
+  "processContent",
+) as HTMLDivElement;
 const processCanvas = document.getElementById(
   "processCanvas",
 ) as HTMLCanvasElement;
@@ -1584,6 +1587,12 @@ function toggleVectorOverlay(vecStage: string) {
       currentImage.height,
     );
     processSvgOverlay.style.display = "block";
+
+    // Ensure size is correct
+    processSvgOverlay.setAttribute("width", currentImage.width.toString());
+    processSvgOverlay.setAttribute("height", currentImage.height.toString());
+    processSvgOverlay.style.width = `${currentImage.width}px`;
+    processSvgOverlay.style.height = `${currentImage.height}px`;
   }
 
   updateVectorOverlayButtons();
@@ -1801,6 +1810,12 @@ function displayProcessingStage(stage: ProcessingStage) {
   processCanvas.width = image.width;
   processCanvas.height = image.height;
 
+  // Set up SVG overlay size to match canvas
+  processSvgOverlay.setAttribute("width", image.width.toString());
+  processSvgOverlay.setAttribute("height", image.height.toString());
+  processSvgOverlay.style.width = `${image.width}px`;
+  processSvgOverlay.style.height = `${image.height}px`;
+
   // Convert to RGBA for display
   let rgbaData: Uint8ClampedArray;
   if ("palette" in image && image.palette) {
@@ -1911,14 +1926,20 @@ function updateProcessZoom() {
 function updateProcessTransform() {
   const transform =
     `translate(${state.processPanX}px, ${state.processPanY}px) scale(${state.processZoom})`;
-  processCanvas.style.transform = transform;
-  processCanvas.style.transformOrigin = "0 0";
-  processCanvas.style.willChange = "transform";
 
-  // Apply same transform to SVG overlay
-  processSvgOverlay.style.transform = transform;
-  processSvgOverlay.style.transformOrigin = "0 0";
-  processSvgOverlay.style.willChange = "transform";
+  if (processContent) {
+    processContent.style.transform = transform;
+    processContent.style.transformOrigin = "0 0";
+    processContent.style.willChange = "transform";
+  } else {
+    // Fallback if processContent is missing (shouldn't happen with new HTML)
+    processCanvas.style.transform = transform;
+    processCanvas.style.transformOrigin = "0 0";
+    processCanvas.style.willChange = "transform";
+    processSvgOverlay.style.transform = transform;
+    processSvgOverlay.style.transformOrigin = "0 0";
+    processSvgOverlay.style.willChange = "transform";
+  }
 
   if (state.processZoom >= 1) {
     processCanvas.style.imageRendering = "pixelated";

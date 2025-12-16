@@ -13,11 +13,11 @@ import { type Segment, type SimplifiedEdge } from "./simplifier.ts";
 
 // Configuration
 const CONFIG = {
-  LEARNING_RATE: 0.05,
+  LEARNING_RATE: 0.01, // Reduced from 0.05 to prevent explosions
   ITERATIONS: 50,
   SPLIT_THRESHOLD: 0.7, // Max error to trigger split
   MERGE_THRESHOLD: 0.2, // Error increase allowed for merge
-  ALIGNMENT_STRENGTH: 1.0, // Weight for axis alignment
+  ALIGNMENT_STRENGTH: 0.5, // Reduced from 1.0
   SMOOTHNESS_STRENGTH: 0.2, // Weight for tangent continuity
   FIDELITY_WEIGHT: 1.0,
 };
@@ -239,33 +239,42 @@ function optimizeParameters(
       const pEnd = nodes[seg.endIdx];
 
       // Numerical gradient for sagitta
-      const h = 0.1;
-      const errBase = getSegmentError(seg, pStart, pEnd, seg.sagitta);
+      const h = 0.01;
       const errPlus = getSegmentError(seg, pStart, pEnd, seg.sagitta + h);
-      sagittaGrads[i] += (errPlus - errBase) / h * CONFIG.FIDELITY_WEIGHT;
+      const errMinus = getSegmentError(seg, pStart, pEnd, seg.sagitta - h);
+      sagittaGrads[i] += (errPlus - errMinus) / (2 * h) *
+        CONFIG.FIDELITY_WEIGHT;
 
       // Numerical gradient for nodes (if not fixed)
       if (!pStart.fixed) {
-        const pStartX = { ...pStart, x: pStart.x + h };
-        const errX = getSegmentError(seg, pStartX, pEnd, seg.sagitta);
-        nodeGrads[seg.startIdx].x += (errX - errBase) / h *
+        const pStartXPlus = { ...pStart, x: pStart.x + h };
+        const pStartXMinus = { ...pStart, x: pStart.x - h };
+        const errXPlus = getSegmentError(seg, pStartXPlus, pEnd, seg.sagitta);
+        const errXMinus = getSegmentError(seg, pStartXMinus, pEnd, seg.sagitta);
+        nodeGrads[seg.startIdx].x += (errXPlus - errXMinus) / (2 * h) *
           CONFIG.FIDELITY_WEIGHT;
 
-        const pStartY = { ...pStart, y: pStart.y + h };
-        const errY = getSegmentError(seg, pStartY, pEnd, seg.sagitta);
-        nodeGrads[seg.startIdx].y += (errY - errBase) / h *
+        const pStartYPlus = { ...pStart, y: pStart.y + h };
+        const pStartYMinus = { ...pStart, y: pStart.y - h };
+        const errYPlus = getSegmentError(seg, pStartYPlus, pEnd, seg.sagitta);
+        const errYMinus = getSegmentError(seg, pStartYMinus, pEnd, seg.sagitta);
+        nodeGrads[seg.startIdx].y += (errYPlus - errYMinus) / (2 * h) *
           CONFIG.FIDELITY_WEIGHT;
       }
 
       if (!pEnd.fixed) {
-        const pEndX = { ...pEnd, x: pEnd.x + h };
-        const errX = getSegmentError(seg, pStart, pEndX, seg.sagitta);
-        nodeGrads[seg.endIdx].x += (errX - errBase) / h *
+        const pEndXPlus = { ...pEnd, x: pEnd.x + h };
+        const pEndXMinus = { ...pEnd, x: pEnd.x - h };
+        const errXPlus = getSegmentError(seg, pStart, pEndXPlus, seg.sagitta);
+        const errXMinus = getSegmentError(seg, pStart, pEndXMinus, seg.sagitta);
+        nodeGrads[seg.endIdx].x += (errXPlus - errXMinus) / (2 * h) *
           CONFIG.FIDELITY_WEIGHT;
 
-        const pEndY = { ...pEnd, y: pEnd.y + h };
-        const errY = getSegmentError(seg, pStart, pEndY, seg.sagitta);
-        nodeGrads[seg.endIdx].y += (errY - errBase) / h *
+        const pEndYPlus = { ...pEnd, y: pEnd.y + h };
+        const pEndYMinus = { ...pEnd, y: pEnd.y - h };
+        const errYPlus = getSegmentError(seg, pStart, pEndYPlus, seg.sagitta);
+        const errYMinus = getSegmentError(seg, pStart, pEndYMinus, seg.sagitta);
+        nodeGrads[seg.endIdx].y += (errYPlus - errYMinus) / (2 * h) *
           CONFIG.FIDELITY_WEIGHT;
       }
     }
@@ -275,7 +284,7 @@ function optimizeParameters(
       const seg = segments[i];
       const pStart = nodes[seg.startIdx];
       const pEnd = nodes[seg.endIdx];
-      const h = 0.1;
+      const h = 0.01;
 
       // Only apply if sagitta is small (line-like)
       if (Math.abs(seg.sagitta) < 1.0) {
@@ -289,22 +298,44 @@ function optimizeParameters(
           // This is sin^2 * cos^2 = (1/4)sin^2(2*theta)
 
           // Let's use numerical gradient for simplicity
-          const costBase = alignmentCost(pStart, pEnd);
-
           if (!pStart.fixed) {
-            const costX = alignmentCost({ ...pStart, x: pStart.x + h }, pEnd);
-            nodeGrads[seg.startIdx].x += (costX - costBase) / h *
+            const costXPlus = alignmentCost(
+              { ...pStart, x: pStart.x + h },
+              pEnd,
+            );
+            const costXMinus = alignmentCost(
+              { ...pStart, x: pStart.x - h },
+              pEnd,
+            );
+            nodeGrads[seg.startIdx].x += (costXPlus - costXMinus) / (2 * h) *
               CONFIG.ALIGNMENT_STRENGTH;
-            const costY = alignmentCost({ ...pStart, y: pStart.y + h }, pEnd);
-            nodeGrads[seg.startIdx].y += (costY - costBase) / h *
+
+            const costYPlus = alignmentCost(
+              { ...pStart, y: pStart.y + h },
+              pEnd,
+            );
+            const costYMinus = alignmentCost(
+              { ...pStart, y: pStart.y - h },
+              pEnd,
+            );
+            nodeGrads[seg.startIdx].y += (costYPlus - costYMinus) / (2 * h) *
               CONFIG.ALIGNMENT_STRENGTH;
           }
           if (!pEnd.fixed) {
-            const costX = alignmentCost(pStart, { ...pEnd, x: pEnd.x + h });
-            nodeGrads[seg.endIdx].x += (costX - costBase) / h *
+            const costXPlus = alignmentCost(pStart, { ...pEnd, x: pEnd.x + h });
+            const costXMinus = alignmentCost(pStart, {
+              ...pEnd,
+              x: pEnd.x - h,
+            });
+            nodeGrads[seg.endIdx].x += (costXPlus - costXMinus) / (2 * h) *
               CONFIG.ALIGNMENT_STRENGTH;
-            const costY = alignmentCost(pStart, { ...pEnd, y: pEnd.y + h });
-            nodeGrads[seg.endIdx].y += (costY - costBase) / h *
+
+            const costYPlus = alignmentCost(pStart, { ...pEnd, y: pEnd.y + h });
+            const costYMinus = alignmentCost(pStart, {
+              ...pEnd,
+              y: pEnd.y - h,
+            });
+            nodeGrads[seg.endIdx].y += (costYPlus - costYMinus) / (2 * h) *
               CONFIG.ALIGNMENT_STRENGTH;
           }
         }
@@ -369,7 +400,8 @@ function alignmentCost(p1: Point, p2: Point): number {
   const lenSq = dx * dx + dy * dy;
   if (lenSq < 1e-6) return 0;
   // (dx*dy / lenSq)^2 is minimized when dx=0 or dy=0
-  return Math.pow((dx * dy) / lenSq, 2) * 100; // Scale up
+  // Scale up, but not too much. 100 was causing explosions.
+  return Math.pow((dx * dy) / lenSq, 2) * 10;
 }
 
 function getSegmentError(
@@ -544,7 +576,7 @@ export function convertToSegments(
     const start = nodes[seg.startIdx];
     const end = nodes[seg.endIdx];
 
-    if (Math.abs(seg.sagitta) < 1.0) {
+    if (Math.abs(seg.sagitta) < 0.5) {
       return {
         type: "line",
         start: { x: start.x, y: start.y },
@@ -560,8 +592,8 @@ export function convertToSegments(
       const chord = subtract(end, start);
       const chordLen = magnitude(chord);
 
-      if (chordLen < 1e-6) {
-        // Fallback to line (point) to avoid NaN if start ~= end
+      // If chord is very small, treat as line to avoid huge radii
+      if (chordLen < 0.1) {
         return {
           type: "line",
           start: { x: start.x, y: start.y },
@@ -576,6 +608,21 @@ export function convertToSegments(
 
       const R = (Math.pow(chordLen / 2, 2) + seg.sagitta * seg.sagitta) /
         (2 * Math.abs(seg.sagitta));
+
+      // Safety check for huge radii
+      if (R > 10000) {
+        return {
+          type: "line",
+          start: { x: start.x, y: start.y },
+          end: { x: end.x, y: end.y },
+          points: seg.points,
+          line: {
+            point: { x: start.x, y: start.y },
+            direction: normalize(subtract(end, start)),
+          },
+        };
+      }
+
       const midChord = scale(add(start, end), 0.5);
       const normal = { x: chord.y / chordLen, y: -chord.x / chordLen };
       const center = add(

@@ -141,8 +141,10 @@
         <div class="processing-screen" id="processingScreen">
             <div class="processing-screen-layout">
                 <div class="canvas-container" id="processCanvasContainer">
-                    <canvas id="processCanvas"></canvas>
-                    <svg id="processSvgOverlay" style="position: absolute; top: 0; left: 0; pointer-events: none; display: none;"></svg>
+                    <div id="processContent" style="position: absolute; top: 0; left: 0; transform-origin: 0 0;">
+                        <canvas id="processCanvas" style="position: absolute; top: 0; left: 0;"></canvas>
+                        <svg id="processSvgOverlay" style="position: absolute; top: 0; left: 0; pointer-events: none; display: none;"></svg>
+                    </div>
                 </div>
 
                 <div class="sidebar" id="processSidebar">
