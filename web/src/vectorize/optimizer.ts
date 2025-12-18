@@ -15,11 +15,12 @@ import { type Segment, type SimplifiedEdge } from "./simplifier.ts";
 const CONFIG = {
   LEARNING_RATE: 0.01,
   ITERATIONS: 50,
-  SPLIT_THRESHOLD: 1.0, // Lower threshold to catch corners like L-shapes
-  MERGE_THRESHOLD: 0.2,
+  SPLIT_THRESHOLD: 1.0,
+  MERGE_THRESHOLD: 0.5,
   ALIGNMENT_STRENGTH: 0.5,
   SMOOTHNESS_STRENGTH: 0.2,
   FIDELITY_WEIGHT: 1.0,
+  SEGMENT_PENALTY: 10.0,
 };
 
 export interface OptNode {
@@ -263,6 +264,118 @@ export function optimizeEdge(
           JSON.parse(JSON.stringify(segments)),
           `Iteration ${loopCount} - Re-optimized`,
         );
+      }
+    }
+
+    // C. Merge Pass: Try to merge adjacent segments if it doesn't increase error too much
+    let mergeOccurred = false;
+    let i = 0;
+    while (i < segments.length - 1) {
+      const seg1 = segments[i];
+      const seg2 = segments[i + 1];
+
+      // Check if we can merge: segments must be connected
+      if (seg1.endIdx === seg2.startIdx) {
+        const start = nodes[seg1.startIdx];
+        const mid = nodes[seg1.endIdx];
+        const end = nodes[seg2.endIdx];
+
+        // Compute error if merged
+        const mergedPoints = [...seg1.points, ...seg2.points];
+        const mergedError = getSegmentErrorWithPoints(
+          mergedPoints,
+          start,
+          mid,
+          end,
+        );
+
+        // Compute individual errors
+        const err1 = getSegmentErrorWithPoints(
+          seg1.points,
+          start,
+          mid,
+          seg1.sagittaPoint,
+        );
+        const err2 = getSegmentErrorWithPoints(
+          seg2.points,
+          seg2.sagittaPoint,
+          mid,
+          end,
+        );
+        const combinedError = err1 + err2;
+
+        // Merge if merged error is close to individual errors + small threshold
+        // Account for segment penalty: merging reduces segment count by 1
+        const segmentCostSavings = CONFIG.SEGMENT_PENALTY;
+        if (
+          mergedError <=
+            combinedError + CONFIG.MERGE_THRESHOLD + segmentCostSavings
+        ) {
+          // Merge the segments
+          seg1.endIdx = seg2.endIdx;
+          seg1.points = mergedPoints;
+          // Find a good sagittaPoint for merged segment (use weighted average of midpoints)
+          // TODO: better to do a new line/circle fit
+          const midSag1 = computeSagitta(start, seg1.sagittaPoint, mid);
+          const midSag2 = computeSagitta(mid, seg2.sagittaPoint, end);
+          const totalDist = distance(start, mid) + distance(mid, end);
+          const w1 = distance(start, mid) / totalDist;
+          const w2 = distance(mid, end) / totalDist;
+          seg1.sagittaPoint = add(
+            scale(seg1.sagittaPoint, w1),
+            scale(seg2.sagittaPoint, w2),
+          );
+
+          segments.splice(i + 1, 1);
+          mergeOccurred = true;
+          changed = true;
+          // Don't increment i, check again at this position
+        } else {
+          i++;
+        }
+      } else {
+        i++;
+      }
+    }
+
+    if (mergeOccurred) {
+      if (onIteration) {
+        onIteration(
+          JSON.parse(JSON.stringify(nodes)),
+          JSON.parse(JSON.stringify(segments)),
+          `Iteration ${loopCount} - Merged`,
+        );
+      }
+    }
+
+    // D. Straightening Pass: Convert nearly-straight segments to lines
+    // If an arc's sagittaPoint is very close to the connecting line, treat it as a line.
+    // This allows the optimizer to "discover" that an arc segment should be straight.
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const start = nodes[seg.startIdx];
+      const end = nodes[seg.endIdx];
+      const sagitta = computeSagitta(start, seg.sagittaPoint, end);
+      const chordLen = distance(start, end);
+
+      // If sagitta is very small (arc has straightened), snap sagittaPoint to the line.
+      // This converts the arc representation to a line representation.
+      if (
+        Math.abs(sagitta) < 0.3 ||
+        (chordLen > 1e-4 && Math.abs(sagitta) / chordLen < 0.05)
+      ) {
+        // Project sagittaPoint onto the line
+        const t = Math.max(
+          0,
+          Math.min(
+            1,
+            dot(
+              subtract(seg.sagittaPoint, start),
+              subtract(end, start),
+            ) / (chordLen * chordLen + 1e-6),
+          ),
+        );
+        seg.sagittaPoint = add(start, scale(subtract(end, start), t));
       }
     }
   }
@@ -583,6 +696,22 @@ function getSegmentErrorWithPoints(
       const d = Math.abs(distance(p, circle.center) - circle.radius);
       error += d * d;
     }
+
+    // Line preference bonus: if this segment would fit well as a line,
+    // reduce the error to encourage the optimizer to keep it straight.
+    // Compute what the line error would be:
+    let lineError = 0;
+    for (const p of points) {
+      lineError += distancePointToLineSegmentSq(p, start, end);
+    }
+
+    // If line error is similar to arc error, apply a bonus to prefer the line.
+    // This encourages nearly-straight segments to stay straight.
+    const errorRatio = lineError / (error + 1e-6); // Avoid division by zero
+    if (errorRatio > 0.8) {
+      // Line fits almost as well as the arc; apply a small bonus (reduce error)
+      error *= 0.95; // 5% reduction to favor straightness
+    }
   }
 
   return error;
@@ -720,7 +849,19 @@ export function convertToSegments(
 
     const circle = circleFrom3Points(start, seg.sagittaPoint, end);
 
-    if (!circle || circle.radius > 10000) {
+    // Check if arc should be converted to line
+    // An arc with very high radius relative to chord is essentially a line
+    let shouldBeArc = circle && circle.radius < 10000;
+
+    if (shouldBeArc && chordLen > 1e-6) {
+      // Additional check: if radius is too large relative to chord, it's a line
+      // A radius > 2x the chord means the arc is nearly flat
+      if (circle.radius > 2 * chordLen) {
+        shouldBeArc = false;
+      }
+    }
+
+    if (!shouldBeArc) {
       // Fallback to line
       const dir = magnitude(subtract(end, start)) > 1e-6
         ? normalize(subtract(end, start))

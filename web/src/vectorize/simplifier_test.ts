@@ -275,3 +275,50 @@ Deno.test("simplifyGraph - Circle (Large)", () => {
     }
   }
 });
+
+Deno.test("simplifyGraph - Square", () => {
+  // Square (86x91) with hollow center - large rectangle outline
+  const pngData =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAFYAAABbCAYAAADpyHIpAAABy0lEQVR4AezcQXLCQAxEUYv73znJJJW1NF38AjOfKrOx1DCP3rDx48sXIvC4fCECwiKs1yWssJAAFGtjhYUEoFgbKywkAMXa2HeAraqr6rwrsR83tqqun/9+R15V9Wu78zaCrfpD3Qk+fXYEezpScn5hE7XBjrADpGRE2ERtsCPsACkZETZRG+wIO0BKRoRN1AY7wg6QkhFhE7XBzvGwA6NoRNiIrV8StjeKJoSN2PolYXujaELYiK1fErY3iiaEjdj6JWF7o2hC2IitXxK2N4omhI3Y+qWPhO2PzU8ICxkLKywkAMXaWGEhASjWxgoLCUCxNlZYSACKtbHCQgJQ7G0aC50fixUWohVWWEgAirWxwkICUKyNFRYSgGJtrLCQABRrY4WFBKDYlzYWOtNbxAoL/QzCCgsJQLE2VlhIAIq1scJCAlCsjRUWEoBibaywkAAU+/TGQt/zdrHCQj+ZsMJCAlCsjRUWEoBibaywkAAUO2rsejZ31f5zqqHvfIvYEew6yT9uVR33ZPl19mWwc41hV+j6gBOvdfbdawt2N/zk+RHsyUDp2YVN5Zo9YRug9LawqVyzJ2wDlN4WNpVr9oRtgNLbwqZyzd43AAAA///UUFKLAAAABklEQVQDAHKv131FvUd9AAAAAElFTkSuQmCC";
+
+  const bin = binaryFromBase64Png(pngData);
+  const graph = traceGraph(bin);
+
+  // Square should produce 1 edge
+  assertEquals(graph.edges.length, 1);
+
+  const simplified = simplifyGraph(graph);
+  const simplEdge = simplified.edges[0];
+
+  // Debug output
+  console.log(`Square segments: ${simplEdge.segments.length}`);
+  for (let i = 0; i < Math.min(5, simplEdge.segments.length); i++) {
+    const s = simplEdge.segments[i];
+    console.log(
+      `  [${i}] ${s.type}${
+        s.type === "arc" ? ` R=${s.arc.radius.toFixed(1)}` : ""
+      }`,
+    );
+  }
+
+  // A hollow square (rectangle outline) should be represented as multiple segments
+  // The exact number depends on how the corners and sides are segmented.
+  // For a large smooth rectangle, we expect primarily line segments forming the 4 sides,
+  // though anti-aliasing or tracing artifacts may cause additional small segments.
+  // Accept 4-30 segments as valid (4 perfect sides, or more with corner artifacts)
+  assert(
+    simplEdge.segments.length >= 4 && simplEdge.segments.length <= 30,
+    `Square should have 4-30 segments, got ${simplEdge.segments.length}`,
+  );
+
+  // Most segments should be lines (sides of the square)
+  const lineCount = simplEdge.segments.filter((s) => s.type === "line").length;
+  assert(
+    lineCount >= simplEdge.segments.length * 0.5,
+    `Expected mostly lines for square sides, got ${lineCount}/${simplEdge.segments.length} lines`,
+  );
+
+  console.log(
+    `Square test passed: ${simplEdge.segments.length} segments, ${lineCount} lines`,
+  );
+});

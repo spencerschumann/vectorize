@@ -29,7 +29,13 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
   const paths: SimplifiedPath[] = simplified.edges.map((edge, index) => {
     console.log(`Path ${index}: ${edge.segments.length} segments`);
     edge.segments.forEach((seg, segIndex) => {
-      if (seg.type === "line") {
+      if (seg.type === "circle") {
+        console.log(
+          `  [${segIndex}] CIRCLE: center=(${seg.circle.center.x.toFixed(2)}, ${
+            seg.circle.center.y.toFixed(2)
+          }) r=${seg.circle.radius.toFixed(2)}`,
+        );
+      } else if (seg.type === "line") {
         console.log(
           `  [${segIndex}] LINE: (${seg.start.x.toFixed(2)}, ${
             seg.start.y.toFixed(2)
@@ -53,8 +59,14 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
     }
 
     // Determine if closed
-    const first = edge.segments[0].start;
-    const last = edge.segments[edge.segments.length - 1].end;
+    const firstSeg = edge.segments[0];
+    const lastSeg = edge.segments[edge.segments.length - 1];
+    const first = firstSeg.type === "circle"
+      ? firstSeg.circle.center
+      : firstSeg.start;
+    const last = lastSeg.type === "circle"
+      ? lastSeg.circle.center
+      : lastSeg.end;
     const closed = Math.abs(first.x - last.x) < 1e-4 &&
       Math.abs(first.y - last.y) < 1e-4;
 
@@ -97,19 +109,59 @@ export function renderVectorizedToSVG(
     let d = "";
     if (path.segments && path.segments.length > 0) {
       const first = path.segments[0];
-      d += `M ${first.start.x + 0.5} ${first.start.y + 0.5} `;
+      const firstX = first.type === "circle"
+        ? first.circle.center.x + first.circle.radius
+        : first.start.x;
+      const firstY = first.type === "circle"
+        ? first.circle.center.y
+        : first.start.y;
+      d += `M ${firstX + 0.5} ${firstY + 0.5} `;
 
       for (const seg of path.segments) {
         if (seg.type === "line") {
           d += `L ${seg.end.x + 0.5} ${seg.end.y + 0.5} `;
+        } else if (seg.type === "circle") {
+          // For a circle segment, render as two 180° arcs
+          const r = seg.circle.radius;
+          const cx = seg.circle.center.x;
+          const cy = seg.circle.center.y;
+          // Start from rightmost point (cx + r, cy)
+          const midX = cx - r; // leftmost point
+          const midY = cy;
+          // First semicircle to left
+          d += `A ${r} ${r} 0 1 0 ${midX + 0.5} ${midY + 0.5} `;
+          // Second semicircle back to right
+          d += `A ${r} ${r} 0 1 0 ${(cx + r) + 0.5} ${cy + 0.5} `;
         } else if (seg.type === "arc") {
           const r = seg.arc.radius;
-          const largeArc =
-            Math.abs(seg.arc.endAngle - seg.arc.startAngle) > Math.PI ? 1 : 0;
-          const sweep = seg.arc.clockwise ? 1 : 0;
-          d += `A ${r} ${r} 0 ${largeArc} ${sweep} ${seg.end.x + 0.5} ${
-            seg.end.y + 0.5
-          } `;
+          const isFullCircle = Math.abs(seg.start.x - seg.end.x) < 1e-4 &&
+            Math.abs(seg.start.y - seg.end.y) < 1e-4;
+
+          if (isFullCircle) {
+            // For a full circle, split into two 180° arcs
+            // First arc: start -> opposite point
+            const angle = seg.arc.startAngle;
+            const midAngle = angle + (seg.arc.clockwise ? -Math.PI : Math.PI);
+            const midX = seg.arc.center.x + r * Math.cos(midAngle);
+            const midY = seg.arc.center.y + r * Math.sin(midAngle);
+
+            // First semicircle (large arc)
+            d += `A ${r} ${r} 0 1 ${seg.arc.clockwise ? 1 : 0} ${midX + 0.5} ${
+              midY + 0.5
+            } `;
+            // Second semicircle (large arc) back to start
+            d += `A ${r} ${r} 0 1 ${seg.arc.clockwise ? 1 : 0} ${
+              seg.start.x + 0.5
+            } ${seg.start.y + 0.5} `;
+          } else {
+            // Regular arc
+            const largeArc =
+              Math.abs(seg.arc.endAngle - seg.arc.startAngle) > Math.PI ? 1 : 0;
+            const sweep = seg.arc.clockwise ? 1 : 0;
+            d += `A ${r} ${r} 0 ${largeArc} ${sweep} ${seg.end.x + 0.5} ${
+              seg.end.y + 0.5
+            } `;
+          }
         }
       }
       if (path.closed) {
@@ -140,12 +192,14 @@ export function renderVectorizedToSVG(
 
     // Draw vertices (endpoints of segments)
     for (const seg of path.segments) {
+      const sx = seg.type === "circle" ? seg.circle.center.x : seg.start.x;
+      const sy = seg.type === "circle" ? seg.circle.center.y : seg.start.y;
       const circle = document.createElementNS(
         "http://www.w3.org/2000/svg",
         "circle",
       );
-      circle.setAttribute("cx", (seg.start.x + 0.5).toString());
-      circle.setAttribute("cy", (seg.start.y + 0.5).toString());
+      circle.setAttribute("cx", (sx + 0.5).toString());
+      circle.setAttribute("cy", (sy + 0.5).toString());
       circle.setAttribute("r", "0.5");
       circle.setAttribute("fill", "blue");
       circle.setAttribute("vector-effect", "non-scaling-stroke");
@@ -154,12 +208,14 @@ export function renderVectorizedToSVG(
     // Draw last endpoint
     if (path.segments.length > 0) {
       const last = path.segments[path.segments.length - 1];
+      const ex = last.type === "circle" ? last.circle.center.x : last.end.x;
+      const ey = last.type === "circle" ? last.circle.center.y : last.end.y;
       const circle = document.createElementNS(
         "http://www.w3.org/2000/svg",
         "circle",
       );
-      circle.setAttribute("cx", (last.end.x + 0.5).toString());
-      circle.setAttribute("cy", (last.end.y + 0.5).toString());
+      circle.setAttribute("cx", (ex + 0.5).toString());
+      circle.setAttribute("cy", (ey + 0.5).toString());
       circle.setAttribute("r", "0.5");
       circle.setAttribute("fill", "blue");
       circle.setAttribute("vector-effect", "non-scaling-stroke");

@@ -13,6 +13,7 @@ import { createGPUBuffer, getGPUContext } from "../src/gpu/gpu_context.ts";
 import type { RGBAImage } from "../src/formats/rgba_image.ts";
 import type { PalettizedImage } from "../src/formats/palettized.ts";
 import type { BinaryImage } from "../src/formats/binary.ts";
+import { binaryToBase64PNG } from "../src/formats/png_encode.ts";
 import { DEFAULT_PALETTE } from "../src/formats/palettized.ts";
 import {
   clearAllFiles,
@@ -180,9 +181,9 @@ const processCanvas = document.getElementById(
   "processCanvas",
 ) as HTMLCanvasElement;
 const processCtx = processCanvas.getContext("2d")!;
-const processSvgOverlay = document.getElementById(
+const processSvgOverlay = (document.getElementById(
   "processSvgOverlay",
-) as SVGSVGElement;
+) as unknown) as SVGSVGElement;
 const processZoomInBtn = document.getElementById(
   "processZoomInBtn",
 ) as HTMLButtonElement;
@@ -328,53 +329,58 @@ copyImageBtn.addEventListener("click", async () => {
 
   // Convert image to RGBA and draw
   const numPixels = image.width * image.height;
-  const rgbaData = new Uint8ClampedArray(numPixels * 4);
-
-  // Check if it's a binary image
   const expectedBinaryLength = Math.ceil(numPixels / 8);
+
+  // Check if it's a binary image and use optimized 1-bit PNG encoder
   if (
     image.data instanceof Uint8Array &&
     image.data.length === expectedBinaryLength
   ) {
-    // BinaryImage - convert bit-packed 1-bit to RGBA
-    for (let y = 0; y < image.height; y++) {
-      for (let x = 0; x < image.width; x++) {
-        const pixelIndex = y * image.width + x;
-        const byteIndex = Math.floor(pixelIndex / 8);
-        const bitIndex = 7 - (pixelIndex % 8);
-        const bitValue = (image.data[byteIndex] >> bitIndex) & 1;
-        const value = bitValue ? 0 : 255; // 1=black, 0=white
-        const offset = pixelIndex * 4;
-        rgbaData[offset] = value;
-        rgbaData[offset + 1] = value;
-        rgbaData[offset + 2] = value;
-        rgbaData[offset + 3] = 255;
-      }
+    // BinaryImage - convert directly to 1-bit PNG
+    const binImage: BinaryImage = {
+      width: image.width,
+      height: image.height,
+      data: image.data,
+    };
+    const dataUrl = binaryToBase64PNG(binImage);
+
+    try {
+      await navigator.clipboard.writeText(dataUrl);
+      showStatus(
+        `Copied ${image.width}x${image.height} image as 1-bit PNG to clipboard`,
+      );
+    } catch (err) {
+      console.error("Failed to copy to clipboard:", err);
+      // Fallback: log to console
+      console.log("Base64 PNG data URL:");
+      console.log(dataUrl);
+      showStatus("Logged base64 PNG to console (clipboard failed)");
     }
   } else {
-    // Assume RGBA
+    // RGBA image - use canvas as before
+    const rgbaData = new Uint8ClampedArray(numPixels * 4);
     for (let i = 0; i < image.data.length; i++) {
-      rgbaData[i] = image.data[i];
+      rgbaData[i] = (image.data as Uint8ClampedArray)[i];
     }
-  }
 
-  const imageData = new ImageData(rgbaData, image.width, image.height);
-  tempCtx.putImageData(imageData, 0, 0);
+    const imageData = new ImageData(rgbaData, image.width, image.height);
+    tempCtx.putImageData(imageData, 0, 0);
 
-  // Convert to base64 PNG
-  const dataUrl = tempCanvas.toDataURL("image/png");
+    // Convert to base64 PNG
+    const dataUrl = tempCanvas.toDataURL("image/png");
 
-  try {
-    await navigator.clipboard.writeText(dataUrl);
-    showStatus(
-      `Copied ${image.width}x${image.height} image as base64 PNG to clipboard`,
-    );
-  } catch (err) {
-    console.error("Failed to copy to clipboard:", err);
-    // Fallback: log to console
-    console.log("Base64 PNG data URL:");
-    console.log(dataUrl);
-    showStatus("Logged base64 PNG to console (clipboard failed)");
+    try {
+      await navigator.clipboard.writeText(dataUrl);
+      showStatus(
+        `Copied ${image.width}x${image.height} image as base64 PNG to clipboard`,
+      );
+    } catch (err) {
+      console.error("Failed to copy to clipboard:", err);
+      // Fallback: log to console
+      console.log("Base64 PNG data URL:");
+      console.log(dataUrl);
+      showStatus("Logged base64 PNG to console (clipboard failed)");
+    }
   }
 });
 
@@ -1790,11 +1796,11 @@ function displayProcessingStage(stage: ProcessingStage) {
         }
       }
 
-      const imageData = new ImageData(
-        rgbaData,
+      const imageData = processCtx.createImageData(
         skelImage.width,
         skelImage.height,
       );
+      imageData.data.set(rgbaData);
       processCtx.putImageData(imageData, 0, 0);
     }
 
