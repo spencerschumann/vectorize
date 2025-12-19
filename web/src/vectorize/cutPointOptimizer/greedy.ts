@@ -1,38 +1,38 @@
 import type { Point } from "../geometry.ts";
-import { distance, distanceToLine } from "../geometry.ts";
+import { distancePointToLineSegmentSq } from "../geometry.ts";
 import { fitPixelRange } from "./fitting.ts";
 import type { CutPointOptimizerConfig } from "./types.ts";
 
-function getPixelErrors(
-  points: Point[],
-  fit: ReturnType<typeof fitPixelRange>,
-): { errors: number[]; maxErrorIndex: number } {
-  const errors = points.map((p) => {
-    if (!fit) return 0;
-    const { segment } = fit;
-    if (segment.type === "line") {
-      return distanceToLine(p, segment.line);
-    } else if (segment.type === "arc") {
-      return Math.abs(distance(p, segment.arc.center) - segment.arc.radius);
-    }
-    return 0;
-  });
+/**
+ * Finds the point in a segment that is most distant from the line segment connecting the endpoints.
+ * @param pixels The array of all points.
+ * @param start The starting index of the segment.
+ * @param end The ending index of the segment.
+ * @returns The index of the most distant point and the squared distance.
+ */
+function findFurthestPoint(
+  pixels: Point[],
+  start: number,
+  end: number,
+): { index: number; distanceSq: number } {
+  let maxDistSq = 0;
+  let furthestIndex = -1;
+  const startPoint = pixels[start];
+  const endPoint = pixels[end];
 
-  let maxError = -1;
-  let maxErrorIndex = -1;
-  for (let i = 0; i < errors.length; i++) {
-    if (errors[i] > maxError) {
-      maxError = errors[i];
-      maxErrorIndex = i;
+  for (let i = start + 1; i < end; i++) {
+    const distSq = distancePointToLineSegmentSq(pixels[i], startPoint, endPoint);
+    if (distSq > maxDistSq) {
+      maxDistSq = distSq;
+      furthestIndex = i;
     }
   }
 
-  return { errors, maxErrorIndex };
+  return { index: furthestIndex, distanceSq: maxDistSq };
 }
 
-
 /**
- * Finds initial breakpoints using a greedy recursive splitting approach.
+ * Finds initial breakpoints using a greedy recursive splitting approach based on the Douglas-Peucker algorithm.
  *
  * @param pixels The array of points representing the pixel chain.
  * @param config The optimizer configuration.
@@ -50,23 +50,18 @@ export function findInitialBreakpoints(
       return;
     }
 
-    const fit = fitPixelRange(pixels, { start, end });
-    if (!fit) {
-      return;
-    }
+    const { index: furthestIndex, distanceSq } = findFurthestPoint(
+      pixels,
+      start,
+      end,
+    );
 
-    if (fit.error > config.maxSegmentError) {
-      const segmentPixels = pixels.slice(start, end + 1);
-      const { maxErrorIndex } = getPixelErrors(segmentPixels, fit);
-
-      if (
-        maxErrorIndex > 0 &&
-        maxErrorIndex < segmentLength - 1
-      ) {
-        const splitIndex = start + maxErrorIndex;
-        breakpoints.add(splitIndex);
-        recursiveSplit(start, splitIndex);
-        recursiveSplit(splitIndex, end);
+    // The threshold in Douglas-Peucker is a distance, not an error. We'll use the square root of maxSegmentError.
+    if (Math.sqrt(distanceSq) > config.maxSegmentError) {
+      if (furthestIndex !== -1) {
+        breakpoints.add(furthestIndex);
+        recursiveSplit(start, furthestIndex);
+        recursiveSplit(furthestIndex, end);
       }
     }
   }

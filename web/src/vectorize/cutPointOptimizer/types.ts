@@ -2,22 +2,6 @@ import type { Point } from "../geometry.ts";
 import type { Segment } from "../simplifier.ts";
 
 /**
- * A breakpoint in the pixel chain where one segment ends and another begins.
- * The breakpoint index refers to a position in the pixel array.
- */
-export interface Breakpoint {
-  /** Index into the pixel chain array */
-  index: number;
-
-  /**
-   * How to handle the junction between adjacent segments.
-   * - "intersect": Extend adjacent segments to their intersection point (default)
-   * - "bridge": Insert a short line segment connecting the endpoints
-   */
-  junctionStrategy: "intersect" | "bridge";
-}
-
-/**
  * A range of pixels to be fitted as a single segment.
  */
 export interface PixelRange {

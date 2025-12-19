@@ -49,19 +49,24 @@ export function refineBreakpoints(
     let changed = false;
     for (let j = 0; j < refinedBreakpoints.length; j++) {
       const currentBreakpoint = refinedBreakpoints[j];
+      const prevBreakpoint = j > 0 ? refinedBreakpoints[j - 1] : 0;
+      const nextBreakpoint = j < refinedBreakpoints.length - 1
+          ? refinedBreakpoints[j + 1]
+          : pixels.length - 1;
+
       let bestBreakpoint = currentBreakpoint;
-      let minCost = calculateCost(pixels, refinedBreakpoints, config, cache);
+
+      const fit1 = cache.get(prevBreakpoint, currentBreakpoint) || fitPixelRange(pixels, { start: prevBreakpoint, end: currentBreakpoint });
+      const fit2 = cache.get(currentBreakpoint, nextBreakpoint) || fitPixelRange(pixels, { start: currentBreakpoint, end: nextBreakpoint });
+      if (!fit1 || !fit2) continue;
+
+      let minCost = fit1.error + fit2.error;
 
       const window = config.refinementWindow;
       for (let offset = -window; offset <= window; offset++) {
         if (offset === 0) continue;
         const newBreakpoint = currentBreakpoint + offset;
 
-        // Ensure the new breakpoint is valid
-        const prevBreakpoint = j > 0 ? refinedBreakpoints[j - 1] : 0;
-        const nextBreakpoint = j < refinedBreakpoints.length - 1
-          ? refinedBreakpoints[j + 1]
-          : pixels.length -1;
         if (
           newBreakpoint <= prevBreakpoint + config.minSegmentLength ||
           newBreakpoint >= nextBreakpoint - config.minSegmentLength
@@ -69,10 +74,11 @@ export function refineBreakpoints(
           continue;
         }
 
-        const testBreakpoints = [...refinedBreakpoints];
-        testBreakpoints[j] = newBreakpoint;
+        const newFit1 = cache.get(prevBreakpoint, newBreakpoint) || fitPixelRange(pixels, { start: prevBreakpoint, end: newBreakpoint });
+        const newFit2 = cache.get(newBreakpoint, nextBreakpoint) || fitPixelRange(pixels, { start: newBreakpoint, end: nextBreakpoint });
+        if (!newFit1 || !newFit2) continue;
 
-        const cost = calculateCost(pixels, testBreakpoints, config, cache);
+        const cost = newFit1.error + newFit2.error;
         if (cost < minCost) {
           minCost = cost;
           bestBreakpoint = newBreakpoint;
@@ -107,14 +113,25 @@ export function mergeBreakpoints(
   let mergedBreakpoints = [...breakpoints];
   let i = 0;
   while (i < mergedBreakpoints.length) {
-    const currentCost = calculateCost(pixels, mergedBreakpoints, config, cache);
+    const prevBreakpoint = i > 0 ? mergedBreakpoints[i - 1] : 0;
+    const currentBreakpoint = mergedBreakpoints[i];
+    const nextBreakpoint = i < mergedBreakpoints.length - 1
+        ? mergedBreakpoints[i + 1]
+        : pixels.length - 1;
 
-    const testBreakpoints = [...mergedBreakpoints];
-    testBreakpoints.splice(i, 1);
-    const mergedCost = calculateCost(pixels, testBreakpoints, config, cache);
+    const fit1 = cache.get(prevBreakpoint, currentBreakpoint) || fitPixelRange(pixels, { start: prevBreakpoint, end: currentBreakpoint });
+    const fit2 = cache.get(currentBreakpoint, nextBreakpoint) || fitPixelRange(pixels, { start: currentBreakpoint, end: nextBreakpoint });
+    const mergedFit = cache.get(prevBreakpoint, nextBreakpoint) || fitPixelRange(pixels, { start: prevBreakpoint, end: nextBreakpoint });
 
-    if (mergedCost < currentCost) {
-      mergedBreakpoints = testBreakpoints;
+    if (fit1 && fit2 && mergedFit) {
+      const currentCost = fit1.error + fit2.error + config.segmentPenalty;
+      const mergedCost = mergedFit.error;
+
+      if (mergedCost < currentCost) {
+        mergedBreakpoints.splice(i, 1);
+      } else {
+        i++;
+      }
     } else {
       i++;
     }
