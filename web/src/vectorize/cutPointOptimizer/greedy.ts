@@ -8,13 +8,13 @@ import type { CutPointOptimizerConfig } from "./types.ts";
  * @param pixels The array of all points.
  * @param start The starting index of the segment.
  * @param end The ending index of the segment.
- * @returns The index of the most distant point and the squared distance.
+ * @returns The index of the most distant point.
  */
 function findFurthestPoint(
   pixels: Point[],
   start: number,
   end: number,
-): { index: number; distanceSq: number } {
+): number {
   let maxDistSq = 0;
   let furthestIndex = -1;
   const startPoint = pixels[start];
@@ -28,11 +28,11 @@ function findFurthestPoint(
     }
   }
 
-  return { index: furthestIndex, distanceSq: maxDistSq };
+  return furthestIndex;
 }
 
 /**
- * Finds initial breakpoints using a greedy recursive splitting approach based on the Douglas-Peucker algorithm.
+ * Finds initial breakpoints using a hybrid greedy recursive splitting approach.
  *
  * @param pixels The array of points representing the pixel chain.
  * @param config The optimizer configuration.
@@ -50,19 +50,18 @@ export function findInitialBreakpoints(
       return;
     }
 
-    const { index: furthestIndex, distanceSq } = findFurthestPoint(
-      pixels,
-      start,
-      end,
-    );
+    const fit = fitPixelRange(pixels, { start, end });
+    if (!fit || fit.error < config.maxSegmentError) {
+      return;
+    }
 
-    // The threshold in Douglas-Peucker is a distance, not an error. We'll use the square root of maxSegmentError.
-    if (Math.sqrt(distanceSq) > config.maxSegmentError) {
-      if (furthestIndex !== -1) {
-        breakpoints.add(furthestIndex);
-        recursiveSplit(start, furthestIndex);
-        recursiveSplit(furthestIndex, end);
-      }
+    // If the fit is poor, fall back to Douglas-Peucker to find the split point.
+    const furthestIndex = findFurthestPoint(pixels, start, end);
+
+    if (furthestIndex !== -1) {
+      breakpoints.add(furthestIndex);
+      recursiveSplit(start, furthestIndex);
+      recursiveSplit(furthestIndex, end);
     }
   }
 
