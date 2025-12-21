@@ -76,11 +76,20 @@ export function breakpointsToSegments(
 ): Segment[] {
   const segments: Segment[] = [];
   let start = 0;
+  const JUNCTION_MARGIN = 2; // Number of pixels to exclude on either side of a breakpoint.
 
   const fullBreakpoints = [...breakpoints, pixels.length - 1];
 
   for (const end of fullBreakpoints) {
-    const fit = fitPixelRange(pixels, { start, end });
+    const fitStart = start === 0 ? start : start + JUNCTION_MARGIN;
+    const fitEnd = end === pixels.length - 1 ? end : end - JUNCTION_MARGIN;
+
+    if (fitEnd < fitStart) {
+        start = end;
+        continue;
+    }
+
+    const fit = fitPixelRange(pixels, { start: fitStart, end: fitEnd });
     if (fit) {
       segments.push(fit.segment);
     }
