@@ -134,29 +134,28 @@ export function renderVectorizedToSVG(
           d += `A ${r} ${r} 0 1 0 ${(cx + r) + 0.5} ${cy + 0.5} `;
         } else if (seg.type === "arc") {
           const r = seg.arc.radius;
-          const isFullCircle = Math.abs(seg.start.x - seg.end.x) < 1e-4 &&
-            Math.abs(seg.start.y - seg.end.y) < 1e-4;
+          const sweepAngle = Math.abs(seg.arc.endAngle - seg.arc.startAngle);
+          const isNearFullCircle = sweepAngle > 1.9 * Math.PI;
 
-          if (isFullCircle) {
-            // For a full circle, split into two 180° arcs
+          if (isNearFullCircle) {
+            // For near-complete circles (sweep > ~340°), split into two arcs
             // First arc: start -> opposite point
             const angle = seg.arc.startAngle;
             const midAngle = angle + (seg.arc.clockwise ? -Math.PI : Math.PI);
             const midX = seg.arc.center.x + r * Math.cos(midAngle);
             const midY = seg.arc.center.y + r * Math.sin(midAngle);
 
-            // First semicircle (large arc)
+            // First semicircle
             d += `A ${r} ${r} 0 1 ${seg.arc.clockwise ? 1 : 0} ${midX + 0.5} ${
               midY + 0.5
             } `;
-            // Second semicircle (large arc) back to start
+            // Second semicircle to end point
             d += `A ${r} ${r} 0 1 ${seg.arc.clockwise ? 1 : 0} ${
-              seg.start.x + 0.5
-            } ${seg.start.y + 0.5} `;
+              seg.end.x + 0.5
+            } ${seg.end.y + 0.5} `;
           } else {
             // Regular arc
-            const largeArc =
-              Math.abs(seg.arc.endAngle - seg.arc.startAngle) > Math.PI ? 1 : 0;
+            const largeArc = sweepAngle > Math.PI ? 1 : 0;
             const sweep = seg.arc.clockwise ? 1 : 0;
             d += `A ${r} ${r} 0 ${largeArc} ${sweep} ${seg.end.x + 0.5} ${
               seg.end.y + 0.5

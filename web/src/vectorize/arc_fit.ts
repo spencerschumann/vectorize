@@ -129,23 +129,41 @@ export function fitCircle(points: Point[]): ArcFitResult | null {
   // In Y-down screen coords: cross > 0 => Clockwise
   const clockwise = cross(v1, v2) > 0;
 
-  // Minor signed delta from start to end in range [-π, π]
-  let signedDelta = normalizeAngle(endAngleRaw - startAngle);
-  // Adjust sign to match direction
-  if (clockwise && signedDelta > 0) signedDelta -= 2 * Math.PI;
-  if (!clockwise && signedDelta < 0) signedDelta += 2 * Math.PI;
+  // Compute cw/ccw deltas and choose minor/major using mid-point
+  const twoPi = 2 * Math.PI;
+  let deltaCw = ((startAngle - endAngleRaw) % twoPi + twoPi) % twoPi; // [0, 2π)
+  let deltaCcw = ((endAngleRaw - startAngle) % twoPi + twoPi) % twoPi; // [0, 2π)
 
-  // Determine whether the mid point lies on the minor arc; if not, take major arc
-  const minorArc = {
-    center,
-    radius,
-    startAngle,
-    endAngle: startAngle + signedDelta,
-    clockwise,
-  };
-  const midOnMinor = isAngleInArc(minorArc, midAngle);
-  if (!midOnMinor) {
-    signedDelta += clockwise ? -2 * Math.PI : 2 * Math.PI;
+  // Handle near-zero deltas (near-complete circles): use 2-pixel arc-length threshold
+  const threshold = 2.0 / radius; // Convert pixels to radians
+  if (deltaCw < threshold) deltaCw = twoPi;
+  if (deltaCcw < threshold) deltaCcw = twoPi;
+
+  let signedDelta: number;
+  if (clockwise) {
+    const testArc = {
+      center,
+      radius,
+      startAngle,
+      endAngle: startAngle - deltaCw,
+      clockwise: true,
+    };
+    const midOnMinor = deltaCw >= twoPi - threshold ||
+      isAngleInArc(testArc, midAngle);
+    const sweep = midOnMinor ? deltaCw : (twoPi - deltaCw);
+    signedDelta = -sweep;
+  } else {
+    const testArc = {
+      center,
+      radius,
+      startAngle,
+      endAngle: startAngle + deltaCcw,
+      clockwise: false,
+    };
+    const midOnMinor = deltaCcw >= twoPi - threshold ||
+      isAngleInArc(testArc, midAngle);
+    const sweep = midOnMinor ? deltaCcw : (twoPi - deltaCcw);
+    signedDelta = sweep;
   }
 
   const endAngle = startAngle + signedDelta;
@@ -296,20 +314,39 @@ export class IncrementalCircleFit {
     const v2 = { x: endPt.x - midPt.x, y: endPt.y - midPt.y };
     const clockwise = cross(v1, v2) > 0;
 
-    let signedDelta = normalizeAngle(endAngleRaw - startAngle);
-    if (clockwise && signedDelta > 0) signedDelta -= 2 * Math.PI;
-    if (!clockwise && signedDelta < 0) signedDelta += 2 * Math.PI;
+    const twoPi = 2 * Math.PI;
+    let deltaCw = ((startAngle - endAngleRaw) % twoPi + twoPi) % twoPi;
+    let deltaCcw = ((endAngleRaw - startAngle) % twoPi + twoPi) % twoPi;
 
-    const minorArc = {
-      center,
-      radius,
-      startAngle,
-      endAngle: startAngle + signedDelta,
-      clockwise,
-    };
-    const midOnMinor = isAngleInArc(minorArc, midAngle);
-    if (!midOnMinor) {
-      signedDelta += clockwise ? -2 * Math.PI : 2 * Math.PI;
+    const threshold = 2.0 / radius; // Convert 2-pixel arc-length to radians
+    if (deltaCw < threshold) deltaCw = twoPi;
+    if (deltaCcw < threshold) deltaCcw = twoPi;
+
+    let signedDelta: number;
+    if (clockwise) {
+      const testArc = {
+        center,
+        radius,
+        startAngle,
+        endAngle: startAngle - deltaCw,
+        clockwise: true,
+      };
+      const midOnMinor = deltaCw >= twoPi - threshold ||
+        isAngleInArc(testArc, midAngle);
+      const sweep = midOnMinor ? deltaCw : (twoPi - deltaCw);
+      signedDelta = -sweep;
+    } else {
+      const testArc = {
+        center,
+        radius,
+        startAngle,
+        endAngle: startAngle + deltaCcw,
+        clockwise: false,
+      };
+      const midOnMinor = deltaCcw >= twoPi - threshold ||
+        isAngleInArc(testArc, midAngle);
+      const sweep = midOnMinor ? deltaCcw : (twoPi - deltaCcw);
+      signedDelta = sweep;
     }
 
     const endAngle = startAngle + signedDelta;

@@ -7832,19 +7832,35 @@ function fitCircle(points) {
   const v1 = { x: midPt.x - startPt.x, y: midPt.y - startPt.y };
   const v2 = { x: endPt.x - midPt.x, y: endPt.y - midPt.y };
   const clockwise = cross(v1, v2) > 0;
-  let signedDelta = normalizeAngle(endAngleRaw - startAngle);
-  if (clockwise && signedDelta > 0) signedDelta -= 2 * Math.PI;
-  if (!clockwise && signedDelta < 0) signedDelta += 2 * Math.PI;
-  const minorArc = {
-    center,
-    radius,
-    startAngle,
-    endAngle: startAngle + signedDelta,
-    clockwise
-  };
-  const midOnMinor = isAngleInArc(minorArc, midAngle);
-  if (!midOnMinor) {
-    signedDelta += clockwise ? -2 * Math.PI : 2 * Math.PI;
+  const twoPi = 2 * Math.PI;
+  let deltaCw = ((startAngle - endAngleRaw) % twoPi + twoPi) % twoPi;
+  let deltaCcw = ((endAngleRaw - startAngle) % twoPi + twoPi) % twoPi;
+  const threshold = 2 / radius;
+  if (deltaCw < threshold) deltaCw = twoPi;
+  if (deltaCcw < threshold) deltaCcw = twoPi;
+  let signedDelta;
+  if (clockwise) {
+    const testArc = {
+      center,
+      radius,
+      startAngle,
+      endAngle: startAngle - deltaCw,
+      clockwise: true
+    };
+    const midOnMinor = deltaCw >= twoPi - threshold || isAngleInArc(testArc, midAngle);
+    const sweep = midOnMinor ? deltaCw : twoPi - deltaCw;
+    signedDelta = -sweep;
+  } else {
+    const testArc = {
+      center,
+      radius,
+      startAngle,
+      endAngle: startAngle + deltaCcw,
+      clockwise: false
+    };
+    const midOnMinor = deltaCcw >= twoPi - threshold || isAngleInArc(testArc, midAngle);
+    const sweep = midOnMinor ? deltaCcw : twoPi - deltaCcw;
+    signedDelta = sweep;
   }
   const endAngle = startAngle + signedDelta;
   const sweepAngle = Math.abs(signedDelta);
@@ -8287,16 +8303,17 @@ function renderVectorizedToSVG(image, svgElement, width, height) {
           d += `A ${r} ${r} 0 1 0 ${cx + r + 0.5} ${cy + 0.5} `;
         } else if (seg.type === "arc") {
           const r = seg.arc.radius;
-          const isFullCircle = Math.abs(seg.start.x - seg.end.x) < 1e-4 && Math.abs(seg.start.y - seg.end.y) < 1e-4;
-          if (isFullCircle) {
+          const sweepAngle = Math.abs(seg.arc.endAngle - seg.arc.startAngle);
+          const isNearFullCircle = sweepAngle > 1.9 * Math.PI;
+          if (isNearFullCircle) {
             const angle2 = seg.arc.startAngle;
             const midAngle = angle2 + (seg.arc.clockwise ? -Math.PI : Math.PI);
             const midX = seg.arc.center.x + r * Math.cos(midAngle);
             const midY = seg.arc.center.y + r * Math.sin(midAngle);
             d += `A ${r} ${r} 0 1 ${seg.arc.clockwise ? 1 : 0} ${midX + 0.5} ${midY + 0.5} `;
-            d += `A ${r} ${r} 0 1 ${seg.arc.clockwise ? 1 : 0} ${seg.start.x + 0.5} ${seg.start.y + 0.5} `;
+            d += `A ${r} ${r} 0 1 ${seg.arc.clockwise ? 1 : 0} ${seg.end.x + 0.5} ${seg.end.y + 0.5} `;
           } else {
-            const largeArc = Math.abs(seg.arc.endAngle - seg.arc.startAngle) > Math.PI ? 1 : 0;
+            const largeArc = sweepAngle > Math.PI ? 1 : 0;
             const sweep = seg.arc.clockwise ? 1 : 0;
             d += `A ${r} ${r} 0 ${largeArc} ${sweep} ${seg.end.x + 0.5} ${seg.end.y + 0.5} `;
           }
