@@ -220,22 +220,7 @@ Deno.test("simplifyGraph - Circle (Large)", () => {
   console.log("Graph edges:", graph.edges.length);
   console.log("Edge 0 points:", graph.edges[0].points.length);
 
-  const simplified = simplifyGraph(graph, (edgeId, nodes, segments, label) => {
-    if (label === "Initial") {
-      console.log(`\n${label}: ${segments.length} segments`);
-      segments.forEach((s, i) => {
-        const start = nodes[s.startIdx];
-        const end = nodes[s.endIdx];
-        console.log(
-          `  ${i}: sagittaPt=(${s.sagittaPoint.x.toFixed(1)},${
-            s.sagittaPoint.y.toFixed(1)
-          }) start=(${start.x.toFixed(1)},${start.y.toFixed(1)}) end=(${
-            end.x.toFixed(1)
-          },${end.y.toFixed(1)}) pts=${s.points.length}`,
-        );
-      });
-    }
-  });
+  const simplified = simplifyGraph(graph);
 
   // Should be a circle - either as a single arc (360°) or as a "circle" type
   assertEquals(simplified.edges.length, 1);

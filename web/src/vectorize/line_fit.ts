@@ -11,6 +11,8 @@ export interface LineFitResult {
   line: Line;
   /** Root mean square error (perpendicular distance) */
   rmsError: number;
+  /** Maximum squared perpendicular distance for any point */
+  maxErrorSq: number;
   /** Median error */
   medianError: number;
   /** Number of points in the fit */
@@ -92,6 +94,9 @@ export function fitLine(points: Point[]): LineFitResult | null {
   const sumSquaredErrors = errors.reduce((sum, e) => sum + e * e, 0);
   const rmsError = Math.sqrt(sumSquaredErrors / errors.length);
 
+  // Maximum squared error
+  const maxErrorSq = errors.reduce((m, e) => Math.max(m, e * e), 0);
+
   // Calculate median error
   const sortedErrors = [...errors].sort((a, b) => a - b);
   const medianError = sortedErrors[Math.floor(sortedErrors.length / 2)];
@@ -99,6 +104,7 @@ export function fitLine(points: Point[]): LineFitResult | null {
   return {
     line,
     rmsError,
+    maxErrorSq,
     medianError,
     count: points.length,
     errors,
@@ -204,9 +210,12 @@ export class IncrementalLineFit {
     const sortedErrors = [...errors].sort((a, b) => a - b);
     const medianError = sortedErrors[Math.floor(sortedErrors.length / 2)];
 
+    const maxErrorSq = errors.reduce((m, e) => Math.max(m, e * e), 0);
+
     return {
       line,
       rmsError,
+      maxErrorSq,
       medianError,
       count: this.n,
       errors,

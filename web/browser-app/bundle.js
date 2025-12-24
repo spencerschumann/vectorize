@@ -7561,6 +7561,11 @@ function distance(p1, p2) {
   const dy = p2.y - p1.y;
   return Math.sqrt(dx * dx + dy * dy);
 }
+function distanceSquared(p1, p2) {
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  return dx * dx + dy * dy;
+}
 function add(p1, p2) {
   return { x: p1.x + p2.x, y: p1.y + p2.y };
 }
@@ -7586,564 +7591,105 @@ function normalize(p) {
   }
   return { x: p.x / mag, y: p.y / mag };
 }
-
-// src/vectorize/optimizer.ts
-var CONFIG = {
-  LEARNING_RATE: 0.01,
-  ITERATIONS: 50,
-  SPLIT_THRESHOLD: 1,
-  MERGE_THRESHOLD: 0.5,
-  ALIGNMENT_STRENGTH: 0.5,
-  SMOOTHNESS_STRENGTH: 0.2,
-  FIDELITY_WEIGHT: 1,
-  SEGMENT_PENALTY: 10
-};
-function circleFrom3Points(p1, p2, p3) {
-  const startEndDist = distance(p1, p3);
-  if (startEndDist < 1e-6) {
-    const center2 = scale(add(p1, p2), 0.5);
-    const radius2 = distance(p1, p2) / 2;
-    if (radius2 < 1e-6) return null;
-    return { center: center2, radius: radius2 };
-  }
-  const v1 = subtract(p2, p1);
-  const v2 = subtract(p3, p1);
-  const crossProd = cross(v1, v2);
-  if (Math.abs(crossProd) < 1e-6) {
+function angle(p) {
+  return Math.atan2(p.y, p.x);
+}
+function lineLineIntersection(line1, line2, tolerance = 1e-6) {
+  const d1 = line1.direction;
+  const d2 = line2.direction;
+  const crossProduct = cross(d1, d2);
+  if (Math.abs(crossProduct) < tolerance) {
     return null;
   }
-  const ax = p1.x, ay = p1.y;
-  const bx = p2.x, by = p2.y;
-  const cx = p3.x, cy = p3.y;
-  const d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
-  if (Math.abs(d) < 1e-10) {
-    return null;
-  }
-  const ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d;
-  const uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d;
-  const center = { x: ux, y: uy };
-  const radius = distance(center, p1);
-  return { center, radius };
+  const diff = subtract(line2.point, line1.point);
+  const t = cross(diff, d2) / crossProduct;
+  return add(line1.point, scale(d1, t));
 }
-function computeSagitta(start, sagittaPoint, end) {
-  const chord = subtract(end, start);
-  const chordLen = magnitude(chord);
-  if (chordLen < 1e-6) {
-    return distance(start, sagittaPoint);
-  }
-  const midChord = scale(add(start, end), 0.5);
-  const toSagitta = subtract(sagittaPoint, midChord);
-  const normal = { x: -chord.y / chordLen, y: chord.x / chordLen };
-  return dot(toSagitta, normal);
+function angleOnCircle(point, circle) {
+  const toPoint = subtract(point, circle.center);
+  return angle(toPoint);
 }
-function optimizeEdge(edge, initialSegments, onIteration) {
-  let nodes = [];
-  let segments = [];
-  const startP = edge.original.points[0];
-  const endP = edge.original.points[edge.original.points.length - 1];
-  const isClosed = distance(startP, endP) < 1e-4;
-  if (initialSegments && initialSegments.length > 0) {
-    const firstSeg = initialSegments[0];
-    if (firstSeg.type === "circle") {
-      const circleCenter = firstSeg.circle.center;
-      const circleRadius = firstSeg.circle.radius;
-      const circlePoints = firstSeg.points;
-      const p0 = circlePoints[0];
-      const dirToP0 = normalize(subtract(p0, circleCenter));
-      const startOnCircle = add(circleCenter, scale(dirToP0, circleRadius));
-      nodes.push({ x: startOnCircle.x, y: startOnCircle.y, fixed: false });
-      const opposite = add(circleCenter, scale(dirToP0, -circleRadius));
-      segments.push({
-        startIdx: 0,
-        endIdx: 0,
-        // Same node index for full circle
-        sagittaPoint: opposite,
-        points: circlePoints
-      });
+function lineCircleIntersection(line, circle, tolerance = 1e-6) {
+  const toCenter = subtract(circle.center, line.point);
+  const projection = dot(toCenter, line.direction);
+  const closest = add(line.point, scale(line.direction, projection));
+  const distToLine = distance(circle.center, closest);
+  if (distToLine > circle.radius + tolerance) {
+    return [];
+  }
+  if (Math.abs(distToLine - circle.radius) < tolerance) {
+    return [closest];
+  }
+  const halfChord = Math.sqrt(
+    circle.radius * circle.radius - distToLine * distToLine
+  );
+  const offset = scale(line.direction, halfChord);
+  return [
+    subtract(closest, offset),
+    add(closest, offset)
+  ];
+}
+function circleCircleIntersection(c1, c2, tolerance = 1e-6) {
+  const d = distance(c1.center, c2.center);
+  if (d > c1.radius + c2.radius + tolerance || d < Math.abs(c1.radius - c2.radius) - tolerance) {
+    return [];
+  }
+  if (d < tolerance && Math.abs(c1.radius - c2.radius) < tolerance) {
+    return [];
+  }
+  const a = (c1.radius * c1.radius - c2.radius * c2.radius + d * d) / (2 * d);
+  const h = Math.sqrt(c1.radius * c1.radius - a * a);
+  const toC2 = subtract(c2.center, c1.center);
+  const unit = normalize(toC2);
+  const midpoint = add(c1.center, scale(unit, a));
+  if (Math.abs(h) < tolerance) {
+    return [midpoint];
+  }
+  const perpendicular = { x: -unit.y, y: unit.x };
+  const offset = scale(perpendicular, h);
+  return [
+    add(midpoint, offset),
+    subtract(midpoint, offset)
+  ];
+}
+function normalizeAngle(angleRad) {
+  let normalized = angleRad % (2 * Math.PI);
+  if (normalized > Math.PI) normalized -= 2 * Math.PI;
+  if (normalized < -Math.PI) normalized += 2 * Math.PI;
+  return normalized;
+}
+function isAngleInArc(arc, angleRad) {
+  const normalized = normalizeAngle(angleRad);
+  const start = normalizeAngle(arc.startAngle);
+  const end = normalizeAngle(arc.endAngle);
+  if (arc.clockwise) {
+    if (start > end) {
+      return normalized <= start && normalized >= end;
     } else {
-      const firstP = firstSeg.start;
-      nodes.push({ x: firstP.x, y: firstP.y, fixed: false });
-      for (let i = 0; i < initialSegments.length; i++) {
-        const seg = initialSegments[i];
-        if (seg.type === "circle") continue;
-        const segEnd = seg.end;
-        nodes.push({ x: segEnd.x, y: segEnd.y, fixed: false });
-        let sagittaPoint;
-        if (seg.type === "arc") {
-          const midIdx = Math.floor(seg.points.length / 2);
-          sagittaPoint = seg.points[midIdx];
-        } else {
-          sagittaPoint = scale(add(seg.start, seg.end), 0.5);
-        }
-        segments.push({
-          startIdx: i,
-          endIdx: i + 1,
-          sagittaPoint,
-          points: seg.points
-        });
-      }
+      return normalized <= start || normalized >= end;
     }
   } else {
-    nodes.push({ x: startP.x, y: startP.y, fixed: false });
-    nodes.push({ x: endP.x, y: endP.y, fixed: false });
-    const midIdx = Math.floor(edge.original.points.length / 2);
-    const sagittaPoint = edge.original.points[midIdx];
-    segments.push({
-      startIdx: 0,
-      endIdx: 1,
-      sagittaPoint,
-      points: edge.original.points
-    });
-  }
-  if (onIteration) {
-    onIteration(
-      JSON.parse(JSON.stringify(nodes)),
-      JSON.parse(JSON.stringify(segments)),
-      "Initial"
-    );
-  }
-  let changed = true;
-  let loopCount = 0;
-  while (changed && loopCount < 5) {
-    changed = false;
-    loopCount++;
-    optimizeParameters(nodes, segments, isClosed);
-    if (onIteration) {
-      onIteration(
-        JSON.parse(JSON.stringify(nodes)),
-        JSON.parse(JSON.stringify(segments)),
-        `Iteration ${loopCount} - Optimized`
-      );
-    }
-    const newSegments = [];
-    let splitOccurred = false;
-    for (const seg of segments) {
-      const maxErr = getMaxError(seg, nodes);
-      if (maxErr > CONFIG.SPLIT_THRESHOLD && seg.points.length > 4) {
-        const splitRes = splitSegment(seg, nodes);
-        newSegments.push(splitRes.left);
-        newSegments.push(splitRes.right);
-        splitOccurred = true;
-        changed = true;
-      } else {
-        newSegments.push(seg);
-      }
-    }
-    segments = newSegments;
-    if (splitOccurred) {
-      if (onIteration) {
-        onIteration(
-          JSON.parse(JSON.stringify(nodes)),
-          JSON.parse(JSON.stringify(segments)),
-          `Iteration ${loopCount} - Split`
-        );
-      }
-      optimizeParameters(nodes, segments, isClosed);
-      if (onIteration) {
-        onIteration(
-          JSON.parse(JSON.stringify(nodes)),
-          JSON.parse(JSON.stringify(segments)),
-          `Iteration ${loopCount} - Re-optimized`
-        );
-      }
-    }
-    let mergeOccurred = false;
-    let i = 0;
-    while (i < segments.length - 1) {
-      const seg1 = segments[i];
-      const seg2 = segments[i + 1];
-      if (seg1.endIdx === seg2.startIdx) {
-        const start = nodes[seg1.startIdx];
-        const mid = nodes[seg1.endIdx];
-        const end = nodes[seg2.endIdx];
-        const mergedPoints = [...seg1.points, ...seg2.points];
-        const mergedError = getSegmentErrorWithPoints(
-          mergedPoints,
-          start,
-          mid,
-          end
-        );
-        const err1 = getSegmentErrorWithPoints(
-          seg1.points,
-          start,
-          mid,
-          seg1.sagittaPoint
-        );
-        const err2 = getSegmentErrorWithPoints(
-          seg2.points,
-          seg2.sagittaPoint,
-          mid,
-          end
-        );
-        const combinedError = err1 + err2;
-        const segmentCostSavings = CONFIG.SEGMENT_PENALTY;
-        if (mergedError <= combinedError + CONFIG.MERGE_THRESHOLD + segmentCostSavings) {
-          seg1.endIdx = seg2.endIdx;
-          seg1.points = mergedPoints;
-          const midSag1 = computeSagitta(start, seg1.sagittaPoint, mid);
-          const midSag2 = computeSagitta(mid, seg2.sagittaPoint, end);
-          const totalDist = distance(start, mid) + distance(mid, end);
-          const w1 = distance(start, mid) / totalDist;
-          const w2 = distance(mid, end) / totalDist;
-          seg1.sagittaPoint = add(
-            scale(seg1.sagittaPoint, w1),
-            scale(seg2.sagittaPoint, w2)
-          );
-          segments.splice(i + 1, 1);
-          mergeOccurred = true;
-          changed = true;
-        } else {
-          i++;
-        }
-      } else {
-        i++;
-      }
-    }
-    if (mergeOccurred) {
-      if (onIteration) {
-        onIteration(
-          JSON.parse(JSON.stringify(nodes)),
-          JSON.parse(JSON.stringify(segments)),
-          `Iteration ${loopCount} - Merged`
-        );
-      }
-    }
-    for (let i2 = 0; i2 < segments.length; i2++) {
-      const seg = segments[i2];
-      const start = nodes[seg.startIdx];
-      const end = nodes[seg.endIdx];
-      const sagitta = computeSagitta(start, seg.sagittaPoint, end);
-      const chordLen = distance(start, end);
-      if (Math.abs(sagitta) < 0.3 || chordLen > 1e-4 && Math.abs(sagitta) / chordLen < 0.05) {
-        const t = Math.max(
-          0,
-          Math.min(
-            1,
-            dot(
-              subtract(seg.sagittaPoint, start),
-              subtract(end, start)
-            ) / (chordLen * chordLen + 1e-6)
-          )
-        );
-        seg.sagittaPoint = add(start, scale(subtract(end, start), t));
-      }
-    }
-  }
-  optimizeParameters(nodes, segments, isClosed);
-  if (onIteration) {
-    onIteration(
-      JSON.parse(JSON.stringify(nodes)),
-      JSON.parse(JSON.stringify(segments)),
-      "Final"
-    );
-  }
-  return {
-    original: edge.original,
-    segments: convertToSegments(nodes, segments)
-  };
-}
-function optimizeParameters(nodes, segments, isClosed = false) {
-  const MAX_GRAD = 1e3;
-  for (let iter = 0; iter < CONFIG.ITERATIONS; iter++) {
-    for (let ni = 0; ni < nodes.length; ni++) {
-      if (!isFinite(nodes[ni].x) || !isFinite(nodes[ni].y)) {
-        return;
-      }
-    }
-    for (let si = 0; si < segments.length; si++) {
-      const sp = segments[si].sagittaPoint;
-      if (!isFinite(sp.x) || !isFinite(sp.y)) {
-        return;
-      }
-    }
-    const nodeGrads = nodes.map(() => ({ x: 0, y: 0 }));
-    const sagittaGrads = segments.map(() => ({ x: 0, y: 0 }));
-    const h = 0.01;
-    for (let i = 0; i < segments.length; i++) {
-      const seg = segments[i];
-      const pStart = nodes[seg.startIdx];
-      const pEnd = nodes[seg.endIdx];
-      const errBase = getSegmentErrorWithPoints(
-        seg.points,
-        pStart,
-        seg.sagittaPoint,
-        pEnd
-      );
-      const sagPlusX = { ...seg.sagittaPoint, x: seg.sagittaPoint.x + h };
-      const sagMinusX = { ...seg.sagittaPoint, x: seg.sagittaPoint.x - h };
-      const errSagXPlus = getSegmentErrorWithPoints(
-        seg.points,
-        pStart,
-        sagPlusX,
-        pEnd
-      );
-      const errSagXMinus = getSegmentErrorWithPoints(
-        seg.points,
-        pStart,
-        sagMinusX,
-        pEnd
-      );
-      sagittaGrads[i].x += (errSagXPlus - errSagXMinus) / (2 * h) * CONFIG.FIDELITY_WEIGHT;
-      const sagPlusY = { ...seg.sagittaPoint, y: seg.sagittaPoint.y + h };
-      const sagMinusY = { ...seg.sagittaPoint, y: seg.sagittaPoint.y - h };
-      const errSagYPlus = getSegmentErrorWithPoints(
-        seg.points,
-        pStart,
-        sagPlusY,
-        pEnd
-      );
-      const errSagYMinus = getSegmentErrorWithPoints(
-        seg.points,
-        pStart,
-        sagMinusY,
-        pEnd
-      );
-      sagittaGrads[i].y += (errSagYPlus - errSagYMinus) / (2 * h) * CONFIG.FIDELITY_WEIGHT;
-      const isFullCircle = seg.startIdx === seg.endIdx;
-      if (!pStart.fixed) {
-        const pStartXPlus = { ...pStart, x: pStart.x + h };
-        const pStartXMinus = { ...pStart, x: pStart.x - h };
-        const errXPlus = getSegmentErrorWithPoints(
-          seg.points,
-          pStartXPlus,
-          seg.sagittaPoint,
-          isFullCircle ? pStartXPlus : pEnd
-        );
-        const errXMinus = getSegmentErrorWithPoints(
-          seg.points,
-          pStartXMinus,
-          seg.sagittaPoint,
-          isFullCircle ? pStartXMinus : pEnd
-        );
-        nodeGrads[seg.startIdx].x += (errXPlus - errXMinus) / (2 * h) * CONFIG.FIDELITY_WEIGHT;
-        const pStartYPlus = { ...pStart, y: pStart.y + h };
-        const pStartYMinus = { ...pStart, y: pStart.y - h };
-        const errYPlus = getSegmentErrorWithPoints(
-          seg.points,
-          pStartYPlus,
-          seg.sagittaPoint,
-          isFullCircle ? pStartYPlus : pEnd
-        );
-        const errYMinus = getSegmentErrorWithPoints(
-          seg.points,
-          pStartYMinus,
-          seg.sagittaPoint,
-          isFullCircle ? pStartYMinus : pEnd
-        );
-        nodeGrads[seg.startIdx].y += (errYPlus - errYMinus) / (2 * h) * CONFIG.FIDELITY_WEIGHT;
-      }
-      if (!isFullCircle && !pEnd.fixed) {
-        const pEndXPlus = { ...pEnd, x: pEnd.x + h };
-        const pEndXMinus = { ...pEnd, x: pEnd.x - h };
-        const errXPlus = getSegmentErrorWithPoints(
-          seg.points,
-          pStart,
-          seg.sagittaPoint,
-          pEndXPlus
-        );
-        const errXMinus = getSegmentErrorWithPoints(
-          seg.points,
-          pStart,
-          seg.sagittaPoint,
-          pEndXMinus
-        );
-        nodeGrads[seg.endIdx].x += (errXPlus - errXMinus) / (2 * h) * CONFIG.FIDELITY_WEIGHT;
-        const pEndYPlus = { ...pEnd, y: pEnd.y + h };
-        const pEndYMinus = { ...pEnd, y: pEnd.y - h };
-        const errYPlus = getSegmentErrorWithPoints(
-          seg.points,
-          pStart,
-          seg.sagittaPoint,
-          pEndYPlus
-        );
-        const errYMinus = getSegmentErrorWithPoints(
-          seg.points,
-          pStart,
-          seg.sagittaPoint,
-          pEndYMinus
-        );
-        nodeGrads[seg.endIdx].y += (errYPlus - errYMinus) / (2 * h) * CONFIG.FIDELITY_WEIGHT;
-      }
-    }
-    for (let i = 0; i < segments.length; i++) {
-      const seg = segments[i];
-      const pStart = nodes[seg.startIdx];
-      const pEnd = nodes[seg.endIdx];
-      const sagitta = computeSagitta(pStart, seg.sagittaPoint, pEnd);
-      if (Math.abs(sagitta) < 1) {
-        const dx = pEnd.x - pStart.x;
-        const dy = pEnd.y - pStart.y;
-        const len = Math.sqrt(dx * dx + dy * dy);
-        if (len > 1e-4) {
-          if (!pStart.fixed) {
-            const costXPlus = alignmentCost(
-              { ...pStart, x: pStart.x + h },
-              pEnd
-            );
-            const costXMinus = alignmentCost(
-              { ...pStart, x: pStart.x - h },
-              pEnd
-            );
-            nodeGrads[seg.startIdx].x += (costXPlus - costXMinus) / (2 * h) * CONFIG.ALIGNMENT_STRENGTH;
-            const costYPlus = alignmentCost(
-              { ...pStart, y: pStart.y + h },
-              pEnd
-            );
-            const costYMinus = alignmentCost(
-              { ...pStart, y: pStart.y - h },
-              pEnd
-            );
-            nodeGrads[seg.startIdx].y += (costYPlus - costYMinus) / (2 * h) * CONFIG.ALIGNMENT_STRENGTH;
-          }
-          if (!pEnd.fixed) {
-            const costXPlus = alignmentCost(pStart, { ...pEnd, x: pEnd.x + h });
-            const costXMinus = alignmentCost(pStart, {
-              ...pEnd,
-              x: pEnd.x - h
-            });
-            nodeGrads[seg.endIdx].x += (costXPlus - costXMinus) / (2 * h) * CONFIG.ALIGNMENT_STRENGTH;
-            const costYPlus = alignmentCost(pStart, { ...pEnd, y: pEnd.y + h });
-            const costYMinus = alignmentCost(pStart, {
-              ...pEnd,
-              y: pEnd.y - h
-            });
-            nodeGrads[seg.endIdx].y += (costYPlus - costYMinus) / (2 * h) * CONFIG.ALIGNMENT_STRENGTH;
-          }
-        }
-      }
-    }
-    for (let i = 0; i < nodeGrads.length; i++) {
-      nodeGrads[i].x = Math.max(-MAX_GRAD, Math.min(MAX_GRAD, nodeGrads[i].x));
-      nodeGrads[i].y = Math.max(-MAX_GRAD, Math.min(MAX_GRAD, nodeGrads[i].y));
-    }
-    for (let i = 0; i < sagittaGrads.length; i++) {
-      sagittaGrads[i].x = Math.max(
-        -MAX_GRAD,
-        Math.min(MAX_GRAD, sagittaGrads[i].x)
-      );
-      sagittaGrads[i].y = Math.max(
-        -MAX_GRAD,
-        Math.min(MAX_GRAD, sagittaGrads[i].y)
-      );
-    }
-    if (isClosed && nodes.length > 1) {
-      const last = nodes.length - 1;
-      const sumX = nodeGrads[0].x + nodeGrads[last].x;
-      const sumY = nodeGrads[0].y + nodeGrads[last].y;
-      nodeGrads[0].x = sumX;
-      nodeGrads[0].y = sumY;
-      nodeGrads[last].x = sumX;
-      nodeGrads[last].y = sumY;
-    }
-    for (let i = 0; i < nodes.length; i++) {
-      if (!nodes[i].fixed) {
-        nodes[i].x -= nodeGrads[i].x * CONFIG.LEARNING_RATE;
-        nodes[i].y -= nodeGrads[i].y * CONFIG.LEARNING_RATE;
-      }
-    }
-    if (isClosed && nodes.length > 1) {
-      const last = nodes.length - 1;
-      const avgX = (nodes[0].x + nodes[last].x) / 2;
-      const avgY = (nodes[0].y + nodes[last].y) / 2;
-      nodes[0].x = avgX;
-      nodes[0].y = avgY;
-      nodes[last].x = avgX;
-      nodes[last].y = avgY;
-    }
-    for (let i = 0; i < segments.length; i++) {
-      segments[i].sagittaPoint.x -= sagittaGrads[i].x * CONFIG.LEARNING_RATE;
-      segments[i].sagittaPoint.y -= sagittaGrads[i].y * CONFIG.LEARNING_RATE;
-    }
-  }
-}
-function alignmentCost(p1, p2) {
-  const dx = p2.x - p1.x;
-  const dy = p2.y - p1.y;
-  const lenSq = dx * dx + dy * dy;
-  if (lenSq < 1e-6) return 0;
-  return Math.pow(dx * dy / lenSq, 2) * 10;
-}
-function getSegmentErrorWithPoints(points, start, sagittaPoint, end) {
-  let error = 0;
-  const circle = circleFrom3Points(start, sagittaPoint, end);
-  if (!circle) {
-    for (const p of points) {
-      error += distancePointToLineSegmentSq(p, start, end);
-    }
-  } else {
-    for (const p of points) {
-      const d = Math.abs(distance(p, circle.center) - circle.radius);
-      error += d * d;
-    }
-    let lineError = 0;
-    for (const p of points) {
-      lineError += distancePointToLineSegmentSq(p, start, end);
-    }
-    const errorRatio = lineError / (error + 1e-6);
-    if (errorRatio > 0.8) {
-      error *= 0.95;
-    }
-  }
-  return error;
-}
-function getMaxError(seg, nodes) {
-  const start = nodes[seg.startIdx];
-  const end = nodes[seg.endIdx];
-  let maxErr = 0;
-  const circle = circleFrom3Points(start, seg.sagittaPoint, end);
-  if (!circle) {
-    for (const p of seg.points) {
-      const d = Math.sqrt(distancePointToLineSegmentSq(p, start, end));
-      if (d > maxErr) maxErr = d;
-    }
-  } else {
-    for (const p of seg.points) {
-      const d = Math.abs(distance(p, circle.center) - circle.radius);
-      if (d > maxErr) maxErr = d;
-    }
-  }
-  return maxErr;
-}
-function splitSegment(seg, nodes) {
-  const start = nodes[seg.startIdx];
-  const end = nodes[seg.endIdx];
-  let maxErr = -1;
-  let splitIdx = -1;
-  const circle = circleFrom3Points(start, seg.sagittaPoint, end);
-  for (let i = 0; i < seg.points.length; i++) {
-    const p = seg.points[i];
-    let d = 0;
-    if (!circle) {
-      d = Math.sqrt(distancePointToLineSegmentSq(p, start, end));
+    if (start < end) {
+      return normalized >= start && normalized <= end;
     } else {
-      d = Math.abs(distance(p, circle.center) - circle.radius);
-    }
-    if (d > maxErr) {
-      maxErr = d;
-      splitIdx = i;
+      return normalized >= start || normalized <= end;
     }
   }
-  const splitPoint = seg.points[splitIdx];
-  const newNodeIdx = nodes.length;
-  nodes.push({ x: splitPoint.x, y: splitPoint.y, fixed: false });
-  const leftPoints = seg.points.slice(0, splitIdx + 1);
-  const rightPoints = seg.points.slice(splitIdx);
-  const leftMidIdx = Math.floor(leftPoints.length / 2);
-  const rightMidIdx = Math.floor(rightPoints.length / 2);
-  return {
-    left: {
-      startIdx: seg.startIdx,
-      endIdx: newNodeIdx,
-      sagittaPoint: leftPoints[leftMidIdx],
-      points: leftPoints
-    },
-    right: {
-      startIdx: newNodeIdx,
-      endIdx: seg.endIdx,
-      sagittaPoint: rightPoints[rightMidIdx],
-      points: rightPoints
-    }
-  };
+}
+function lineArcIntersection(line, arc, tolerance = 1e-6) {
+  const circleIntersections = lineCircleIntersection(line, arc, tolerance);
+  return circleIntersections.filter((point) => {
+    const angleToPoint = angleOnCircle(point, arc);
+    return isAngleInArc(arc, angleToPoint);
+  });
+}
+function arcArcIntersection(arc1, arc2, tolerance = 1e-6) {
+  const circleIntersections = circleCircleIntersection(arc1, arc2, tolerance);
+  return circleIntersections.filter((point) => {
+    const angle1 = angleOnCircle(point, arc1);
+    const angle2 = angleOnCircle(point, arc2);
+    return isAngleInArc(arc1, angle1) && isAngleInArc(arc2, angle2);
+  });
 }
 function distancePointToLineSegmentSq(p, a, b) {
   const l2 = distanceSquared(a, b);
@@ -8156,177 +7702,70 @@ function distancePointToLineSegmentSq(p, a, b) {
   };
   return distanceSquared(p, proj);
 }
-function distanceSquared(p1, p2) {
-  const dx = p2.x - p1.x;
-  const dy = p2.y - p1.y;
-  return dx * dx + dy * dy;
-}
-function convertToSegments(nodes, optSegments) {
-  return optSegments.map((seg) => {
-    const start = { x: nodes[seg.startIdx].x, y: nodes[seg.startIdx].y };
-    const end = { x: nodes[seg.endIdx].x, y: nodes[seg.endIdx].y };
-    const sagitta = computeSagitta(start, seg.sagittaPoint, end);
-    const chordLen = distance(start, end);
-    const isLine = Math.abs(sagitta) < 0.5 || chordLen > 1e-4 && Math.abs(sagitta) / chordLen < 0.05;
-    if (isLine) {
-      const dir = chordLen > 1e-6 ? normalize(subtract(end, start)) : { x: 1, y: 0 };
-      return {
-        type: "line",
-        start,
-        end,
-        points: seg.points,
-        line: {
-          point: start,
-          direction: dir
-        }
-      };
-    }
-    const circle = circleFrom3Points(start, seg.sagittaPoint, end);
-    let shouldBeArc = circle && circle.radius < 1e4;
-    if (shouldBeArc && chordLen > 1e-6) {
-      if (circle.radius > 2 * chordLen) {
-        shouldBeArc = false;
-      }
-    }
-    if (!shouldBeArc) {
-      const dir = magnitude(subtract(end, start)) > 1e-6 ? normalize(subtract(end, start)) : { x: 1, y: 0 };
-      return {
-        type: "line",
-        start,
-        end,
-        points: seg.points,
-        line: {
-          point: start,
-          direction: dir
-        }
-      };
-    } else {
-      const startAngle = Math.atan2(
-        start.y - circle.center.y,
-        start.x - circle.center.x
-      );
-      const endAngle = Math.atan2(
-        end.y - circle.center.y,
-        end.x - circle.center.x
-      );
-      const chord = subtract(end, start);
-      const toSagitta = subtract(seg.sagittaPoint, start);
-      const crossProd = cross(chord, toSagitta);
-      const clockwise = crossProd < 0;
-      return {
-        type: "arc",
-        start,
-        end,
-        points: seg.points,
-        arc: {
-          center: circle.center,
-          radius: circle.radius,
-          startAngle,
-          endAngle,
-          clockwise
-        }
-      };
-    }
-  });
-}
 
 // src/vectorize/line_fit.ts
-var IncrementalLineFit = class {
-  n = 0;
-  sumX = 0;
-  sumY = 0;
-  sumXX = 0;
-  sumYY = 0;
-  sumXY = 0;
-  points = [];
-  /**
-   * Add a point to the fit
-   */
-  addPoint(p) {
-    this.n++;
-    this.sumX += p.x;
-    this.sumY += p.y;
-    this.sumXX += p.x * p.x;
-    this.sumYY += p.y * p.y;
-    this.sumXY += p.x * p.y;
-    this.points.push(p);
+function fitLine(points) {
+  if (points.length < 2) {
+    return null;
   }
-  /**
-   * Get the number of points in the fit
-   */
-  getCount() {
-    return this.n;
+  let sumX = 0;
+  let sumY = 0;
+  for (const p of points) {
+    sumX += p.x;
+    sumY += p.y;
   }
-  /**
-   * Get all points in the fit
-   */
-  getPoints() {
-    return [...this.points];
+  const centroid = {
+    x: sumX / points.length,
+    y: sumY / points.length
+  };
+  let covXX = 0;
+  let covYY = 0;
+  let covXY = 0;
+  for (const p of points) {
+    const dx = p.x - centroid.x;
+    const dy = p.y - centroid.y;
+    covXX += dx * dx;
+    covYY += dy * dy;
+    covXY += dx * dy;
   }
-  /**
-   * Get the current fit result
-   * Returns null if fewer than 2 points
-   */
-  getFit() {
-    if (this.n < 2) {
-      return null;
-    }
-    const centroid = {
-      x: this.sumX / this.n,
-      y: this.sumY / this.n
-    };
-    const covXX = this.sumXX - this.sumX * this.sumX / this.n;
-    const covYY = this.sumYY - this.sumY * this.sumY / this.n;
-    const covXY = this.sumXY - this.sumX * this.sumY / this.n;
-    const trace = covXX + covYY;
-    const det = covXX * covYY - covXY * covXY;
-    const discriminant = trace * trace - 4 * det;
-    if (discriminant < 0 || trace < 1e-10) {
-      return null;
-    }
-    const lambda1 = (trace + Math.sqrt(discriminant)) / 2;
-    let direction;
-    if (Math.abs(covXY) > 1e-10) {
-      direction = normalize({ x: lambda1 - covYY, y: covXY });
-    } else if (covXX > covYY) {
-      direction = { x: 1, y: 0 };
-    } else {
-      direction = { x: 0, y: 1 };
-    }
-    const line = {
-      point: centroid,
-      direction
-    };
-    const errors = this.points.map((p) => {
-      const dx = p.x - centroid.x;
-      const dy = p.y - centroid.y;
-      return Math.abs(dx * direction.y - dy * direction.x);
-    });
-    const sumSquaredErrors = errors.reduce((sum, e) => sum + e * e, 0);
-    const rmsError = Math.sqrt(sumSquaredErrors / errors.length);
-    const sortedErrors = [...errors].sort((a, b) => a - b);
-    const medianError = sortedErrors[Math.floor(sortedErrors.length / 2)];
-    return {
-      line,
-      rmsError,
-      medianError,
-      count: this.n,
-      errors
-    };
+  const trace = covXX + covYY;
+  const det = covXX * covYY - covXY * covXY;
+  const discriminant = trace * trace - 4 * det;
+  if (discriminant < 0 || trace < 1e-10) {
+    return null;
   }
-  /**
-   * Reset the fit to start over
-   */
-  reset() {
-    this.n = 0;
-    this.sumX = 0;
-    this.sumY = 0;
-    this.sumXX = 0;
-    this.sumYY = 0;
-    this.sumXY = 0;
-    this.points = [];
+  const lambda1 = (trace + Math.sqrt(discriminant)) / 2;
+  let direction;
+  if (Math.abs(covXY) > 1e-10) {
+    direction = normalize({ x: lambda1 - covYY, y: covXY });
+  } else if (covXX > covYY) {
+    direction = { x: 1, y: 0 };
+  } else {
+    direction = { x: 0, y: 1 };
   }
-};
+  const line = {
+    point: centroid,
+    direction
+  };
+  const errors = points.map((p) => {
+    const dx = p.x - centroid.x;
+    const dy = p.y - centroid.y;
+    return Math.abs(dx * direction.y - dy * direction.x);
+  });
+  const sumSquaredErrors = errors.reduce((sum, e) => sum + e * e, 0);
+  const rmsError = Math.sqrt(sumSquaredErrors / errors.length);
+  const maxErrorSq = errors.reduce((m, e) => Math.max(m, e * e), 0);
+  const sortedErrors = [...errors].sort((a, b) => a - b);
+  const medianError = sortedErrors[Math.floor(sortedErrors.length / 2)];
+  return {
+    line,
+    rmsError,
+    maxErrorSq,
+    medianError,
+    count: points.length,
+    errors
+  };
+}
 
 // src/vectorize/arc_fit.ts
 function fitCircle(points) {
@@ -8381,23 +7820,38 @@ function fitCircle(points) {
   const errors = points.map((p) => Math.abs(distance(p, center) - radius));
   const sumSquaredErrors = errors.reduce((sum, e) => sum + e * e, 0);
   const rmsError = Math.sqrt(sumSquaredErrors / errors.length);
+  const maxErrorSq = errors.reduce((m, e) => Math.max(m, e * e), 0);
   const sortedErrors = [...errors].sort((a, b) => a - b);
   const medianError = sortedErrors[Math.floor(sortedErrors.length / 2)];
-  const angles = points.map((p) => Math.atan2(p.y - center.y, p.x - center.x));
-  const startAngle = angles[0];
-  const endAngle = angles[angles.length - 1];
-  let totalTurn = 0;
-  for (let i = 1; i < angles.length; i++) {
-    let delta = angles[i] - angles[i - 1];
-    while (delta > Math.PI) delta -= 2 * Math.PI;
-    while (delta < -Math.PI) delta += 2 * Math.PI;
-    totalTurn += delta;
+  const startPt = points[0];
+  const endPt = points[points.length - 1];
+  const midPt = points[Math.floor(points.length / 2)];
+  const startAngle = Math.atan2(startPt.y - center.y, startPt.x - center.x);
+  const endAngleRaw = Math.atan2(endPt.y - center.y, endPt.x - center.x);
+  const midAngle = Math.atan2(midPt.y - center.y, midPt.x - center.x);
+  const v1 = { x: midPt.x - startPt.x, y: midPt.y - startPt.y };
+  const v2 = { x: endPt.x - midPt.x, y: endPt.y - midPt.y };
+  const clockwise = cross(v1, v2) > 0;
+  let signedDelta = normalizeAngle(endAngleRaw - startAngle);
+  if (clockwise && signedDelta > 0) signedDelta -= 2 * Math.PI;
+  if (!clockwise && signedDelta < 0) signedDelta += 2 * Math.PI;
+  const minorArc = {
+    center,
+    radius,
+    startAngle,
+    endAngle: startAngle + signedDelta,
+    clockwise
+  };
+  const midOnMinor = isAngleInArc(minorArc, midAngle);
+  if (!midOnMinor) {
+    signedDelta += clockwise ? -2 * Math.PI : 2 * Math.PI;
   }
-  const clockwise = totalTurn < 0;
-  const sweepAngle = Math.abs(totalTurn);
+  const endAngle = startAngle + signedDelta;
+  const sweepAngle = Math.abs(signedDelta);
   return {
     circle,
     rmsError,
+    maxErrorSq,
     medianError,
     count: points.length,
     errors,
@@ -8407,289 +7861,351 @@ function fitCircle(points) {
     clockwise
   };
 }
-var IncrementalCircleFit = class {
-  n = 0;
-  sumX = 0;
-  sumY = 0;
-  sumXX = 0;
-  sumYY = 0;
-  sumXY = 0;
-  sumXXX = 0;
-  sumXXY = 0;
-  sumXYY = 0;
-  sumYYY = 0;
-  points = [];
-  /**
-   * Add a point to the fit
-   */
-  addPoint(p) {
-    this.n++;
-    this.sumX += p.x;
-    this.sumY += p.y;
-    this.sumXX += p.x * p.x;
-    this.sumYY += p.y * p.y;
-    this.sumXY += p.x * p.y;
-    this.sumXXX += p.x * p.x * p.x;
-    this.sumXXY += p.x * p.x * p.y;
-    this.sumXYY += p.x * p.y * p.y;
-    this.sumYYY += p.y * p.y * p.y;
-    this.points.push(p);
+
+// src/vectorize/cutPointOptimizer/fitting.ts
+function fitPixelRange(pixels, range) {
+  const segmentPixels = pixels.slice(range.start, range.end + 1);
+  if (segmentPixels.length < 2) {
+    return null;
   }
-  /**
-   * Get the number of points in the fit
-   */
-  getCount() {
-    return this.n;
-  }
-  /**
-   * Get all points in the fit
-   */
-  getPoints() {
-    return [...this.points];
-  }
-  /**
-   * Get the current fit result
-   * Returns null if fewer than 3 points
-   */
-  getFit() {
-    if (this.n < 3) {
-      return null;
+  const startPoint = segmentPixels[0];
+  const endPoint = segmentPixels[segmentPixels.length - 1];
+  if (segmentPixels.length < 3) {
+    const lineFit2 = fitLine(segmentPixels);
+    if (!lineFit2) {
+      return {
+        segment: {
+          type: "line",
+          start: startPoint,
+          end: endPoint,
+          points: segmentPixels,
+          line: { point: startPoint, direction: { x: 0, y: 0 } }
+        },
+        error: 0,
+        maxErrorSq: 0,
+        pixelRange: range
+      };
     }
-    const meanX = this.sumX / this.n;
-    const meanY = this.sumY / this.n;
-    let Mxx = 0, Mxy = 0, Myy = 0;
-    let Mxz = 0, Myz = 0;
-    for (const p of this.points) {
-      const x = p.x - meanX;
-      const y = p.y - meanY;
-      const z = x * x + y * y;
-      Mxx += x * x;
-      Mxy += x * y;
-      Myy += y * y;
-      Mxz += x * z;
-      Myz += y * z;
-    }
-    Mxx /= this.n;
-    Mxy /= this.n;
-    Myy /= this.n;
-    Mxz /= this.n;
-    Myz /= this.n;
-    const det = Mxx * Myy - Mxy * Mxy;
-    if (Math.abs(det) < 1e-10) {
-      return null;
-    }
-    const cx = (Mxz * Myy - Myz * Mxy) / (2 * det);
-    const cy = (Myz * Mxx - Mxz * Mxy) / (2 * det);
-    const center = {
-      x: cx + meanX,
-      y: cy + meanY
-    };
-    const radiusSquared = cx * cx + cy * cy + (Mxx + Myy);
-    if (radiusSquared <= 0) {
-      return null;
-    }
-    const radius = Math.sqrt(radiusSquared);
-    const circle = { center, radius };
-    const errors = this.points.map(
-      (p) => Math.abs(distance(p, center) - radius)
-    );
-    const sumSquaredErrors = errors.reduce((sum, e) => sum + e * e, 0);
-    const rmsError = Math.sqrt(sumSquaredErrors / errors.length);
-    const sortedErrors = [...errors].sort((a, b) => a - b);
-    const medianError = sortedErrors[Math.floor(sortedErrors.length / 2)];
-    const angles = this.points.map(
-      (p) => Math.atan2(p.y - center.y, p.x - center.x)
-    );
-    const startAngle = angles[0];
-    const endAngle = angles[angles.length - 1];
-    let totalTurn = 0;
-    for (let i = 1; i < angles.length; i++) {
-      let delta = angles[i] - angles[i - 1];
-      while (delta > Math.PI) delta -= 2 * Math.PI;
-      while (delta < -Math.PI) delta += 2 * Math.PI;
-      totalTurn += delta;
-    }
-    const clockwise = totalTurn < 0;
-    const sweepAngle = Math.abs(totalTurn);
+    const error = lineFit2.rmsError * lineFit2.rmsError * lineFit2.count;
     return {
-      circle,
-      rmsError,
-      medianError,
-      count: this.n,
-      errors,
-      startAngle,
-      endAngle,
-      sweepAngle,
-      clockwise
+      segment: {
+        type: "line",
+        start: startPoint,
+        end: endPoint,
+        points: segmentPixels,
+        line: lineFit2.line
+      },
+      error,
+      maxErrorSq: lineFit2.maxErrorSq,
+      pixelRange: range
     };
   }
-  /**
-   * Reset the fit to start over
-   */
-  reset() {
-    this.n = 0;
-    this.sumX = 0;
-    this.sumY = 0;
-    this.sumXX = 0;
-    this.sumYY = 0;
-    this.sumXY = 0;
-    this.sumXXX = 0;
-    this.sumXXY = 0;
-    this.sumXYY = 0;
-    this.sumYYY = 0;
-    this.points = [];
+  const lineFit = fitLine(segmentPixels);
+  const arcFit = fitCircle(segmentPixels);
+  const lineError = lineFit ? lineFit.rmsError * lineFit.rmsError * lineFit.count : Infinity;
+  const arcError = arcFit ? arcFit.rmsError * arcFit.rmsError * arcFit.count : Infinity;
+  if (!lineFit && !arcFit) {
+    return null;
   }
-};
-function percentile(values, p) {
-  if (values.length === 0) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const index = Math.floor(sorted.length * p);
-  return sorted[Math.min(index, sorted.length - 1)];
+  if (lineError <= arcError) {
+    return {
+      segment: {
+        type: "line",
+        start: startPoint,
+        end: endPoint,
+        points: segmentPixels,
+        line: lineFit.line
+      },
+      error: lineError,
+      maxErrorSq: lineFit.maxErrorSq,
+      pixelRange: range
+    };
+  } else {
+    const chordLength = distance(startPoint, endPoint);
+    if (arcFit.sweepAngle < 1 && arcFit.circle.radius > 1e3 * chordLength && lineFit) {
+      return {
+        segment: {
+          type: "line",
+          start: startPoint,
+          end: endPoint,
+          points: segmentPixels,
+          line: lineFit.line
+        },
+        error: lineError,
+        maxErrorSq: lineFit.maxErrorSq,
+        pixelRange: range
+      };
+    }
+    return {
+      segment: {
+        type: "arc",
+        start: startPoint,
+        end: endPoint,
+        points: segmentPixels,
+        arc: {
+          center: arcFit.circle.center,
+          radius: arcFit.circle.radius,
+          startAngle: arcFit.startAngle,
+          endAngle: arcFit.endAngle,
+          clockwise: arcFit.clockwise
+        }
+      },
+      error: arcError,
+      maxErrorSq: arcFit.maxErrorSq,
+      pixelRange: range
+    };
+  }
 }
 
-// src/vectorize/simplifier.ts
-function segmentEdge(points) {
-  const segments = [];
-  let startIndex = 0;
-  const MEDIAN_TOLERANCE = 1.5;
-  const P90_TOLERANCE = 3;
-  const isClosedLoop = points.length >= 10 && distance(points[0], points[points.length - 1]) < 2;
-  if (isClosedLoop) {
-    const circleFit = fitCircle(points);
-    if (circleFit) {
-      const p90 = percentile(circleFit.errors, 0.9);
-      if (circleFit.medianError <= MEDIAN_TOLERANCE && p90 <= P90_TOLERANCE) {
-        return [{
-          type: "circle",
-          circle: circleFit.circle,
-          points
-        }];
-      }
+// src/vectorize/cutPointOptimizer/greedy.ts
+function findFurthestPoint(pixels, start, end) {
+  let maxDistSq = 0;
+  let furthestIndex = -1;
+  const startPoint = pixels[start];
+  const endPoint = pixels[end];
+  for (let i = start + 1; i < end; i++) {
+    const distSq = distancePointToLineSegmentSq(
+      pixels[i],
+      startPoint,
+      endPoint
+    );
+    if (distSq > maxDistSq) {
+      maxDistSq = distSq;
+      furthestIndex = i;
     }
   }
-  while (startIndex < points.length - 1) {
-    let bestEndIndex = startIndex + 1;
-    let bestType = "line";
-    let bestLineFit = null;
-    let bestArcFit = null;
-    const lineFit = new IncrementalLineFit();
-    const arcFit = new IncrementalCircleFit();
-    lineFit.addPoint(points[startIndex]);
-    arcFit.addPoint(points[startIndex]);
-    for (let i = startIndex + 1; i < points.length; i++) {
-      const p = points[i];
-      lineFit.addPoint(p);
-      arcFit.addPoint(p);
-      const count = i - startIndex + 1;
-      let lValid = false;
-      let aValid = false;
-      let lFit = null;
-      let aFit = null;
-      if (count >= 2) {
-        lFit = lineFit.getFit();
-        if (lFit) {
-          const p90 = percentile(lFit.errors, 0.9);
-          if (lFit.medianError <= MEDIAN_TOLERANCE && p90 <= P90_TOLERANCE) {
-            lValid = true;
-          }
+  return furthestIndex;
+}
+function findInitialBreakpoints(pixels, config) {
+  const breakpoints = /* @__PURE__ */ new Set();
+  function recursiveSplit(start, end) {
+    const segmentLength = end - start + 1;
+    if (segmentLength < config.minSegmentLength) {
+      return;
+    }
+    const fit = fitPixelRange(pixels, { start, end });
+    if (!fit) return;
+    if (fit.maxErrorSq < config.maxSegmentError) return;
+    const furthestIndex = findFurthestPoint(pixels, start, end);
+    if (furthestIndex !== -1) {
+      breakpoints.add(furthestIndex);
+      recursiveSplit(start, furthestIndex);
+      recursiveSplit(furthestIndex, end);
+    }
+  }
+  recursiveSplit(0, pixels.length - 1);
+  return Array.from(breakpoints).sort((a, b) => a - b);
+}
+
+// src/vectorize/cutPointOptimizer/refine.ts
+function refineBreakpoints(pixels, breakpoints, config, cache) {
+  let refinedBreakpoints = [...breakpoints];
+  for (let i = 0; i < config.maxIterations; i++) {
+    let changed = false;
+    for (let j = 0; j < refinedBreakpoints.length; j++) {
+      const currentBreakpoint = refinedBreakpoints[j];
+      const prevBreakpoint = j > 0 ? refinedBreakpoints[j - 1] : 0;
+      const nextBreakpoint = j < refinedBreakpoints.length - 1 ? refinedBreakpoints[j + 1] : pixels.length - 1;
+      let bestBreakpoint = currentBreakpoint;
+      const fit1 = cache.get(prevBreakpoint, currentBreakpoint) || fitPixelRange(pixels, { start: prevBreakpoint, end: currentBreakpoint });
+      const fit2 = cache.get(currentBreakpoint, nextBreakpoint) || fitPixelRange(pixels, { start: currentBreakpoint, end: nextBreakpoint });
+      if (!fit1 || !fit2) continue;
+      let minCost = fit1.error + fit2.error;
+      const window2 = config.refinementWindow;
+      for (let offset = -window2; offset <= window2; offset++) {
+        if (offset === 0) continue;
+        const newBreakpoint = currentBreakpoint + offset;
+        if (newBreakpoint <= prevBreakpoint + config.minSegmentLength || newBreakpoint >= nextBreakpoint - config.minSegmentLength) {
+          continue;
+        }
+        const newFit1 = cache.get(prevBreakpoint, newBreakpoint) || fitPixelRange(pixels, { start: prevBreakpoint, end: newBreakpoint });
+        const newFit2 = cache.get(newBreakpoint, nextBreakpoint) || fitPixelRange(pixels, { start: newBreakpoint, end: nextBreakpoint });
+        if (!newFit1 || !newFit2) continue;
+        const cost = newFit1.error + newFit2.error;
+        if (cost < minCost) {
+          minCost = cost;
+          bestBreakpoint = newBreakpoint;
+          changed = true;
         }
       }
-      if (count >= 3) {
-        aFit = arcFit.getFit();
-        if (aFit) {
-          const p90 = percentile(aFit.errors, 0.9);
-          const errOk = aFit.medianError <= MEDIAN_TOLERANCE && p90 <= P90_TOLERANCE;
-          const sweepOk = aFit.sweepAngle < 2 * Math.PI - 0.2;
-          if (errOk && sweepOk) {
-            aValid = true;
-          }
-        }
-      }
-      if (!lValid && !aValid) {
-        break;
-      }
-      bestEndIndex = i;
-      if (lValid && aValid) {
-        if (aFit.rmsError < lFit.rmsError * 0.8) {
-          bestType = "arc";
-          bestArcFit = aFit;
-          bestLineFit = null;
-        } else {
-          bestType = "line";
-          bestLineFit = lFit;
-          bestArcFit = null;
-        }
-      } else if (lValid) {
-        bestType = "line";
-        bestLineFit = lFit;
-        bestArcFit = null;
+      refinedBreakpoints[j] = bestBreakpoint;
+    }
+    if (!changed) {
+      break;
+    }
+  }
+  return refinedBreakpoints;
+}
+function mergeBreakpoints(pixels, breakpoints, config, cache) {
+  let mergedBreakpoints = [...breakpoints];
+  let i = 0;
+  while (i < mergedBreakpoints.length) {
+    const prevBreakpoint = i > 0 ? mergedBreakpoints[i - 1] : 0;
+    const currentBreakpoint = mergedBreakpoints[i];
+    const nextBreakpoint = i < mergedBreakpoints.length - 1 ? mergedBreakpoints[i + 1] : pixels.length - 1;
+    const fit1 = cache.get(prevBreakpoint, currentBreakpoint) || fitPixelRange(pixels, { start: prevBreakpoint, end: currentBreakpoint });
+    const fit2 = cache.get(currentBreakpoint, nextBreakpoint) || fitPixelRange(pixels, { start: currentBreakpoint, end: nextBreakpoint });
+    const mergedFit = cache.get(prevBreakpoint, nextBreakpoint) || fitPixelRange(pixels, { start: prevBreakpoint, end: nextBreakpoint });
+    if (fit1 && fit2 && mergedFit) {
+      const currentCost = fit1.error + fit2.error + config.segmentPenalty;
+      const mergedCost = mergedFit.error;
+      if (mergedCost < currentCost) {
+        mergedBreakpoints.splice(i, 1);
       } else {
-        bestType = "arc";
-        bestArcFit = aFit;
-        bestLineFit = null;
+        i++;
       }
-    }
-    const startP = points[startIndex];
-    const endP = points[bestEndIndex];
-    const segmentPoints = points.slice(startIndex, bestEndIndex + 1);
-    if (bestType === "line") {
-      if (!bestLineFit) {
-        const dx = endP.x - startP.x;
-        const dy = endP.y - startP.y;
-        const len = Math.sqrt(dx * dx + dy * dy);
-        bestLineFit = {
-          line: { point: startP, direction: { x: dx / len, y: dy / len } },
-          rmsError: 0,
-          medianError: 0,
-          count: 2,
-          errors: [0, 0]
-        };
-      }
-      segments.push({
-        type: "line",
-        line: bestLineFit.line,
-        start: startP,
-        end: endP,
-        points: segmentPoints
-      });
     } else {
-      segments.push({
-        type: "arc",
-        arc: {
-          center: bestArcFit.circle.center,
-          radius: bestArcFit.circle.radius,
-          startAngle: bestArcFit.startAngle,
-          endAngle: bestArcFit.endAngle,
-          clockwise: bestArcFit.clockwise
-        },
-        start: startP,
-        end: endP,
-        points: segmentPoints
-      });
+      i++;
     }
-    startIndex = bestEndIndex;
+  }
+  return mergedBreakpoints;
+}
+
+// src/vectorize/cutPointOptimizer/junctions.ts
+function applyIntersection(seg1, seg2) {
+  if (seg1.type === "circle" || seg2.type === "circle") {
+    return;
+  }
+  let intersection = null;
+  const junctionPoint = seg1.end;
+  if (seg1.type === "line" && seg2.type === "line") {
+    intersection = lineLineIntersection(seg1.line, seg2.line);
+  } else if (seg1.type === "line" && seg2.type === "arc") {
+    const intersections = lineArcIntersection(seg1.line, seg2.arc);
+    intersection = findClosestPoint(junctionPoint, intersections);
+  } else if (seg1.type === "arc" && seg2.type === "line") {
+    const intersections = lineArcIntersection(seg2.line, seg1.arc);
+    intersection = findClosestPoint(junctionPoint, intersections);
+  } else if (seg1.type === "arc" && seg2.type === "arc") {
+    const intersections = arcArcIntersection(seg1.arc, seg2.arc);
+    intersection = findClosestPoint(junctionPoint, intersections);
+  }
+  if (intersection) {
+    if (seg1.type === "line" || seg1.type === "arc") {
+      seg1.end = intersection;
+    }
+    if (seg2.type === "line" || seg2.type === "arc") {
+      seg2.start = intersection;
+    }
+  }
+}
+function findClosestPoint(target, points) {
+  if (points.length === 0) {
+    return null;
+  }
+  let closestPoint = points[0];
+  let minDistance = distance(target, closestPoint);
+  for (let i = 1; i < points.length; i++) {
+    const d = distance(target, points[i]);
+    if (d < minDistance) {
+      minDistance = d;
+      closestPoint = points[i];
+    }
+  }
+  return closestPoint;
+}
+function breakpointsToSegments(pixels, breakpoints, isClosedLoop) {
+  const segments = [];
+  let start = 0;
+  const JUNCTION_MARGIN = 2;
+  const fullBreakpoints = [...breakpoints, pixels.length - 1];
+  for (const end of fullBreakpoints) {
+    const fitStart = start === 0 ? start : start + JUNCTION_MARGIN;
+    const fitEnd = end === pixels.length - 1 ? end : end - JUNCTION_MARGIN;
+    if (fitEnd < fitStart) {
+      start = end;
+      continue;
+    }
+    const fit = fitPixelRange(pixels, { start: fitStart, end: fitEnd });
+    if (fit) {
+      segments.push(fit.segment);
+    }
+    start = end;
+  }
+  if (segments.length > 1) {
+    for (let i = 0; i < segments.length - 1; i++) {
+      applyIntersection(segments[i], segments[i + 1]);
+    }
+    if (isClosedLoop) {
+      applyIntersection(segments[segments.length - 1], segments[0]);
+    }
   }
   return segments;
 }
-function simplifyGraph(graph, onIteration) {
+
+// src/vectorize/cutPointOptimizer/cache.ts
+var FitCache = class {
+  cache = /* @__PURE__ */ new Map();
+  /**
+   * Generates a unique key for a given start and end index.
+   * @param start The start index of the pixel range.
+   * @param end The end index of the pixel range.
+   * @returns A string key.
+   */
+  getKey(start, end) {
+    return `${start}-${end}`;
+  }
+  /**
+   * Retrieves a cached FitResult for a given pixel range.
+   * @param start The start index of the pixel range.
+   * @param end The end index of the pixel range.
+   * @returns The cached FitResult, or undefined if not found.
+   */
+  get(start, end) {
+    return this.cache.get(this.getKey(start, end));
+  }
+  /**
+   * Stores a FitResult in the cache for a given pixel range.
+   * @param start The start index of the pixel range.
+   * @param end The end index of the pixel range.
+   * @param result The FitResult to cache.
+   */
+  set(start, end, result) {
+    this.cache.set(this.getKey(start, end), result);
+  }
+  /**
+   * Clears the entire cache.
+   */
+  clear() {
+    this.cache.clear();
+  }
+};
+
+// src/vectorize/cutPointOptimizer/optimizer.ts
+var DEFAULT_CONFIG = {
+  segmentPenalty: 1,
+  maxSegmentError: 2,
+  minSegmentLength: 3,
+  refinementWindow: 5,
+  maxIterations: 10
+};
+function optimizeWithCutPoints(pixels, isClosedLoop, config) {
+  if (pixels.length < 2) {
+    return [];
+  }
+  const fullConfig = { ...DEFAULT_CONFIG, ...config };
+  const cache = new FitCache();
+  let breakpoints = findInitialBreakpoints(pixels, fullConfig);
+  breakpoints = refineBreakpoints(pixels, breakpoints, fullConfig, cache);
+  breakpoints = mergeBreakpoints(pixels, breakpoints, fullConfig, cache);
+  breakpoints = refineBreakpoints(pixels, breakpoints, fullConfig, cache);
+  return breakpointsToSegments(pixels, breakpoints, isClosedLoop);
+}
+
+// src/vectorize/simplifier.ts
+function simplifyGraph(graph) {
   const simplifiedEdges = [];
   for (const edge of graph.edges) {
     if (edge.points.length < 2) {
       continue;
     }
-    const initialSegments = segmentEdge(edge.points);
-    const initial = {
+    const isClosedLoop = distance(edge.points[0], edge.points[edge.points.length - 1]) < 2;
+    const finalSegments = optimizeWithCutPoints(edge.points, isClosedLoop);
+    const simplified = {
       original: edge,
-      segments: initialSegments
+      segments: finalSegments
     };
-    const optimized = optimizeEdge(
-      initial,
-      initialSegments,
-      (nodes, segments, label) => {
-        if (onIteration) onIteration(edge.id, nodes, segments, label);
-      }
-    );
-    simplifiedEdges.push(optimized);
+    simplifiedEdges.push(simplified);
   }
   return {
     nodes: graph.nodes,
@@ -8773,8 +8289,8 @@ function renderVectorizedToSVG(image, svgElement, width, height) {
           const r = seg.arc.radius;
           const isFullCircle = Math.abs(seg.start.x - seg.end.x) < 1e-4 && Math.abs(seg.start.y - seg.end.y) < 1e-4;
           if (isFullCircle) {
-            const angle = seg.arc.startAngle;
-            const midAngle = angle + (seg.arc.clockwise ? -Math.PI : Math.PI);
+            const angle2 = seg.arc.startAngle;
+            const midAngle = angle2 + (seg.arc.clockwise ? -Math.PI : Math.PI);
             const midX = seg.arc.center.x + r * Math.cos(midAngle);
             const midY = seg.arc.center.y + r * Math.sin(midAngle);
             d += `A ${r} ${r} 0 1 ${seg.arc.clockwise ? 1 : 0} ${midX + 0.5} ${midY + 0.5} `;

@@ -4,13 +4,15 @@
  */
 
 import type { Circle, Point } from "./geometry.ts";
-import { distance } from "./geometry.ts";
+import { cross, distance, isAngleInArc, normalizeAngle } from "./geometry.ts";
 
 export interface ArcFitResult {
   /** The fitted circle */
   circle: Circle;
   /** Root mean square error (radial distance) */
   rmsError: number;
+  /** Maximum squared radial distance for any point */
+  maxErrorSq: number;
   /** Median error */
   medianError: number;
   /** Number of points in the fit */
@@ -106,30 +108,53 @@ export function fitCircle(points: Point[]): ArcFitResult | null {
   const sumSquaredErrors = errors.reduce((sum, e) => sum + e * e, 0);
   const rmsError = Math.sqrt(sumSquaredErrors / errors.length);
 
+  // Maximum squared error
+  const maxErrorSq = errors.reduce((m, e) => Math.max(m, e * e), 0);
+
   const sortedErrors = [...errors].sort((a, b) => a - b);
   const medianError = sortedErrors[Math.floor(sortedErrors.length / 2)];
 
-  // Calculate arc parameters
-  const angles = points.map((p) => Math.atan2(p.y - center.y, p.x - center.x));
-  const startAngle = angles[0];
-  const endAngle = angles[angles.length - 1];
+  // Calculate arc parameters efficiently using start/mid/end points
+  const startPt = points[0];
+  const endPt = points[points.length - 1];
+  const midPt = points[Math.floor(points.length / 2)];
 
-  // Determine if arc is clockwise by checking angle progression
-  let totalTurn = 0;
-  for (let i = 1; i < angles.length; i++) {
-    let delta = angles[i] - angles[i - 1];
-    // Normalize to [-π, π]
-    while (delta > Math.PI) delta -= 2 * Math.PI;
-    while (delta < -Math.PI) delta += 2 * Math.PI;
-    totalTurn += delta;
+  const startAngle = Math.atan2(startPt.y - center.y, startPt.x - center.x);
+  const endAngleRaw = Math.atan2(endPt.y - center.y, endPt.x - center.x);
+  const midAngle = Math.atan2(midPt.y - center.y, midPt.x - center.x);
+
+  // Determine direction (clockwise vs counterclockwise) using local turn
+  const v1 = { x: midPt.x - startPt.x, y: midPt.y - startPt.y };
+  const v2 = { x: endPt.x - midPt.x, y: endPt.y - midPt.y };
+  // In Y-down screen coords: cross > 0 => Clockwise
+  const clockwise = cross(v1, v2) > 0;
+
+  // Minor signed delta from start to end in range [-π, π]
+  let signedDelta = normalizeAngle(endAngleRaw - startAngle);
+  // Adjust sign to match direction
+  if (clockwise && signedDelta > 0) signedDelta -= 2 * Math.PI;
+  if (!clockwise && signedDelta < 0) signedDelta += 2 * Math.PI;
+
+  // Determine whether the mid point lies on the minor arc; if not, take major arc
+  const minorArc = {
+    center,
+    radius,
+    startAngle,
+    endAngle: startAngle + signedDelta,
+    clockwise,
+  };
+  const midOnMinor = isAngleInArc(minorArc, midAngle);
+  if (!midOnMinor) {
+    signedDelta += clockwise ? -2 * Math.PI : 2 * Math.PI;
   }
 
-  const clockwise = totalTurn < 0;
-  const sweepAngle = Math.abs(totalTurn);
+  const endAngle = startAngle + signedDelta;
+  const sweepAngle = Math.abs(signedDelta);
 
   return {
     circle,
     rmsError,
+    maxErrorSq,
     medianError,
     count: points.length,
     errors,
@@ -256,27 +281,44 @@ export class IncrementalCircleFit {
     const sortedErrors = [...errors].sort((a, b) => a - b);
     const medianError = sortedErrors[Math.floor(sortedErrors.length / 2)];
 
-    // Calculate arc parameters
-    const angles = this.points.map((p) =>
-      Math.atan2(p.y - center.y, p.x - center.x)
-    );
-    const startAngle = angles[0];
-    const endAngle = angles[angles.length - 1];
+    const maxErrorSq = errors.reduce((m, e) => Math.max(m, e * e), 0);
 
-    let totalTurn = 0;
-    for (let i = 1; i < angles.length; i++) {
-      let delta = angles[i] - angles[i - 1];
-      while (delta > Math.PI) delta -= 2 * Math.PI;
-      while (delta < -Math.PI) delta += 2 * Math.PI;
-      totalTurn += delta;
+    // Arc parameters from start/mid/end for incrementally collected points
+    const startPt = this.points[0];
+    const endPt = this.points[this.points.length - 1];
+    const midPt = this.points[Math.floor(this.points.length / 2)];
+
+    const startAngle = Math.atan2(startPt.y - center.y, startPt.x - center.x);
+    const endAngleRaw = Math.atan2(endPt.y - center.y, endPt.x - center.x);
+    const midAngle = Math.atan2(midPt.y - center.y, midPt.x - center.x);
+
+    const v1 = { x: midPt.x - startPt.x, y: midPt.y - startPt.y };
+    const v2 = { x: endPt.x - midPt.x, y: endPt.y - midPt.y };
+    const clockwise = cross(v1, v2) > 0;
+
+    let signedDelta = normalizeAngle(endAngleRaw - startAngle);
+    if (clockwise && signedDelta > 0) signedDelta -= 2 * Math.PI;
+    if (!clockwise && signedDelta < 0) signedDelta += 2 * Math.PI;
+
+    const minorArc = {
+      center,
+      radius,
+      startAngle,
+      endAngle: startAngle + signedDelta,
+      clockwise,
+    };
+    const midOnMinor = isAngleInArc(minorArc, midAngle);
+    if (!midOnMinor) {
+      signedDelta += clockwise ? -2 * Math.PI : 2 * Math.PI;
     }
 
-    const clockwise = totalTurn < 0;
-    const sweepAngle = Math.abs(totalTurn);
+    const endAngle = startAngle + signedDelta;
+    const sweepAngle = Math.abs(signedDelta);
 
     return {
       circle,
       rmsError,
+      maxErrorSq,
       medianError,
       count: this.n,
       errors,

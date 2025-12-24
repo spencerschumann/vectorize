@@ -38,6 +38,7 @@ export function fitPixelRange(
           line: { point: startPoint, direction: { x: 0, y: 0 } },
         },
         error: 0,
+        maxErrorSq: 0,
         pixelRange: range,
       };
     }
@@ -51,6 +52,7 @@ export function fitPixelRange(
         line: lineFit.line,
       },
       error: error,
+      maxErrorSq: lineFit.maxErrorSq,
       pixelRange: range,
     };
   }
@@ -82,23 +84,28 @@ export function fitPixelRange(
         line: lineFit!.line,
       },
       error: lineError,
+      maxErrorSq: lineFit!.maxErrorSq,
       pixelRange: range,
     };
   } else {
     // Check for degenerate arcs (huge radius), treat as lines
     const chordLength = distance(startPoint, endPoint);
-    if (arcFit!.circle.radius > 1000 * chordLength && lineFit) {
-        return {
-            segment: {
-              type: "line",
-              start: startPoint,
-              end: endPoint,
-              points: segmentPixels,
-              line: lineFit!.line,
-            },
-            error: lineError,
-            pixelRange: range,
-          };
+    if (
+      arcFit!.sweepAngle < 1 && arcFit!.circle.radius > 1000 * chordLength &&
+      lineFit
+    ) {
+      return {
+        segment: {
+          type: "line",
+          start: startPoint,
+          end: endPoint,
+          points: segmentPixels,
+          line: lineFit!.line,
+        },
+        error: lineError,
+        maxErrorSq: lineFit!.maxErrorSq,
+        pixelRange: range,
+      };
     }
 
     return {
@@ -116,6 +123,7 @@ export function fitPixelRange(
         },
       },
       error: arcError,
+      maxErrorSq: arcFit!.maxErrorSq,
       pixelRange: range,
     };
   }

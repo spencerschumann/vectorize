@@ -21,7 +21,11 @@ function findFurthestPoint(
   const endPoint = pixels[end];
 
   for (let i = start + 1; i < end; i++) {
-    const distSq = distancePointToLineSegmentSq(pixels[i], startPoint, endPoint);
+    const distSq = distancePointToLineSegmentSq(
+      pixels[i],
+      startPoint,
+      endPoint,
+    );
     if (distSq > maxDistSq) {
       maxDistSq = distSq;
       furthestIndex = i;
@@ -51,9 +55,8 @@ export function findInitialBreakpoints(
     }
 
     const fit = fitPixelRange(pixels, { start, end });
-    if (!fit || fit.error < config.maxSegmentError) {
-      return;
-    }
+    if (!fit) return;
+    if (fit.maxErrorSq < config.maxSegmentError) return;
 
     // If the fit is poor, fall back to Douglas-Peucker to find the split point.
     const furthestIndex = findFurthestPoint(pixels, start, end);

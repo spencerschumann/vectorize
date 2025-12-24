@@ -33,6 +33,8 @@ export interface PixelRange {
 export interface FitResult {
   segment: Segment;
   error: number; // Total squared error for the fit
+  /** Maximum squared per-pixel distance to the fitted segment (pixels²) */
+  maxErrorSq: number;
   pixelRange: PixelRange;
 }
 
