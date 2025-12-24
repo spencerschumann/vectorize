@@ -5,7 +5,7 @@ import {
   setPixelBin,
 } from "../formats/binary.ts";
 import { traceGraph } from "./tracer.ts";
-import { simplifyGraph } from "./simplifier.ts";
+import { SimplifiedEdge, simplifyGraph } from "./simplifier.ts";
 import { PNG } from "pngjs";
 import { decodeBase64 } from "@std/encoding/base64";
 import { Buffer } from "node:buffer";
@@ -70,6 +70,25 @@ function binaryFromAscii(ascii: string): BinaryImage {
   return img;
 }
 
+function summarizeEdge(edge: SimplifiedEdge): string {
+  return edge.segments.map((s, i) => {
+    if (s.type === "arc") {
+      return `arc ${i}: R=${s.arc.radius.toFixed(3)} start=(${
+        s.start.x.toFixed(1)
+      },${s.start.y.toFixed(1)}) end=(${s.end.x.toFixed(1)},${
+        s.end.y.toFixed(1)
+      }) cw=${s.arc.clockwise}`;
+    } else if (s.type === "circle") {
+      return `circle ${i}: R=${s.circle.radius.toFixed(3)} center=(${
+        s.circle.center.x.toFixed(1)
+      },${s.circle.center.y.toFixed(1)})`;
+    }
+    return `line ${i}: start=(${s.start.x.toFixed(1)},${
+      s.start.y.toFixed(1)
+    }) end=(${s.end.x.toFixed(1)},${s.end.y.toFixed(1)})`;
+  }).join("\n");
+}
+
 Deno.test("simplifyGraph - horizontal line", () => {
   const ascii = `
     ..........
@@ -132,13 +151,25 @@ Deno.test("simplifyGraph - L-shape (corner)", () => {
   const edge = simplified.edges[0];
 
   // Should be split into 2 segments (vertical and horizontal)
-  assertEquals(edge.segments.length, 2);
+  assertEquals(
+    edge.segments.length,
+    2,
+    `Expected 2 segments, got ${edge.segments.length}:\n${summarizeEdge(edge)}`,
+  );
 
   const s1 = edge.segments[0];
   const s2 = edge.segments[1];
 
-  assertEquals(s1.type, "line");
-  assertEquals(s2.type, "line");
+  assertEquals(
+    s1.type,
+    "line",
+    `First segment should be line:\n${summarizeEdge(edge)}`,
+  );
+  assertEquals(
+    s2.type,
+    "line",
+    `Second segment should be line:\n${summarizeEdge(edge)}`,
+  );
 
   // Check directions (one vertical, one horizontal)
   // We don't know order, but one is (0,1) and other is (1,0)
@@ -148,8 +179,16 @@ Deno.test("simplifyGraph - L-shape (corner)", () => {
   const hasVertical = dirs.some((d) => Math.abs(d.y) > 0.9);
   const hasHorizontal = dirs.some((d) => Math.abs(d.x) > 0.9);
 
-  assertEquals(hasVertical, true);
-  assertEquals(hasHorizontal, true);
+  assertEquals(
+    hasVertical,
+    true,
+    `Should have a vertical segment:\n${summarizeEdge(edge)}`,
+  );
+  assertEquals(
+    hasHorizontal,
+    true,
+    `Should have a horizontal segment:\n${summarizeEdge(edge)}`,
+  );
 });
 
 Deno.test("simplifyGraph - Circle (Small)", () => {
@@ -229,22 +268,7 @@ Deno.test("simplifyGraph - Circle (Large)", () => {
   // For a full circle, we expect either:
   // - 1 "circle" segment, or
   // - 1 arc segment (360° arc)
-  const summary = edge.segments.map((s, i) => {
-    if (s.type === "arc") {
-      return `arc ${i}: R=${s.arc.radius.toFixed(3)} start=(${
-        s.start.x.toFixed(1)
-      },${s.start.y.toFixed(1)}) end=(${s.end.x.toFixed(1)},${
-        s.end.y.toFixed(1)
-      }) cw=${s.arc.clockwise}`;
-    } else if (s.type === "circle") {
-      return `circle ${i}: R=${s.circle.radius.toFixed(3)} center=(${
-        s.circle.center.x.toFixed(1)
-      },${s.circle.center.y.toFixed(1)})`;
-    }
-    return `line ${i}: start=(${s.start.x.toFixed(1)},${
-      s.start.y.toFixed(1)
-    }) end=(${s.end.x.toFixed(1)},${s.end.y.toFixed(1)})`;
-  }).join("\n");
+  const summary = summarizeEdge(edge);
 
   // Accept 1 or 2 segments for a circle
   if (edge.segments.length > 2) {
@@ -306,4 +330,18 @@ Deno.test("simplifyGraph - Square", () => {
   console.log(
     `Square test passed: ${simplEdge.segments.length} segments, ${lineCount} lines`,
   );
+});
+
+Deno.test("simplifyGraph - Zigzag line", () => {
+  const pngData =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAD8AAAAxCAYAAABtVXGvAAAA5UlEQVR4AeyZwQqEMBBDjf//z7uThT3beNCSRDr04Fj78hCEnp/g6zyCryV4AJYRLcFbkg9U4SeEyFHzkdoHuuYnhMhR85HaB7rmJ4TIUfOR2gdaNT+P+IzC+7jUSGpey8unu+Z9XGokNa/l5dNd8z4uNZKa1/Ly6a55H5caSc1f5TVH+Adw66T2aulX70vmAa8AluFpn5oAnwCW4QnOAFgAfp8BsNfMPSolwf8XZgC7FfcGgNNy3YJfXv3BRspQX2cDr4Kzv/BMIbFqPtE6mWueKSRWzSdaJ7OVefUvbzd4CnmsvgAAAP//MoKqvAAAAAZJREFUAwBah3x2zERrXgAAAABJRU5ErkJggg==";
+  const bin = binaryFromBase64Png(pngData);
+  const graph = traceGraph(bin);
+  const simplified = simplifyGraph(graph);
+
+  assertEquals(simplified.edges.length, 1);
+  const edge = simplified.edges[0];
+
+  // Just dump segment info for debugging for now
+  console.log(`Zigzag segments: ${summarizeEdge(edge)}`);
 });

@@ -7812,7 +7812,7 @@ function fitCircle(points) {
     y: cy + meanY
   };
   const radiusSquared = cx * cx + cy * cy + (Mxx + Myy);
-  if (radiusSquared <= 0) {
+  if (radiusSquared <= 9) {
     return null;
   }
   const radius = Math.sqrt(radiusSquared);

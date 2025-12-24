@@ -95,8 +95,9 @@ export function fitCircle(points: Point[]): ArcFitResult | null {
 
   // Calculate radius
   const radiusSquared = cx * cx + cy * cy + (Mxx + Myy);
-  if (radiusSquared <= 0) {
-    return null; // Invalid circle
+  if (radiusSquared <= 9) {
+    // Invalid circle or radius too small (TODO: make threshold configurable)
+    return null;
   }
   const radius = Math.sqrt(radiusSquared);
 
