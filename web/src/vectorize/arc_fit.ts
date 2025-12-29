@@ -6,6 +6,102 @@
 import type { Circle, Point } from "./geometry.ts";
 import { cross, distance, isAngleInArc, normalizeAngle } from "./geometry.ts";
 
+/**
+ * Compute errors and error statistics for a circle fit
+ */
+function computeErrors(
+  points: Point[],
+  center: Point,
+  radius: number,
+): {
+  errors: number[];
+  rmsError: number;
+  maxErrorSq: number;
+  medianError: number;
+} {
+  const errors = points.map((p) => Math.abs(distance(p, center) - radius));
+
+  const sumSquaredErrors = errors.reduce((sum, e) => sum + e * e, 0);
+  const rmsError = Math.sqrt(sumSquaredErrors / errors.length);
+
+  const maxErrorSq = errors.reduce((m, e) => Math.max(m, e * e), 0);
+
+  const sortedErrors = [...errors].sort((a, b) => a - b);
+  const medianError = sortedErrors[Math.floor(sortedErrors.length / 2)];
+
+  return { errors, rmsError, maxErrorSq, medianError };
+}
+
+/**
+ * Compute arc parameters (angles, sweep, direction) from points
+ */
+function computeArcParameters(
+  points: Point[],
+  center: Point,
+  radius: number,
+): {
+  startAngle: number;
+  endAngle: number;
+  sweepAngle: number;
+  clockwise: boolean;
+} {
+  const startPt = points[0];
+  const endPt = points[points.length - 1];
+  const midPt = points[Math.floor(points.length / 2)];
+
+  const startAngle = Math.atan2(startPt.y - center.y, startPt.x - center.x);
+  const endAngleRaw = Math.atan2(endPt.y - center.y, endPt.x - center.x);
+  const midAngle = Math.atan2(midPt.y - center.y, midPt.x - center.x);
+
+  // Determine direction (clockwise vs counterclockwise) using local turn
+  const v1 = { x: midPt.x - startPt.x, y: midPt.y - startPt.y };
+  const v2 = { x: endPt.x - midPt.x, y: endPt.y - midPt.y };
+  // In Y-down screen coords: cross > 0 => Clockwise
+  const clockwise = cross(v1, v2) > 0;
+
+  // Compute cw/ccw deltas and choose minor/major using mid-point
+  const twoPi = 2 * Math.PI;
+  let deltaCw = ((startAngle - endAngleRaw) % twoPi + twoPi) % twoPi; // [0, 2π)
+  let deltaCcw = ((endAngleRaw - startAngle) % twoPi + twoPi) % twoPi; // [0, 2π)
+
+  // Handle near-zero deltas (near-complete circles): use 2-pixel arc-length threshold
+  const threshold = 2.0 / radius; // Convert pixels to radians
+  if (deltaCw < threshold) deltaCw = twoPi;
+  if (deltaCcw < threshold) deltaCcw = twoPi;
+
+  let signedDelta: number;
+  if (clockwise) {
+    const testArc = {
+      center,
+      radius,
+      startAngle,
+      endAngle: startAngle - deltaCw,
+      clockwise: true,
+    };
+    const midOnMinor = deltaCw >= twoPi - threshold ||
+      isAngleInArc(testArc, midAngle);
+    const sweep = midOnMinor ? deltaCw : (twoPi - deltaCw);
+    signedDelta = -sweep;
+  } else {
+    const testArc = {
+      center,
+      radius,
+      startAngle,
+      endAngle: startAngle + deltaCcw,
+      clockwise: false,
+    };
+    const midOnMinor = deltaCcw >= twoPi - threshold ||
+      isAngleInArc(testArc, midAngle);
+    const sweep = midOnMinor ? deltaCcw : (twoPi - deltaCcw);
+    signedDelta = sweep;
+  }
+
+  const endAngle = startAngle + signedDelta;
+  const sweepAngle = Math.abs(signedDelta);
+
+  return { startAngle, endAngle, sweepAngle, clockwise };
+}
+
 export interface ArcFitResult {
   /** The fitted circle */
   circle: Circle;
@@ -103,72 +199,19 @@ export function fitCircle(points: Point[]): ArcFitResult | null {
 
   const circle: Circle = { center, radius };
 
-  // Calculate errors (radial distance from circle)
-  const errors = points.map((p) => Math.abs(distance(p, center) - radius));
+  // Calculate errors using helper function
+  const { errors, rmsError, maxErrorSq, medianError } = computeErrors(
+    points,
+    center,
+    radius,
+  );
 
-  const sumSquaredErrors = errors.reduce((sum, e) => sum + e * e, 0);
-  const rmsError = Math.sqrt(sumSquaredErrors / errors.length);
-
-  // Maximum squared error
-  const maxErrorSq = errors.reduce((m, e) => Math.max(m, e * e), 0);
-
-  const sortedErrors = [...errors].sort((a, b) => a - b);
-  const medianError = sortedErrors[Math.floor(sortedErrors.length / 2)];
-
-  // Calculate arc parameters efficiently using start/mid/end points
-  const startPt = points[0];
-  const endPt = points[points.length - 1];
-  const midPt = points[Math.floor(points.length / 2)];
-
-  const startAngle = Math.atan2(startPt.y - center.y, startPt.x - center.x);
-  const endAngleRaw = Math.atan2(endPt.y - center.y, endPt.x - center.x);
-  const midAngle = Math.atan2(midPt.y - center.y, midPt.x - center.x);
-
-  // Determine direction (clockwise vs counterclockwise) using local turn
-  const v1 = { x: midPt.x - startPt.x, y: midPt.y - startPt.y };
-  const v2 = { x: endPt.x - midPt.x, y: endPt.y - midPt.y };
-  // In Y-down screen coords: cross > 0 => Clockwise
-  const clockwise = cross(v1, v2) > 0;
-
-  // Compute cw/ccw deltas and choose minor/major using mid-point
-  const twoPi = 2 * Math.PI;
-  let deltaCw = ((startAngle - endAngleRaw) % twoPi + twoPi) % twoPi; // [0, 2π)
-  let deltaCcw = ((endAngleRaw - startAngle) % twoPi + twoPi) % twoPi; // [0, 2π)
-
-  // Handle near-zero deltas (near-complete circles): use 2-pixel arc-length threshold
-  const threshold = 2.0 / radius; // Convert pixels to radians
-  if (deltaCw < threshold) deltaCw = twoPi;
-  if (deltaCcw < threshold) deltaCcw = twoPi;
-
-  let signedDelta: number;
-  if (clockwise) {
-    const testArc = {
-      center,
-      radius,
-      startAngle,
-      endAngle: startAngle - deltaCw,
-      clockwise: true,
-    };
-    const midOnMinor = deltaCw >= twoPi - threshold ||
-      isAngleInArc(testArc, midAngle);
-    const sweep = midOnMinor ? deltaCw : (twoPi - deltaCw);
-    signedDelta = -sweep;
-  } else {
-    const testArc = {
-      center,
-      radius,
-      startAngle,
-      endAngle: startAngle + deltaCcw,
-      clockwise: false,
-    };
-    const midOnMinor = deltaCcw >= twoPi - threshold ||
-      isAngleInArc(testArc, midAngle);
-    const sweep = midOnMinor ? deltaCcw : (twoPi - deltaCcw);
-    signedDelta = sweep;
-  }
-
-  const endAngle = startAngle + signedDelta;
-  const sweepAngle = Math.abs(signedDelta);
+  // Calculate arc parameters using helper function
+  const { startAngle, endAngle, sweepAngle, clockwise } = computeArcParameters(
+    points,
+    center,
+    radius,
+  );
 
   return {
     circle,
@@ -289,69 +332,20 @@ export class IncrementalCircleFit {
 
     const circle: Circle = { center, radius };
 
-    // Calculate errors
-    const errors = this.points.map((p) =>
-      Math.abs(distance(p, center) - radius)
+    // Calculate errors using helper function
+    const { errors, rmsError, maxErrorSq, medianError } = computeErrors(
+      this.points,
+      center,
+      radius,
     );
 
-    const sumSquaredErrors = errors.reduce((sum, e) => sum + e * e, 0);
-    const rmsError = Math.sqrt(sumSquaredErrors / errors.length);
-
-    const sortedErrors = [...errors].sort((a, b) => a - b);
-    const medianError = sortedErrors[Math.floor(sortedErrors.length / 2)];
-
-    const maxErrorSq = errors.reduce((m, e) => Math.max(m, e * e), 0);
-
-    // Arc parameters from start/mid/end for incrementally collected points
-    const startPt = this.points[0];
-    const endPt = this.points[this.points.length - 1];
-    const midPt = this.points[Math.floor(this.points.length / 2)];
-
-    const startAngle = Math.atan2(startPt.y - center.y, startPt.x - center.x);
-    const endAngleRaw = Math.atan2(endPt.y - center.y, endPt.x - center.x);
-    const midAngle = Math.atan2(midPt.y - center.y, midPt.x - center.x);
-
-    const v1 = { x: midPt.x - startPt.x, y: midPt.y - startPt.y };
-    const v2 = { x: endPt.x - midPt.x, y: endPt.y - midPt.y };
-    const clockwise = cross(v1, v2) > 0;
-
-    const twoPi = 2 * Math.PI;
-    let deltaCw = ((startAngle - endAngleRaw) % twoPi + twoPi) % twoPi;
-    let deltaCcw = ((endAngleRaw - startAngle) % twoPi + twoPi) % twoPi;
-
-    const threshold = 2.0 / radius; // Convert 2-pixel arc-length to radians
-    if (deltaCw < threshold) deltaCw = twoPi;
-    if (deltaCcw < threshold) deltaCcw = twoPi;
-
-    let signedDelta: number;
-    if (clockwise) {
-      const testArc = {
+    // Calculate arc parameters using helper function
+    const { startAngle, endAngle, sweepAngle, clockwise } =
+      computeArcParameters(
+        this.points,
         center,
         radius,
-        startAngle,
-        endAngle: startAngle - deltaCw,
-        clockwise: true,
-      };
-      const midOnMinor = deltaCw >= twoPi - threshold ||
-        isAngleInArc(testArc, midAngle);
-      const sweep = midOnMinor ? deltaCw : (twoPi - deltaCw);
-      signedDelta = -sweep;
-    } else {
-      const testArc = {
-        center,
-        radius,
-        startAngle,
-        endAngle: startAngle + deltaCcw,
-        clockwise: false,
-      };
-      const midOnMinor = deltaCcw >= twoPi - threshold ||
-        isAngleInArc(testArc, midAngle);
-      const sweep = midOnMinor ? deltaCcw : (twoPi - deltaCcw);
-      signedDelta = sweep;
-    }
-
-    const endAngle = startAngle + signedDelta;
-    const sweepAngle = Math.abs(signedDelta);
+      );
 
     return {
       circle,
