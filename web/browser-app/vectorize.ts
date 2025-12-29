@@ -10,6 +10,11 @@ import {
   arcStartPoint,
   projectPointOnLine,
 } from "../src/vectorize/geometry.ts";
+import {
+  isClockwiseAngles,
+  isLargeArc,
+  signedSweep,
+} from "../src/vectorize/arc_fit.ts";
 import { Point } from "../src/vectorize/geometry.ts";
 
 export interface SimplifiedPath {
@@ -165,7 +170,7 @@ export function renderVectorizedToSVG(
           d += `L ${projectedEnd.x + 0.5} ${projectedEnd.y + 0.5} `;
         } else if (seg.type === "arc") {
           const r = seg.arc.radius;
-          const sweepAngle = Math.abs(seg.arc.endAngle - seg.arc.startAngle);
+          const sweepAngle = Math.abs(signedSweep(seg.arc));
           const isNearFullCircle = sweepAngle > 1.9 * Math.PI;
 
           let arcPath = "";
@@ -173,20 +178,21 @@ export function renderVectorizedToSVG(
             // For near-complete circles (sweep > ~340°), split into two arcs
             // First arc: start -> opposite point
             const angle = seg.arc.startAngle;
-            const midAngle = angle + (seg.arc.clockwise ? -Math.PI : Math.PI);
+            const clockwise = isClockwiseAngles(seg.arc);
+            const midAngle = angle + (clockwise ? -Math.PI : Math.PI);
             const midX = seg.arc.center.x + r * Math.cos(midAngle);
             const midY = seg.arc.center.y + r * Math.sin(midAngle);
 
             // First semicircle
-            arcPath += `A ${r} ${r} 0 1 ${seg.arc.clockwise ? 1 : 0}
+            arcPath += `A ${r} ${r} 0 1 ${clockwise ? 0 : 1}
               ${midX + 0.5} ${midY + 0.5} `;
             // Second semicircle to end point
-            arcPath += `A ${r} ${r} 0 1 ${seg.arc.clockwise ? 1 : 0} 
+            arcPath += `A ${r} ${r} 0 1 ${clockwise ? 0 : 1} 
               ${projectedEnd.x + 0.5} ${projectedEnd.y + 0.5} `;
           } else {
             // Regular arc
-            const largeArc = sweepAngle > Math.PI ? 1 : 0;
-            const sweep = seg.arc.clockwise ? 1 : 0;
+            const largeArc = isLargeArc(seg.arc) ? 1 : 0;
+            const sweep = isClockwiseAngles(seg.arc) ? 0 : 1;
             arcPath += `A ${r} ${r} 0 ${largeArc} ${sweep}
               ${projectedEnd.x + 0.5} ${projectedEnd.y + 0.5} `;
           }

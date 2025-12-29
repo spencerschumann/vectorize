@@ -4,7 +4,7 @@
  */
 
 import type { Circle, Point } from "./geometry.ts";
-import { cross, distance, isAngleInArc, normalizeAngle } from "./geometry.ts";
+import { distance, normalizeAngle } from "./geometry.ts";
 
 /**
  * Compute errors and error statistics for a circle fit
@@ -42,64 +42,101 @@ function computeArcParameters(
 ): {
   startAngle: number;
   endAngle: number;
-  sweepAngle: number;
-  clockwise: boolean;
 } {
   const startPt = points[0];
   const endPt = points[points.length - 1];
   const midPt = points[Math.floor(points.length / 2)];
 
-  const startAngle = Math.atan2(startPt.y - center.y, startPt.x - center.x);
+  const startAngleRaw = Math.atan2(startPt.y - center.y, startPt.x - center.x);
   const endAngleRaw = Math.atan2(endPt.y - center.y, endPt.x - center.x);
-  const midAngle = Math.atan2(midPt.y - center.y, midPt.x - center.x);
-
-  // Determine direction (clockwise vs counterclockwise) using local turn
-  const v1 = { x: midPt.x - startPt.x, y: midPt.y - startPt.y };
-  const v2 = { x: endPt.x - midPt.x, y: endPt.y - midPt.y };
-  // In Y-down screen coords: cross > 0 => Clockwise
-  const clockwise = cross(v1, v2) > 0;
-
-  // Compute cw/ccw deltas and choose minor/major using mid-point
+  const midAngleRaw = Math.atan2(midPt.y - center.y, midPt.x - center.x);
+  // Helper: unwrap angle `a` so it's as close as possible to `ref` by adding multiples of 2π
   const twoPi = 2 * Math.PI;
-  let deltaCw = ((startAngle - endAngleRaw) % twoPi + twoPi) % twoPi; // [0, 2π)
-  let deltaCcw = ((endAngleRaw - startAngle) % twoPi + twoPi) % twoPi; // [0, 2π)
-
-  // Handle near-zero deltas (near-complete circles): use 2-pixel arc-length threshold
-  const threshold = 2.0 / radius; // Convert pixels to radians
-  if (deltaCw < threshold) deltaCw = twoPi;
-  if (deltaCcw < threshold) deltaCcw = twoPi;
-
-  let signedDelta: number;
-  if (clockwise) {
-    const testArc = {
-      center,
-      radius,
-      startAngle,
-      endAngle: startAngle - deltaCw,
-      clockwise: true,
-    };
-    const midOnMinor = deltaCw >= twoPi - threshold ||
-      isAngleInArc(testArc, midAngle);
-    const sweep = midOnMinor ? deltaCw : (twoPi - deltaCw);
-    signedDelta = -sweep;
-  } else {
-    const testArc = {
-      center,
-      radius,
-      startAngle,
-      endAngle: startAngle + deltaCcw,
-      clockwise: false,
-    };
-    const midOnMinor = deltaCcw >= twoPi - threshold ||
-      isAngleInArc(testArc, midAngle);
-    const sweep = midOnMinor ? deltaCcw : (twoPi - deltaCcw);
-    signedDelta = sweep;
+  function unwrap(a: number, ref: number): number {
+    let candidate = a;
+    while (candidate - ref > Math.PI) candidate -= twoPi;
+    while (candidate - ref < -Math.PI) candidate += twoPi;
+    return candidate;
   }
 
-  const endAngle = startAngle + signedDelta;
-  const sweepAngle = Math.abs(signedDelta);
+  // Work in unwrapped space relative to the raw start angle to choose correct sweep
+  const startRaw = startAngleRaw;
+  const endUnwrapped = unwrap(endAngleRaw, startRaw);
+  const midUnwrapped = unwrap(midAngleRaw, startRaw);
 
-  return { startAngle, endAngle, sweepAngle, clockwise };
+  // Build unwrapped angles for all points to detect full-circle sweeps and direction
+  const rawAngles = points.map((p) =>
+    Math.atan2(p.y - center.y, p.x - center.x)
+  );
+  const unwrappedAngles: number[] = [];
+  let prev = startRaw;
+  for (let i = 0; i < rawAngles.length; i++) {
+    const a = unwrap(rawAngles[i], prev);
+    unwrappedAngles.push(a);
+    prev = a;
+  }
+
+  const span = Math.max(...unwrappedAngles) - Math.min(...unwrappedAngles);
+
+  // If points cover (approximately) a full circle, determine direction
+  // using a small local delta near the middle of the sample set. This
+  // avoids accumulating many small numerical deltas that can cancel.
+  if (span > 1.9 * Math.PI) {
+    const midIdx = Math.floor(unwrappedAngles.length / 2);
+    let dirDelta = 0;
+    if (midIdx > 0 && midIdx + 1 < unwrappedAngles.length) {
+      dirDelta = unwrappedAngles[midIdx + 1] - unwrappedAngles[midIdx - 1];
+    } else if (unwrappedAngles.length > 1) {
+      dirDelta = unwrappedAngles[unwrappedAngles.length - 1] -
+        unwrappedAngles[0];
+    }
+    const signedDelta = dirDelta >= 0 ? twoPi : -twoPi;
+    const startAngle = ((startRaw % twoPi) + twoPi) % twoPi;
+    const endAngle = startAngle + signedDelta;
+    return { startAngle, endAngle };
+  }
+
+  // Consider end candidates shifted by ±2π to allow large sweeps
+  const candidates = [endUnwrapped - twoPi, endUnwrapped, endUnwrapped + twoPi];
+
+  // Prefer candidates closest to start to avoid spurious ±2π jumps
+  const sortedCandidates = [...candidates].sort((a, b) =>
+    Math.abs(a - startRaw) - Math.abs(b - startRaw)
+  );
+
+  let chosenEnd = candidates[1];
+  let found = false;
+  for (const c of sortedCandidates) {
+    if (c >= startRaw) {
+      if (midUnwrapped >= startRaw - 1e-12 && midUnwrapped <= c + 1e-12) {
+        chosenEnd = c;
+        found = true;
+        break;
+      }
+    } else {
+      if (midUnwrapped <= startRaw + 1e-12 && midUnwrapped >= c - 1e-12) {
+        chosenEnd = c;
+        found = true;
+        break;
+      }
+    }
+  }
+
+  if (!found) {
+    chosenEnd = candidates.reduce(
+      (best, c) =>
+        Math.abs(c - startRaw) < Math.abs(best - startRaw) ? c : best,
+      candidates[1],
+    );
+  }
+
+  const signedDelta = chosenEnd - startRaw;
+
+  // Normalize startAngle to [0, 2π) for return
+  const startAngle = ((startRaw % twoPi) + twoPi) % twoPi;
+  const endAngle = startAngle + signedDelta;
+
+  return { startAngle, endAngle };
 }
 
 export interface ArcFitResult {
@@ -117,12 +154,8 @@ export interface ArcFitResult {
   errors: number[];
   /** Start angle of the arc in radians */
   startAngle: number;
-  /** End angle of the arc in radians */
+  /** End angle of the arc in radians (relative to startAngle) */
   endAngle: number;
-  /** Sweep angle in radians */
-  sweepAngle: number;
-  /** True if arc is clockwise */
-  clockwise: boolean;
 }
 
 /**
@@ -207,7 +240,7 @@ export function fitCircle(points: Point[]): ArcFitResult | null {
   );
 
   // Calculate arc parameters using helper function
-  const { startAngle, endAngle, sweepAngle, clockwise } = computeArcParameters(
+  const { startAngle, endAngle } = computeArcParameters(
     points,
     center,
     radius,
@@ -222,8 +255,6 @@ export function fitCircle(points: Point[]): ArcFitResult | null {
     errors,
     startAngle,
     endAngle,
-    sweepAngle,
-    clockwise,
   };
 }
 
@@ -340,12 +371,11 @@ export class IncrementalCircleFit {
     );
 
     // Calculate arc parameters using helper function
-    const { startAngle, endAngle, sweepAngle, clockwise } =
-      computeArcParameters(
-        this.points,
-        center,
-        radius,
-      );
+    const { startAngle, endAngle } = computeArcParameters(
+      this.points,
+      center,
+      radius,
+    );
 
     return {
       circle,
@@ -356,8 +386,6 @@ export class IncrementalCircleFit {
       errors,
       startAngle,
       endAngle,
-      sweepAngle,
-      clockwise,
     };
   }
 
@@ -387,4 +415,40 @@ export function percentile(values: number[], p: number): number {
   const sorted = [...values].sort((a, b) => a - b);
   const index = Math.floor(sorted.length * p);
   return sorted[Math.min(index, sorted.length - 1)];
+}
+
+// ============================================================================
+// Helper utilities for angles and SVG flags
+// ============================================================================
+
+/** Duck-type: any object with startAngle and endAngle */
+interface ArcAngles {
+  startAngle: number;
+  endAngle: number;
+}
+
+/** Return signed sweep (end - start). Negative => clockwise (screen Y-down). */
+export function signedSweep(arc: ArcAngles): number {
+  return arc.endAngle - arc.startAngle;
+}
+
+/** True if arc is clockwise in screen Y-down coordinates. */
+export function isClockwiseAngles(arc: ArcAngles): boolean {
+  return signedSweep(arc) < 0;
+}
+
+/** True if arc sweep is >= 180° (large-arc in SVG). */
+export function isLargeArc(arc: ArcAngles): boolean {
+  return Math.abs(signedSweep(arc)) >= Math.PI;
+}
+
+/** SVG flags: large-arc-flag (0/1) and sweep-flag (0/1). */
+export function svgArcFlags(arc: ArcAngles): {
+  largeArcFlag: 0 | 1;
+  sweepFlag: 0 | 1;
+} {
+  const largeArcFlag: 0 | 1 = isLargeArc(arc) ? 1 : 0;
+  // In SVG (Y-down), sweepFlag=1 means clockwise
+  const sweepFlag: 0 | 1 = isClockwiseAngles(arc) ? 0 : 1;
+  return { largeArcFlag, sweepFlag };
 }

@@ -2,9 +2,17 @@
  * Tests for arc (circle) fitting algorithms
  */
 
-import { assertAlmostEquals, assertEquals } from "@std/assert";
+import { assertAlmostEquals, assertEquals, assertExists } from "@std/assert";
 import type { Point } from "./geometry.ts";
-import { fitCircle, IncrementalCircleFit, percentile } from "./arc_fit.ts";
+import {
+  fitCircle,
+  IncrementalCircleFit,
+  isClockwiseAngles,
+  isLargeArc,
+  percentile,
+  signedSweep,
+  svgArcFlags,
+} from "./arc_fit.ts";
 
 const EPSILON = 1e-6;
 
@@ -241,4 +249,398 @@ Deno.test("percentile - calculates percentiles correctly", () => {
   assertAlmostEquals(percentile(values, 0), 1, EPSILON);
   assertAlmostEquals(percentile(values, 0.5), 6, EPSILON);
   assertAlmostEquals(percentile(values, 0.9), 10, EPSILON);
+});
+
+// ============================================================================
+// Arc Angle Calculation Tests
+// ============================================================================
+
+Deno.test("fitCircle - clockwise 90° arc, startAngle normalized to [0, 2π)", () => {
+  // Test various quadrants to ensure startAngle is always [0, 2π)
+  const testCases = [
+    {
+      start: { x: 5, y: 0 },
+      mid: { x: 3.5, y: 3.5 },
+      end: { x: 0, y: 5 },
+      expectedAngle: 0,
+    }, // Right (0°) to Bottom (90°)
+    {
+      start: { x: 0, y: 5 },
+      mid: { x: -3.5, y: 3.5 },
+      end: { x: -5, y: 0 },
+      expectedAngle: Math.PI / 2,
+    }, // Bottom (90°) to Left (180°)
+    {
+      start: { x: -5, y: 0 },
+      mid: { x: -3.5, y: -3.5 },
+      end: { x: 0, y: -5 },
+      expectedAngle: Math.PI,
+    }, // Left (180°) to Top (270°)
+    {
+      start: { x: 0, y: -5 },
+      mid: { x: 3.5, y: -3.5 },
+      end: { x: 5, y: 0 },
+      expectedAngle: 3 * Math.PI / 2,
+    }, // Top (270°) to Right (0°)
+  ];
+
+  for (const tc of testCases) {
+    const points: Point[] = [
+      tc.start,
+      tc.mid,
+      tc.end,
+    ];
+    const result = fitCircle(points);
+    assertEquals(
+      result !== null,
+      true,
+      `Failed to fit circle for start angle ${tc.expectedAngle}`,
+    );
+    if (result) {
+      assertAlmostEquals(
+        result.startAngle,
+        tc.expectedAngle,
+        0.1,
+        `Expected angle ${tc.expectedAngle} for point (${tc.start.x}, ${tc.start.y})`,
+      );
+      assertAlmostEquals(
+        result.endAngle,
+        tc.expectedAngle + Math.PI / 2,
+        0.1,
+        `Expected end angle ${
+          tc.expectedAngle + Math.PI / 2
+        } for point (${tc.end.x}, ${tc.end.y})`,
+      );
+    }
+  }
+});
+
+Deno.test("fitCircle - counterclockwise arc (screen Y-down) has positive sweep", () => {
+  // Arc from 0° to 90° in screen Y-down coords (where Y increases downward)
+  // This appears as clockwise in standard math coords but CCW in screen coords
+  const radius = 5;
+  const points: Point[] = [];
+  // Start at 0°, sweep to 90° (increasing angle = CCW in screen Y-down)
+  for (let angle = 0; angle <= Math.PI / 2; angle += Math.PI / 8) {
+    points.push({
+      x: radius * Math.cos(angle),
+      y: radius * Math.sin(angle),
+    });
+  }
+
+  const result = fitCircle(points);
+  assertEquals(result !== null, true);
+  if (result) {
+    // In screen Y-down coords with increasing Y downward, this is actually clockwise
+    // because positive Y angles move clockwise
+    const sweep = result.endAngle - result.startAngle;
+    assertEquals(
+      isClockwiseAngles(result),
+      true,
+      "Arc should be clockwise in screen Y-down",
+    );
+    assertEquals(
+      sweep < 0,
+      true,
+      `CW arc should have negative sweep, got ${sweep}`,
+    );
+    assertAlmostEquals(
+      Math.abs(signedSweep(result)),
+      Math.PI / 2,
+      0.2,
+      "Sweep should be ~90°",
+    );
+  }
+});
+
+Deno.test("fitCircle - clockwise arc (screen Y-down) has negative sweep", () => {
+  // Arc from 90° to 0° (decreasing angle = CW in screen Y-down)
+  const radius = 5;
+  const points: Point[] = [];
+  // Start at 90°, end at 0° (going backwards = CCW in screen Y-down)
+  for (let angle = Math.PI / 2; angle >= 0; angle -= Math.PI / 8) {
+    points.push({
+      x: radius * Math.cos(angle),
+      y: radius * Math.sin(angle),
+    });
+  }
+
+  const result = fitCircle(points);
+  assertEquals(result !== null, true);
+  if (result) {
+    // Decreasing angles = CCW in screen Y-down
+    const sweep = result.endAngle - result.startAngle;
+    assertEquals(
+      isClockwiseAngles(result),
+      false,
+      "Arc should be counterclockwise in screen Y-down",
+    );
+    assertEquals(
+      sweep > 0,
+      true,
+      `CCW arc should have positive sweep, got ${sweep}`,
+    );
+    assertAlmostEquals(
+      Math.abs(signedSweep(result)),
+      Math.PI / 2,
+      0.2,
+      "Sweep should be ~90°",
+    );
+  }
+});
+
+Deno.test("fitCircle - large arc (270°) in screen Y-down", () => {
+  const radius = 5;
+  const points: Point[] = [];
+  // Start at 0°, sweep 270° (will be detected as clockwise in screen Y-down)
+  for (let angle = 0; angle <= 3 * Math.PI / 2; angle += Math.PI / 6) {
+    points.push({
+      x: radius * Math.cos(angle),
+      y: radius * Math.sin(angle),
+    });
+  }
+
+  const result = fitCircle(points);
+  assertEquals(result !== null, true);
+  if (result) {
+    const sweep = result.endAngle - result.startAngle;
+    // Large arc sweeping through increasing angles
+    assertAlmostEquals(
+      Math.abs(signedSweep(result)),
+      3 * Math.PI / 2,
+      0.3,
+      "Sweep should be ~270°",
+    );
+    // Direction depends on screen Y-down coordinate system
+    assertEquals(isClockwiseAngles(result), true);
+    assertEquals(sweep < 0, true, "Should have negative sweep for clockwise");
+  }
+});
+
+Deno.test("fitCircle - arc crossing 0° boundary", () => {
+  const radius = 5;
+  const points: Point[] = [];
+  // Arc from 315° (-45°) to 45° (counterclockwise, crossing 0°)
+  for (let angle = -Math.PI / 4; angle <= Math.PI / 4; angle += Math.PI / 8) {
+    points.push({
+      x: radius * Math.cos(angle),
+      y: radius * Math.sin(angle),
+    });
+  }
+
+  const result = fitCircle(points);
+  assertEquals(result !== null, true);
+  if (result) {
+    // startAngle should be normalized to [0, 2π), so 315° = 7π/4
+    assertAlmostEquals(
+      result.startAngle,
+      7 * Math.PI / 4,
+      0.1,
+      "Start should be ~315°",
+    );
+    assertAlmostEquals(
+      Math.abs(signedSweep(result)),
+      Math.PI / 2,
+      0.2,
+      "Sweep should be ~90°",
+    );
+  }
+});
+
+Deno.test("fitCircle - semicircle arc", () => {
+  const radius = 5;
+  const points: Point[] = [];
+  // Semicircle from 0° to 180°
+  for (let angle = 0; angle <= Math.PI; angle += Math.PI / 8) {
+    points.push({
+      x: radius * Math.cos(angle),
+      y: radius * Math.sin(angle),
+    });
+  }
+
+  const result = fitCircle(points);
+  assertEquals(result !== null, true);
+  if (result) {
+    assertAlmostEquals(
+      Math.abs(signedSweep(result)),
+      Math.PI,
+      0.2,
+      "Sweep should be ~180°",
+    );
+    // Semicircle from 0° to 180° is clockwise in screen Y-down
+    assertEquals(isClockwiseAngles(result), true);
+  }
+});
+
+Deno.test("IncrementalCircleFit - angles match batch fit", () => {
+  const radius = 5;
+  const points: Point[] = [];
+  // Quarter circle from 0° to 90°
+  for (let angle = 0; angle <= Math.PI / 2; angle += Math.PI / 8) {
+    points.push({
+      x: radius * Math.cos(angle),
+      y: radius * Math.sin(angle),
+    });
+  }
+
+  const batchResult = fitCircle(points);
+
+  const fitter = new IncrementalCircleFit();
+  for (const p of points) {
+    fitter.addPoint(p);
+  }
+  const incrementalResult = fitter.getFit();
+
+  assertEquals(batchResult !== null && incrementalResult !== null, true);
+  if (batchResult && incrementalResult) {
+    assertAlmostEquals(
+      batchResult.startAngle,
+      incrementalResult.startAngle,
+      0.01,
+    );
+    assertAlmostEquals(batchResult.endAngle, incrementalResult.endAngle, 0.01);
+    assertAlmostEquals(
+      Math.abs(signedSweep(batchResult)),
+      Math.abs(signedSweep(incrementalResult)),
+      0.01,
+    );
+    assertEquals(
+      isClockwiseAngles(batchResult),
+      isClockwiseAngles(incrementalResult),
+    );
+  }
+});
+
+Deno.test("fitCircle - endAngle is startAngle plus signed sweep (CCW)", () => {
+  // Quarter circle with decreasing angle (screen Y-down: counterclockwise)
+  const radius = 5;
+  const points: Point[] = [];
+  for (let angle = Math.PI / 2; angle >= 0; angle -= Math.PI / 8) {
+    points.push({ x: radius * Math.cos(angle), y: radius * Math.sin(angle) });
+  }
+  const result = fitCircle(points);
+  assertEquals(result !== null, true);
+  if (result) {
+    const signed = signedSweep(result);
+    assertAlmostEquals(
+      result.endAngle,
+      result.startAngle + signed,
+      1e-6,
+      "endAngle should equal startAngle plus signed sweep",
+    );
+    const diff = result.endAngle - result.startAngle;
+    assertAlmostEquals(Math.abs(diff), Math.abs(signed), 1e-6);
+    assertEquals(signed > 0, true);
+  }
+});
+Deno.test("fitCircle - counterclockwise 90° arc, startAngle normalized to [0, 2π)", () => {
+  // Test quarter arcs going counterclockwise (decreasing atan2 angle in screen Y-down)
+  const testCases = [
+    {
+      start: { x: 5, y: 0 },
+      mid: { x: 3.53, y: -3.53 },
+      end: { x: 0, y: -5 },
+      expectedAngle: 0,
+    }, // Right (0°) to Top (-90°)
+    {
+      start: { x: 0, y: 5 },
+      mid: { x: 3.53, y: 3.53 },
+      end: { x: 5, y: 0 },
+      expectedAngle: Math.PI / 2,
+    }, // Bottom (90°) to Right (0°)
+    {
+      start: { x: -5, y: 0 },
+      mid: { x: -3.53, y: 3.53 },
+      end: { x: 0, y: 5 },
+      expectedAngle: Math.PI,
+    }, // Left (180°) to Bottom (90°)
+    {
+      start: { x: 0, y: -5 },
+      mid: { x: -3.53, y: -3.53 },
+      end: { x: -5, y: 0 },
+      expectedAngle: 3 * Math.PI / 2,
+    }, // Top (270°) to Left (180°)
+  ];
+
+  for (const tc of testCases) {
+    const points: Point[] = [tc.start, tc.mid, tc.end];
+    const result = fitCircle(points);
+    assertExists(result);
+    assertAlmostEquals(result.startAngle, tc.expectedAngle, 0.1);
+    // For counterclockwise quarter arcs the end angle should be start - 90°
+    assertAlmostEquals(result.endAngle, tc.expectedAngle - Math.PI / 2, 0.1);
+  }
+});
+
+Deno.test("fitCircle - parameterized starts and sweeps, startAngle normalized to [0, 2π)", () => {
+  const radius = 5;
+  const twoPi = 2 * Math.PI;
+  const starts: number[] = [];
+  for (let a = 0; a < twoPi - 1e-12; a += Math.PI / 6) starts.push(a);
+
+  const sweepMags = [
+    Math.PI / 4,
+    Math.PI / 2,
+    3 / 4 * Math.PI,
+    Math.PI,
+    3 / 2 * Math.PI,
+    2 * Math.PI,
+  ];
+
+  for (const start of starts) {
+    for (const mag of sweepMags) {
+      for (const dir of [1, -1]) {
+        const sweep = dir * mag;
+        const absMag = Math.abs(sweep);
+        const nPts = absMag < Math.PI ? 3 : 6;
+        const pts: Point[] = [];
+        for (let i = 0; i < nPts; i++) {
+          const t = i / (nPts - 1);
+          const ang = start + sweep * t;
+          pts.push({ x: radius * Math.cos(ang), y: radius * Math.sin(ang) });
+        }
+
+        const result = fitCircle(pts);
+        assertExists(result);
+
+        // Debug output - log the points being tested
+        console.log(
+          `Testing start=${start / Math.PI}π, sweep=${
+            sweep / Math.PI
+          }π, points=`,
+          pts,
+        );
+        console.log(
+          `  Fitted arc: startAngle=${result.startAngle / Math.PI}π, endAngle=${
+            result.endAngle / Math.PI
+          }π, center=(${result.circle.center.x.toFixed(2)}, ${
+            result.circle.center.y.toFixed(2)
+          }), radius=${result.circle.radius.toFixed(2)}`,
+        );
+
+        // If the fitted start is very close to 2π, treat it as 0 for comparison
+        if (Math.abs(result.startAngle - twoPi) < 1e-6) {
+          result.startAngle -= twoPi;
+          result.endAngle -= twoPi;
+        }
+
+        const testDesc = `start=${start / Math.PI}π, sweep=${sweep / Math.PI}π`;
+
+        // Start angle should match (within tolerance)
+        const expectedStart = start;
+        assertAlmostEquals(result.startAngle, expectedStart, 1e-6, testDesc);
+
+        // Sweep magnitude should match (within tolerance)
+        assertAlmostEquals(
+          Math.abs(signedSweep(result)),
+          absMag,
+          1e-6,
+          testDesc,
+        );
+
+        // Direction should match sign of sweep (negative => clockwise)
+        assertEquals(isClockwiseAngles(result), sweep < 0, testDesc);
+      }
+    }
+  }
 });
