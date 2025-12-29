@@ -1,6 +1,6 @@
 import {
-  assertEquals,
   assert,
+  assertEquals,
 } from "https://deno.land/std@0.122.0/testing/asserts.ts";
 import { optimizeWithCutPoints } from "./optimizer.ts";
 import type { Point } from "../geometry.ts";
@@ -18,7 +18,10 @@ function createSquare(
   }
   // Right
   for (let i = 0; i < pointsPerSide; i++) {
-    points.push({ x: offset.x + size, y: offset.y + (i / pointsPerSide) * size });
+    points.push({
+      x: offset.x + size,
+      y: offset.y + (i / pointsPerSide) * size,
+    });
   }
   // Bottom
   for (let i = 0; i < pointsPerSide; i++) {
@@ -65,7 +68,10 @@ function createLShape(
   }
   // Horizontal
   for (let i = 1; i <= pointsPerSide; i++) {
-    points.push({ x: offset.x + (i / pointsPerSide) * size, y: offset.y + size });
+    points.push({
+      x: offset.x + (i / pointsPerSide) * size,
+      y: offset.y + size,
+    });
   }
   return points;
 }
@@ -106,7 +112,7 @@ Deno.test("optimizeWithCutPoints - Circle", () => {
     `Circle should be 1-4 segments, but got ${segments.length}`,
   );
   assert(
-    segments.every((s) => s.type === "arc" || s.type === "circle"),
+    segments.every((s) => s.type === "arc"),
     "All segments should be arcs or a circle",
   );
 });

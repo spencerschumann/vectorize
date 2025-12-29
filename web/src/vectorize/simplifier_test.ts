@@ -78,10 +78,6 @@ function summarizeEdge(edge: SimplifiedEdge): string {
       },${s.start.y.toFixed(1)}) end=(${s.end.x.toFixed(1)},${
         s.end.y.toFixed(1)
       }) cw=${s.arc.clockwise}`;
-    } else if (s.type === "circle") {
-      return `circle ${i}: R=${s.circle.radius.toFixed(3)} center=(${
-        s.circle.center.x.toFixed(1)
-      },${s.circle.center.y.toFixed(1)})`;
     }
     return `line ${i}: start=(${s.start.x.toFixed(1)},${
       s.start.y.toFixed(1)
@@ -242,9 +238,9 @@ Deno.test("simplifyGraph - Circle (Small)", () => {
     // Expected center roughly (4, 3)
     // Expected radius roughly 3
     // Relaxed tolerance due to low resolution (radius 3 pixels)
-    assertAlmostEquals(c1.x, 4, 1.5, "Center X");
-    assertAlmostEquals(c1.y, 3, 1.5, "Center Y");
-    assertAlmostEquals(r1, 3, 1.5, "Radius");
+    assertAlmostEquals(c1.x, 4, 0.001, "Center X");
+    assertAlmostEquals(c1.y, 3, 0.001, "Center Y");
+    assertAlmostEquals(r1, 3, 0.1, "Radius");
   }
 });
 
@@ -334,7 +330,7 @@ Deno.test("simplifyGraph - Square", () => {
 
 Deno.test("simplifyGraph - Zigzag line", () => {
   const pngData =
-    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAD8AAAAxCAYAAABtVXGvAAAA5UlEQVR4AeyZwQqEMBBDjf//z7uThT3beNCSRDr04Fj78hCEnp/g6zyCryV4AJYRLcFbkg9U4SeEyFHzkdoHuuYnhMhR85HaB7rmJ4TIUfOR2gdaNT+P+IzC+7jUSGpey8unu+Z9XGokNa/l5dNd8z4uNZKa1/Ly6a55H5caSc1f5TVH+Adw66T2aulX70vmAa8AluFpn5oAnwCW4QnOAFgAfp8BsNfMPSolwf8XZgC7FfcGgNNy3YJfXv3BRspQX2cDr4Kzv/BMIbFqPtE6mWueKSRWzSdaJ7OVefUvbzd4CnmsvgAAAP//MoKqvAAAAAZJREFUAwBah3x2zERrXgAAAABJRU5ErkJggg==";
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGgAAACxCAYAAAAoLfhGAAAD4klEQVR4Aeyc3U7lMAwGCe//zmfbVZGqKmSzVmIPh0Gt+hv76wzmks+XP2gCnx/+oAmUCWqtocFQwpUJogCg51AQ3JCCFAQnAI/nBCkITgAezwnaImhdUQWtY7mlkoK2YF1XVEHrWG6ppKAtWNcVVdA6llsqKWgL1nVFFbSO5ZZKCtqCdV1RBa1juaWSgm5YiacKIlq5ZVLQDQbxVEFEK7dMCrrBIJ4qiGjllklBNxjEUwURrdwyKegGg3iqIKKVW6Y3EHT7mjc8VRBcqoIUBCcAj+cEKQhOAB7PCVIQnAA8nhOkIDgBeLyyCYJzwcRTEEZFP4iC+lwwdxWEUdEPoqA+F8xdBWFU9IMoqM8Fc1dBGBX9IArqc8HcVRBGRT/IfwrqF/HuPgIK2sd2SWUFLcG4r4iC9rFdUllBSzDuK6KgfWyXVFbQEoz7iihoH9sllRW0BOO+Igrax3a+8uBNBQ3gEB4piGBhkEFBAziERwoiWBhkUNAADuGRgggWBhkUNIBDeKQggoVBBgUN4BAeKShuIWWlglIwx5soKM4uZaWCUjDHmygozi5lpYJSMMebKCjOLmWlglIwx5soKM4uZaWCUjDHm/w+QXFWJSsVVIJ9vqmC5lmVvKmgEuzzTRU0z6rkTQWVYJ9vqqB5ViVvKqgE+3xTBc2zKnlTQSXY55v+FEHzX/RmbyoILlRBCoITgMdzghQEJwCP5wQpCE4AHs8JUhCcADze3gmCf/xPiKcguCUFKQhOAB7PCVIQnAA8nhOkIDgBeDwnSEFwAvB4vQmCR/5d8RQE960gBcEJwOM5QQqCE4DHc4IUBCcAj+cEKQhOIC1erJETFOOWtkpBaahjjRQU45a2SkFpqGONFBTjlrZKQWmoY40UFOOWtkpBaahjjRQU45a2SkH/QF39uEzQ6/X6aK1Vfz++f5mgLzKtKemLRe9YKuicojNUa0o6OfT2UkFnoFPSubfW/v7Ja411PDNW7uWCvj7+lETbz2yttfNQtmMElREYND5/YQaPUx4pKAVzvImC4uxSViooBXO8yZsKigOhrVQQzcgjj4IeQGiXCqIZeeRR0AMI7VJBNCOPPAp6AKFdKohm5JFHQQ8gtEsF0Yw88qAEPbJ5eRBQ0AGBvCmIbOfIpqADAnlTENnOkU1BBwTypiCynSObgg4I5E1BZDtHNgUdEMjbAkHkz/v52RQEd6ggBcEJwOM5QQqCE4DHc4IUBCcAj+cEKQhOgBrvyuUEXSCoBwVRzVy5FHSBoB4URDVz5VLQBYJ6UBDVzJVLQRcI6kFBVDNXLgVdIL47VP+3EQV9ZyZ2f/mqPwAAAP//y9/TfgAAAAZJREFUAwDHkiDh4eYnAwAAAABJRU5ErkJggg==";
   const bin = binaryFromBase64Png(pngData);
   const graph = traceGraph(bin);
   const simplified = simplifyGraph(graph);

@@ -5,8 +5,7 @@ import { optimizeWithCutPoints } from "./cutPointOptimizer/index.ts"; // Import 
 
 export type Segment =
   | { type: "line"; line: Line; start: Point; end: Point; points: Point[] }
-  | { type: "arc"; arc: Arc; start: Point; end: Point; points: Point[] }
-  | { type: "circle"; circle: Circle; points: Point[] };
+  | { type: "arc"; arc: Arc; start: Point; end: Point; points: Point[] };
 
 export interface SimplifiedEdge {
   original: GraphEdge;
@@ -31,7 +30,8 @@ export function simplifyGraph(
       continue;
     }
 
-    const isClosedLoop = distance(edge.points[0], edge.points[edge.points.length - 1]) < 2.0;
+    const isClosedLoop =
+      distance(edge.points[0], edge.points[edge.points.length - 1]) < 2.0;
 
     // Use the new cut point optimizer.
     const finalSegments = optimizeWithCutPoints(edge.points, isClosedLoop);

@@ -59,6 +59,13 @@ export function fitPixelRange(
 
   // Attempt both line and arc fits
   const lineFit = fitLine(segmentPixels);
+
+  const isClosedLoop = distance(startPoint, endPoint) < 1e-3;
+  if (isClosedLoop) {
+    // for closed loop, don't double count the last point
+    segmentPixels.pop();
+  }
+
   const arcFit = fitCircle(segmentPixels);
 
   const lineError = lineFit

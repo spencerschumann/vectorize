@@ -1,7 +1,7 @@
 import type { Point } from "../geometry.ts";
 import type { Segment } from "../simplifier.ts";
 import { findInitialBreakpoints } from "./greedy.ts";
-import { refineBreakpoints, mergeBreakpoints } from "./refine.ts";
+import { mergeBreakpoints, refineBreakpoints } from "./refine.ts";
 import { breakpointsToSegments } from "./junctions.ts";
 import { FitCache } from "./cache.ts";
 import type { CutPointOptimizerConfig } from "./types.ts";
@@ -35,17 +35,20 @@ export function optimizeWithCutPoints(
   const cache = new FitCache();
 
   // Phase 1: Greedy Initial Breakpoints
-  let breakpoints = findInitialBreakpoints(pixels, fullConfig);
+  let breakpoints = findInitialBreakpoints(pixels, fullConfig, cache);
 
   // Phase 2: Local Refinement
-  breakpoints = refineBreakpoints(pixels, breakpoints, fullConfig, cache);
+  //breakpoints = refineBreakpoints(pixels, breakpoints, fullConfig, cache);
 
   // Phase 3: Merge Pass
-  breakpoints = mergeBreakpoints(pixels, breakpoints, fullConfig, cache);
+  const preMergeCount = breakpoints.length;
+  //breakpoints = mergeBreakpoints(pixels, breakpoints, fullConfig, cache);
 
-  // Final Refinement after merging
-  breakpoints = refineBreakpoints(pixels, breakpoints, fullConfig, cache);
+  // Run refinement again if any segments were merged
+  if (breakpoints.length < preMergeCount) {
+    breakpoints = refineBreakpoints(pixels, breakpoints, fullConfig, cache);
+  }
 
   // Phase 4: Final Output
-  return breakpointsToSegments(pixels, breakpoints, isClosedLoop);
+  return breakpointsToSegments(pixels, breakpoints, isClosedLoop, cache);
 }

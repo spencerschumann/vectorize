@@ -43,7 +43,7 @@ export function refineBreakpoints(
   config: CutPointOptimizerConfig,
   cache: FitCache,
 ): number[] {
-  let refinedBreakpoints = [...breakpoints];
+  const refinedBreakpoints = [...breakpoints];
 
   for (let i = 0; i < config.maxIterations; i++) {
     let changed = false;
@@ -51,13 +51,21 @@ export function refineBreakpoints(
       const currentBreakpoint = refinedBreakpoints[j];
       const prevBreakpoint = j > 0 ? refinedBreakpoints[j - 1] : 0;
       const nextBreakpoint = j < refinedBreakpoints.length - 1
-          ? refinedBreakpoints[j + 1]
-          : pixels.length - 1;
+        ? refinedBreakpoints[j + 1]
+        : pixels.length - 1;
 
       let bestBreakpoint = currentBreakpoint;
-
-      const fit1 = cache.get(prevBreakpoint, currentBreakpoint) || fitPixelRange(pixels, { start: prevBreakpoint, end: currentBreakpoint });
-      const fit2 = cache.get(currentBreakpoint, nextBreakpoint) || fitPixelRange(pixels, { start: currentBreakpoint, end: nextBreakpoint });
+      // TODO: cache should already be populated from the initial fitting - is it?
+      const fit1 = cache.get(prevBreakpoint, currentBreakpoint) ||
+        fitPixelRange(pixels, {
+          start: prevBreakpoint,
+          end: currentBreakpoint,
+        });
+      const fit2 = cache.get(currentBreakpoint, nextBreakpoint) ||
+        fitPixelRange(pixels, {
+          start: currentBreakpoint,
+          end: nextBreakpoint,
+        });
       if (!fit1 || !fit2) continue;
 
       let minCost = fit1.error + fit2.error;
@@ -74,8 +82,10 @@ export function refineBreakpoints(
           continue;
         }
 
-        const newFit1 = cache.get(prevBreakpoint, newBreakpoint) || fitPixelRange(pixels, { start: prevBreakpoint, end: newBreakpoint });
-        const newFit2 = cache.get(newBreakpoint, nextBreakpoint) || fitPixelRange(pixels, { start: newBreakpoint, end: nextBreakpoint });
+        const newFit1 = cache.get(prevBreakpoint, newBreakpoint) ||
+          fitPixelRange(pixels, { start: prevBreakpoint, end: newBreakpoint });
+        const newFit2 = cache.get(newBreakpoint, nextBreakpoint) ||
+          fitPixelRange(pixels, { start: newBreakpoint, end: nextBreakpoint });
         if (!newFit1 || !newFit2) continue;
 
         const cost = newFit1.error + newFit2.error;
@@ -110,24 +120,32 @@ export function mergeBreakpoints(
   config: CutPointOptimizerConfig,
   cache: FitCache,
 ): number[] {
-  let mergedBreakpoints = [...breakpoints];
+  const mergedBreakpoints = [...breakpoints];
   let i = 0;
   while (i < mergedBreakpoints.length) {
     const prevBreakpoint = i > 0 ? mergedBreakpoints[i - 1] : 0;
     const currentBreakpoint = mergedBreakpoints[i];
     const nextBreakpoint = i < mergedBreakpoints.length - 1
-        ? mergedBreakpoints[i + 1]
-        : pixels.length - 1;
+      ? mergedBreakpoints[i + 1]
+      : pixels.length - 1;
 
-    const fit1 = cache.get(prevBreakpoint, currentBreakpoint) || fitPixelRange(pixels, { start: prevBreakpoint, end: currentBreakpoint });
-    const fit2 = cache.get(currentBreakpoint, nextBreakpoint) || fitPixelRange(pixels, { start: currentBreakpoint, end: nextBreakpoint });
-    const mergedFit = cache.get(prevBreakpoint, nextBreakpoint) || fitPixelRange(pixels, { start: prevBreakpoint, end: nextBreakpoint });
+    const fit1 = cache.get(prevBreakpoint, currentBreakpoint) ||
+      fitPixelRange(pixels, { start: prevBreakpoint, end: currentBreakpoint });
+    const fit2 = cache.get(currentBreakpoint, nextBreakpoint) ||
+      fitPixelRange(pixels, { start: currentBreakpoint, end: nextBreakpoint });
+    const mergedFit = cache.get(prevBreakpoint, nextBreakpoint) ||
+      fitPixelRange(pixels, { start: prevBreakpoint, end: nextBreakpoint });
 
     if (fit1 && fit2 && mergedFit) {
       const currentCost = fit1.error + fit2.error + config.segmentPenalty;
       const mergedCost = mergedFit.error;
 
       if (mergedCost < currentCost) {
+        console.log(
+          `Merging breakpoints at index ${i} (pixel ${currentBreakpoint}) reduces cost from ${
+            currentCost.toFixed(2)
+          } to ${mergedCost.toFixed(2)}`,
+        );
         mergedBreakpoints.splice(i, 1);
       } else {
         i++;

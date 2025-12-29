@@ -1,12 +1,13 @@
 import type { Point } from "../geometry.ts";
 import {
-  lineLineIntersection,
-  lineArcIntersection,
   arcArcIntersection,
   distance,
+  lineArcIntersection,
+  lineLineIntersection,
 } from "../geometry.ts";
 import type { Segment } from "../simplifier.ts";
 import { fitPixelRange } from "./fitting.ts";
+import type { FitCache } from "./cache.ts";
 
 /**
  * Adjusts the endpoints of two adjacent segments to meet at their intersection.
@@ -16,9 +17,6 @@ import { fitPixelRange } from "./fitting.ts";
  * @param seg2 The second segment.
  */
 function applyIntersection(seg1: Segment, seg2: Segment): void {
-  if (seg1.type === "circle" || seg2.type === "circle") {
-    return; // Cannot intersect with a full circle in this context
-  }
   let intersection: Point | null = null;
   const junctionPoint = seg1.end;
 
@@ -31,6 +29,8 @@ function applyIntersection(seg1: Segment, seg2: Segment): void {
     const intersections = lineArcIntersection(seg2.line, seg1.arc);
     intersection = findClosestPoint(junctionPoint, intersections);
   } else if (seg1.type === "arc" && seg2.type === "arc") {
+    // TODO: arc-arc intersections don't really work - the intersection point could be far from the arc ends, or non-existent.
+    // We really need to adjust the centers and radii to allow the arcs to fit together seamlessly.
     const intersections = arcArcIntersection(seg1.arc, seg2.arc);
     intersection = findClosestPoint(junctionPoint, intersections);
   }
@@ -73,10 +73,11 @@ export function breakpointsToSegments(
   pixels: Point[],
   breakpoints: number[],
   isClosedLoop: boolean,
+  cache: FitCache,
 ): Segment[] {
   const segments: Segment[] = [];
   let start = 0;
-  const JUNCTION_MARGIN = 2; // Number of pixels to exclude on either side of a breakpoint.
+  const JUNCTION_MARGIN = 0; // Number of pixels to exclude on either side of a breakpoint.
 
   const fullBreakpoints = [...breakpoints, pixels.length - 1];
 
@@ -85,11 +86,16 @@ export function breakpointsToSegments(
     const fitEnd = end === pixels.length - 1 ? end : end - JUNCTION_MARGIN;
 
     if (fitEnd < fitStart) {
-        start = end;
-        continue;
+      start = end;
+      continue;
     }
 
-    const fit = fitPixelRange(pixels, { start: fitStart, end: fitEnd });
+    const cachedFit = cache.get(fitStart, fitEnd);
+    const fit = cachedFit ??
+      fitPixelRange(pixels, { start: fitStart, end: fitEnd });
+    if (fit && !cachedFit) {
+      cache.set(fitStart, fitEnd, fit);
+    }
     if (fit) {
       segments.push(fit.segment);
     }
@@ -97,14 +103,14 @@ export function breakpointsToSegments(
   }
 
   // Apply intersections at junctions
-  if (segments.length > 1) {
+  /*if (segments.length > 1) {
     for (let i = 0; i < segments.length - 1; i++) {
       applyIntersection(segments[i], segments[i + 1]);
     }
     if (isClosedLoop) {
       applyIntersection(segments[segments.length - 1], segments[0]);
     }
-  }
+  }*/
 
   return segments;
 }
