@@ -1,6 +1,6 @@
 import type { Point } from "../geometry.ts";
 import { fitLine } from "../line_fit.ts";
-import { fitCircle, signedSweep, isClockwiseAngles } from "../arc_fit.ts";
+import { fitCircle, isClockwiseAngles, signedSweep } from "../arc_fit.ts";
 import type { Segment } from "../simplifier.ts";
 import type { FitResult, PixelRange } from "./types.ts";
 import { distance } from "../geometry.ts";
@@ -66,7 +66,12 @@ export function fitPixelRange(
     segmentPixels.pop();
   }
 
-  const arcFit = fitCircle(segmentPixels);
+  let arcFit = fitCircle(segmentPixels);
+
+  // Experiment: only allow arcs that sweep at least 180 degrees
+  if (arcFit && Math.abs(signedSweep(arcFit)) < Math.PI) {
+    arcFit = null;
+  }
 
   const lineError = lineFit
     ? lineFit.rmsError * lineFit.rmsError * lineFit.count
@@ -98,8 +103,10 @@ export function fitPixelRange(
     // Check for degenerate arcs (huge radius), treat as lines
     const chordLength = distance(startPoint, endPoint);
     const sweepAngleAbs = Math.abs(signedSweep(arcFit!));
-    if (sweepAngleAbs < 1 && arcFit!.circle.radius > 1000 * chordLength &&
-      lineFit) {
+    if (
+      sweepAngleAbs < 1 && arcFit!.circle.radius > 1000 * chordLength &&
+      lineFit
+    ) {
       return {
         segment: {
           type: "line",

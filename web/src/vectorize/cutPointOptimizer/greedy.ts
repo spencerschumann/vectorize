@@ -71,7 +71,10 @@ export function findInitialBreakpoints(
     if (!fit) return;
     // TODO: add separate config for max error while finding initial breakpoints
     //if (fit.maxErrorSq < config.maxSegmentError) return;
-    if (fit.maxErrorSq < .8) return;
+    if (
+      fit.maxErrorSq < 1.2 ||
+      (fit.segment.type == "arc" && fit.maxErrorSq < 1.2)
+    ) return;
 
     // If the fit is poor, fall back to Douglas-Peucker to find the split point.
     const furthestIndex = findFurthestPoint(pixels, start, end);

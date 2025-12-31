@@ -164,6 +164,9 @@ export function renderVectorizedToSVG(
             projectedEnd,
           );
         }
+
+        points.push(projectedStart);
+        points.push(projectedEnd);
         d += `M ${projectedStart.x + 0.5} ${projectedStart.y + 0.5} `;
 
         if (seg.type === "line") {
