@@ -77,6 +77,14 @@ export function fitLine(points: Point[]): LineFitResult | null {
     direction = { x: 0, y: 1 };
   }
 
+  // Ensure direction aligns with point progression (first to last)
+  const progressionDx = points[points.length - 1].x - points[0].x;
+  const progressionDy = points[points.length - 1].y - points[0].y;
+  const dotProduct = direction.x * progressionDx + direction.y * progressionDy;
+  if (dotProduct < 0) {
+    direction = { x: -direction.x, y: -direction.y };
+  }
+
   const line: Line = {
     point: centroid,
     direction,
@@ -190,6 +198,14 @@ export class IncrementalLineFit {
       direction = { x: 1, y: 0 };
     } else {
       direction = { x: 0, y: 1 };
+    }
+
+    // Ensure direction aligns with point progression (first to last)
+    const progressionDx = this.points[this.points.length - 1].x - this.points[0].x;
+    const progressionDy = this.points[this.points.length - 1].y - this.points[0].y;
+    const dotProduct = direction.x * progressionDx + direction.y * progressionDy;
+    if (dotProduct < 0) {
+      direction = { x: -direction.x, y: -direction.y };
     }
 
     const line: Line = {

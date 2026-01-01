@@ -13,6 +13,22 @@ function assertPointEquals(actual: Point, expected: Point, epsilon = EPSILON) {
   assertAlmostEquals(actual.y, expected.y, epsilon, `y coordinate mismatch`);
 }
 
+function assertDirectionAligned(
+  direction: Point,
+  points: Point[],
+  msg: string,
+) {
+  // Check alignment with first-to-last point progression
+  const progressionDx = points[points.length - 1].x - points[0].x;
+  const progressionDy = points[points.length - 1].y - points[0].y;
+  const dotProduct = direction.x * progressionDx + direction.y * progressionDy;
+  assertEquals(
+    dotProduct > 0,
+    true,
+    `${msg}: Direction should align with point progression (dot=${dotProduct.toFixed(3)})`,
+  );
+}
+
 // ============================================================================
 // Basic Line Fitting Tests
 // ============================================================================
@@ -33,6 +49,7 @@ Deno.test("fitLine - fits horizontal line", () => {
     assertPointEquals(result.line.direction, { x: 1, y: 0 }, 0.01);
     assertAlmostEquals(result.rmsError, 0, EPSILON);
     assertEquals(result.count, 5);
+    assertDirectionAligned(result.line.direction, points, "Horizontal line");
   }
 });
 
@@ -51,6 +68,7 @@ Deno.test("fitLine - fits vertical line", () => {
     assertPointEquals(result.line.point, { x: 3, y: 2 });
     assertPointEquals(result.line.direction, { x: 0, y: 1 }, 0.01);
     assertAlmostEquals(result.rmsError, 0, EPSILON);
+    assertDirectionAligned(result.line.direction, points, "Vertical line");
   }
 });
 
@@ -74,6 +92,7 @@ Deno.test("fitLine - fits diagonal line", () => {
       0.01,
     );
     assertAlmostEquals(result.rmsError, 0, EPSILON);
+    assertDirectionAligned(result.line.direction, points, "Diagonal line");
   }
 });
 
