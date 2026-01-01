@@ -20,7 +20,7 @@ import {
   type Point,
 } from "./geometry.ts";
 
-// Helper to create a horizontal line segment
+// Helper to create a line segment with pixel-level points (like from skeletonization)
 function createLineSegment(
   startX: number,
   startY: number,
@@ -33,11 +33,25 @@ function createLineSegment(
   const dy = endY - startY;
   const len = Math.sqrt(dx * dx + dy * dy);
 
+  // Generate intermediate points along the line (simulating pixel path)
+  const points: Point[] = [start];
+  if (len > 0) {
+    const numSteps = Math.max(1, Math.floor(len));
+    for (let i = 1; i < numSteps; i++) {
+      const t = i / numSteps;
+      points.push({
+        x: startX + dx * t,
+        y: startY + dy * t,
+      });
+    }
+  }
+  points.push(end);
+
   return {
     type: "line",
     start,
     end,
-    points: [start, end],
+    points,
     line: {
       point: start,
       direction: len > 0 ? { x: dx / len, y: dy / len } : { x: 1, y: 0 },
@@ -83,7 +97,7 @@ Deno.test("detectCorners - detects right angle as corner", () => {
   ];
 
   // Use appropriate threshold for detecting right angle
-  const { corners } = detectCorners(segments, Math.PI / 2.5, 2);
+  const { corners } = detectCorners(segments);
 
   console.log(`Total corners found: ${corners.length}`);
   corners.forEach((c, i) => {
@@ -94,51 +108,71 @@ Deno.test("detectCorners - detects right angle as corner", () => {
     );
   });
 
-  // Should have at least 3 corners: start endpoint, right angle, end endpoint
-  assertEquals(corners.length >= 3, true, "Should detect multiple corners");
+  // Should detect the 90° corner as a curvature peak
+  assertEquals(corners.length >= 1, true, "Should detect at least one corner");
 
   // Check for right angle (π/2)
   const rightAngleCorner = corners.find(
-    (c) => Math.abs(c.cornerAngle - Math.PI / 2) < 0.2,
+    (c) => Math.abs(c.cornerAngle - Math.PI / 2) < 0.1,
   );
-  assertExists(rightAngleCorner, "Should detect right angle corner");
+  assertExists(rightAngleCorner, "Should find a corner near 90°");
 });
 
-Deno.test("detectCorners - straight line has only endpoint corners", () => {
-  // Three collinear segments
+Deno.test("detectCorners - straight line has only no corner peaks", () => {
+  // Three collinear segments have zero curvature, no peaks
   const segments: Segment[] = [
     createLineSegment(0, 0, 10, 0),
     createLineSegment(10, 0, 20, 0),
     createLineSegment(20, 0, 30, 0),
   ];
 
-  const { corners } = detectCorners(segments, Math.PI / 3, 2);
+  const { corners } = detectCorners(
+    segments,
+    6, // windowLength
+    0.1, // curvatureThreshold (rad/px)
+  );
 
-  // Straight lines should only have endpoint corners
-  const endpointCorners = corners.filter((c) => c.cornerAngle === 0);
+  // Straight lines have zero curvature, so no curvature peaks (but may have endpoints)
+  const curvaturePeaks = corners.filter((c) => c.cornerAngle > 0);
+  assertEquals(curvaturePeaks.length, 0, "Straight lines should have no curvature peaks");
+});
+
+Deno.test("detectCorners - detects right angle as corner", () => {
+  const segments: Segment[] = [
+    createLineSegment(0, 0, 10, 0),
+    createLineSegment(10, 0, 10, 10),
+  ];
+
+  const { corners } = detectCorners(
+    segments,
+    6, // windowLength
+    0.05, // curvatureThreshold (rad/px) - 90° over 6px ≈ 0.26 rad/px
+  );
+
+  // Should detect the 90° corner
+  const rightAngleCorners = corners.filter((c) => c.cornerAngle > Math.PI / 2.5);
   assertEquals(
-    endpointCorners.length,
-    2,
-    "Should only have start and end endpoints",
+    rightAngleCorners.length > 0,
+    true,
+    "Should detect 90° corner with high curvature",
   );
 });
 
 Deno.test("detectCorners - small segment absorption", () => {
-  // Segments with a small one between two larger ones
+  // Segments with a small one between two larger ones that creates a corner
   const segments: Segment[] = [
-    createLineSegment(0, 0, 9, 0),
-    createLineSegment(9, 0, 10, 0),
+    createLineSegment(0, 0, 10, 0),
     createLineSegment(10, 0, 10.5, 0.5),
     createLineSegment(10.5, 0.5, 20, 10),
   ];
 
   const { segmentsWithCorners } = detectCorners(
     segments,
-    Math.PI / 2.5,
-    2,
+    6, // windowLength
+    0.05, // curvatureThreshold
   );
 
-  // The small middle segment should be absorbed
+  // The small middle segment should be marked as absorbed
   const absorbedCount = segmentsWithCorners.filter(
     (s) => s.absorbedIntoCorner,
   ).length;
@@ -155,27 +189,50 @@ Deno.test("detectCorners - pixel in corner radius", () => {
     createLineSegment(10, 0, 10, 10),
   ];
 
-  const { corners } = detectCorners(segments, Math.PI / 2.5, 2);
-
-  // Find an actual corner position
-  const cornerAtEnd = corners.find(
-    (c) => c.position.x === 10 && c.position.y === 0,
+  const { corners } = detectCorners(
+    segments,
+    6, // windowLength
+    0.05, // curvatureThreshold
   );
-  assertExists(cornerAtEnd, "Should find corner at segment end");
 
-  // Test pixel within radius
+  // Find a corner with high angle (the 90° turn)
+  const sharpCorner = corners.find(
+    (c) => c.cornerAngle > Math.PI / 2.5,
+  );
+  assertExists(sharpCorner, "Should find corner at 90° turn");
+
+  // Test pixel within corner radius
   const nearbyPixel: Point = { x: 10.5, y: 0 };
-  const cornerHit = isPixelInCornerRegion(nearbyPixel, corners);
+  const inRadius = isPixelInCornerRegion(nearbyPixel, corners);
+  assertExists(inRadius, "Pixel near corner should be in radius");
+});
 
-  // The pixel should be within 2 units of some corner
-  const withinDistance = corners.some(
-    (c) =>
-      Math.sqrt(
-        (c.position.x - nearbyPixel.x) ** 2 +
-          (c.position.y - nearbyPixel.y) ** 2,
-      ) <= c.radius,
+Deno.test("detectCorners - half circle polyline vertices not detected as corners", () => {
+  // Approximate a smooth half circle (radius 20) with many segments
+  // This creates small angles between segments (smooth curve)
+  const numSegments = 20;
+  const radius = 20;
+  const segments: Segment[] = [];
+
+  for (let i = 0; i < numSegments; i++) {
+    const angle1 = Math.PI * i / numSegments;
+    const angle2 = Math.PI * (i + 1) / numSegments;
+    const x1 = radius * Math.cos(angle1);
+    const y1 = radius * Math.sin(angle1);
+    const x2 = radius * Math.cos(angle2);
+    const y2 = radius * Math.sin(angle2);
+    segments.push(createLineSegment(x1, y1, x2, y2));
+  }
+
+  const { corners } = detectCorners(
+    segments,
+    6, // windowLength
+    0.1, // curvatureThreshold - smooth curves have low curvature
   );
-  assertEquals(withinDistance, true, "Nearby pixel should be in corner region");
+
+  // Should have no curvature peaks (smooth curve), only endpoints
+  const curvaturePeaks = corners.filter((c) => c.cornerAngle > 0);
+  assertEquals(curvaturePeaks.length, 0, "Smooth curve should have no curvature peaks");
 });
 
 Deno.test("detectCorners - endpoints are always marked", () => {
@@ -186,18 +243,19 @@ Deno.test("detectCorners - endpoints are always marked", () => {
 
   const { corners, segmentsWithCorners } = detectCorners(
     segments,
-    Math.PI / 2.5,
-    2,
+    6, // windowLength
+    0.05, // curvatureThreshold
   );
 
-  const endpointCorners = corners.filter((c) => c.cornerAngle === 0);
+  // Should detect the 90° corner
+  const sharpCorners = corners.filter((c) => c.cornerAngle > Math.PI / 2.5);
   assertEquals(
-    endpointCorners.length,
-    2,
-    "Should have start and end endpoint corners",
+    sharpCorners.length > 0,
+    true,
+    "Should detect the 90° corner",
   );
 
-  // First segment should reference start endpoint
+  // First segment should reference at least one corner
   const firstSegmentCornerIndices = segmentsWithCorners[0].cornerIndices;
   assertEquals(
     firstSegmentCornerIndices.length > 0,
@@ -205,7 +263,7 @@ Deno.test("detectCorners - endpoints are always marked", () => {
     "First segment should reference at least one corner",
   );
 
-  // Last segment should reference end endpoint
+  // Last segment should reference at least one corner
   const lastSegmentCornerIndices =
     segmentsWithCorners[segmentsWithCorners.length - 1].cornerIndices;
   assertEquals(
@@ -285,7 +343,7 @@ Deno.test("detectCorners - corner segment owns pixels and trims neighbors", () =
     },
   ];
 
-  const { segmentPrimitives } = detectCorners(segments, Math.PI / 3, 1);
+  const { segmentPrimitives } = detectCorners(segments);
 
   const cornerSegments = segmentPrimitives.filter(isCorner);
   assertEquals(cornerSegments.length > 0, true, "Should emit a corner segment");

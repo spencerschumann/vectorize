@@ -25,7 +25,9 @@ function assertDirectionAligned(
   assertEquals(
     dotProduct > 0,
     true,
-    `${msg}: Direction should align with point progression (dot=${dotProduct.toFixed(3)})`,
+    `${msg}: Direction should align with point progression (dot=${
+      dotProduct.toFixed(3)
+    })`,
   );
 }
 

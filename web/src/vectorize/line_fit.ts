@@ -201,9 +201,12 @@ export class IncrementalLineFit {
     }
 
     // Ensure direction aligns with point progression (first to last)
-    const progressionDx = this.points[this.points.length - 1].x - this.points[0].x;
-    const progressionDy = this.points[this.points.length - 1].y - this.points[0].y;
-    const dotProduct = direction.x * progressionDx + direction.y * progressionDy;
+    const progressionDx = this.points[this.points.length - 1].x -
+      this.points[0].x;
+    const progressionDy = this.points[this.points.length - 1].y -
+      this.points[0].y;
+    const dotProduct = direction.x * progressionDx +
+      direction.y * progressionDy;
     if (dotProduct < 0) {
       direction = { x: -direction.x, y: -direction.y };
     }

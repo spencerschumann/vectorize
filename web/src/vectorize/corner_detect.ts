@@ -46,71 +46,64 @@ export interface SegmentWithCorners {
 }
 
 /**
- * Get the direction vector at a point on a segment
+ * Fit a line to a sequence of points using PCA and return the direction vector.
+ * This uses covariance matrix eigenanalysis to find the best-fit direction,
+ * making it robust to noise in the polyline.
  */
-function getSegmentDirection(seg: Segment, atEnd: boolean): Point | null {
-  if (seg.type === "line") {
-    const dir = seg.line.direction;
-    return atEnd ? { x: -dir.x, y: -dir.y } : dir;
+function fitLineDirection(points: Point[]): Point | null {
+  if (points.length < 2) return null;
+
+  // Compute centroid
+  let cx = 0, cy = 0;
+  for (const p of points) {
+    cx += p.x;
+    cy += p.y;
+  }
+  cx /= points.length;
+  cy /= points.length;
+
+  // Compute covariance matrix elements
+  let cxx = 0, cyy = 0, cxy = 0;
+  for (const p of points) {
+    const dx = p.x - cx;
+    const dy = p.y - cy;
+    cxx += dx * dx;
+    cyy += dy * dy;
+    cxy += dx * dy;
+  }
+
+  // Eigenvalue problem: find eigenvalues of [[cxx, cxy], [cxy, cyy]]
+  const trace = cxx + cyy;
+  const det = cxx * cyy - cxy * cxy;
+  const lambda1 = trace / 2 + Math.sqrt(trace * trace / 4 - det);
+
+  // Eigenvector for larger eigenvalue
+  if (Math.abs(cxy) > 1e-10) {
+    const vx = lambda1 - cyy;
+    const vy = cxy;
+    const len = Math.sqrt(vx * vx + vy * vy);
+    return { x: vx / len, y: vy / len };
+  } else if (Math.abs(cxx) > Math.abs(cyy)) {
+    return { x: 1, y: 0 };
   } else {
-    // For arc, use tangent direction
-    const arc = seg.arc;
-    const angle = atEnd ? arc.endAngle : arc.startAngle;
-    // Tangent is perpendicular to radius, rotated 90 degrees
-    const dx = -Math.sin(angle);
-    const dy = Math.cos(angle);
-    // Reverse if going backwards (at the end of the arc)
-    return atEnd ? { x: -dx, y: -dy } : { x: dx, y: dy };
+    return { x: 0, y: 1 };
   }
 }
 
 /**
- * Calculate angle between two direction vectors
- * Returns the interior angle (how much direction changes from dir1 to dir2)
- * 0 = no change (straight), π/2 = right angle, π = complete reversal
- */
-function directionAngle(dir1: Point, dir2: Point): number {
-  const m1 = magnitude(dir1);
-  const m2 = magnitude(dir2);
-  if (m1 < 1e-10 || m2 < 1e-10) return 0;
-
-  const n1 = { x: dir1.x / m1, y: dir1.y / m1 };
-  const n2 = { x: dir2.x / m2, y: dir2.y / m2 };
-
-  // Calculate interior angle using atan2 for better handling
-  const angle1 = Math.atan2(n1.y, n1.x);
-  const angle2 = Math.atan2(n2.y, n2.x);
-
-  console.log(
-    ` directionAngle: dir1=(${dir1.x.toFixed(2)},${dir1.y.toFixed(2)}), dir2=(${
-      dir2.x.toFixed(2)
-    },${dir2.y.toFixed(2)}) -> angle1=${
-      (angle1 * 180 / Math.PI).toFixed(1)
-    }°, angle2=${(angle2 * 180 / Math.PI).toFixed(1)}°`,
-  );
-
-  // Get the signed difference
-  let diff = angle2 - angle1;
-
-  // Normalize to [-π, π]
-  if (diff > Math.PI) diff -= 2 * Math.PI;
-  if (diff < -Math.PI) diff += 2 * Math.PI;
-
-  // Return absolute value (corner angle is magnitude of turn)
-  return Math.abs(diff);
-}
-
-/**
- * Detect corners in a sequence of segments
+ * Detect corners in a sequence of segments using scale-space curvature detection.
+ * Uses PCA-fitted directions and curvature concentration (angle / length) with
+ * peak detection to identify true corners robustly.
+ *
  * @param segments The segments to analyze
- * @param cornerAngleThreshold Minimum turn angle to consider a corner (default π/6 = 30°)
- * @param minSegmentLength Minimum length to not absorb into corner (default 2 pixels)
+ * @param windowLength Arc length window size (default 6 pixels ≈ 2x stroke width)
+ * @param curvatureThreshold Minimum curvature (angle/length) for a corner (default 0.1 rad/px)
  * @returns Detected corners and updated segment info
  */
 export function detectCorners(
   segments: Segment[],
-  cornerAngleThreshold = Math.PI / 6,
-  minSegmentLength = 2,
+  windowLength = 6,
+  curvatureThreshold = 0.1,
 ): {
   corners: Corner[];
   segmentsWithCorners: SegmentWithCorners[];
@@ -131,111 +124,195 @@ export function detectCorners(
     };
   }
 
-  const corners: Corner[] = [];
+  // Flatten segments into a continuous sequence of points (deduplicate boundaries)
+  const allPoints: Point[] = [];
+  const segmentStartIndices: number[] = [];
+
+  for (let segIdx = 0; segIdx < segments.length; segIdx++) {
+    const seg = segments[segIdx];
+    segmentStartIndices.push(allPoints.length);
+
+    // Add all points from this segment, but skip the first point if it duplicates the last
+    const startIdx = (segIdx > 0 && allPoints.length > 0 &&
+        distance(allPoints[allPoints.length - 1], seg.points[0]) < 1e-6)
+      ? 1
+      : 0;
+    allPoints.push(...seg.points.slice(startIdx));
+  }
+
   const segmentsWithCorners: SegmentWithCorners[] = segments.map((seg) => ({
     segment: seg,
     absorbedIntoCorner: false,
     cornerIndices: [],
   }));
 
-  // Check each junction between consecutive segments
-  for (let i = 0; i < segments.length - 1; i++) {
-    const current = segments[i];
-    const next = segments[i + 1];
+  // Step 1: Compute curvature κ(i) = θ(i) / ℓ(i) at each vertex
+  interface CurvaturePoint {
+    index: number;
+    position: Point;
+    curvature: number;
+    turningAngle: number;
+    arcLength: number;
+  }
 
-    const inDir = getSegmentDirection(current, false);
-    const outDir = getSegmentDirection(next, false);
+  const curvatures: CurvaturePoint[] = [];
 
-    if (!outDir || !inDir) continue;
+  for (let i = 1; i < allPoints.length - 1; i++) {
+    // Walk backward to accumulate arc length
+    let backDist = 0;
+    let backIdx = i - 1;
+    const backPoints = [allPoints[i]];
+    while (backIdx >= 0 && backDist < windowLength) {
+      backPoints.unshift(allPoints[backIdx]);
+      if (backIdx > 0) {
+        backDist += distance(allPoints[backIdx], allPoints[backIdx - 1]);
+      }
+      backIdx--;
+    }
 
-    const angle = directionAngle(inDir, outDir);
+    // Walk forward to accumulate arc length
+    let fwdDist = 0;
+    let fwdIdx = i + 1;
+    const fwdPoints = [allPoints[i]];
+    while (fwdIdx < allPoints.length && fwdDist < windowLength) {
+      fwdPoints.push(allPoints[fwdIdx]);
+      if (fwdIdx < allPoints.length - 1) {
+        fwdDist += distance(allPoints[fwdIdx], allPoints[fwdIdx + 1]);
+      }
+      fwdIdx++;
+    }
 
-    // Calculate segment lengths for heuristic
-    const currentLen = distance(current.start, current.end);
-    const nextLen = distance(next.start, next.end);
-    const avgLen = (currentLen + nextLen) / 2;
+    // Step 1a: Fit lines using PCA to get robust directions
+    const backDir = fitLineDirection(backPoints);
+    const fwdDir = fitLineDirection(fwdPoints);
 
-    console.log(
-      `Corner detection at segment ${i}->${
-        i + 1
-      }: angle=${angle}, avgLen=${avgLen}`,
-    );
-    console.log(
-      `  inDir=(${inDir.x.toFixed(2)},${inDir.y.toFixed(2)}), outDir=(${
-        outDir.x.toFixed(2)
-      },${outDir.y.toFixed(2)})`,
-    );
+    if (!backDir || !fwdDir) continue;
 
-    // Corner detection heuristic:
-    // 1. Large angles (> threshold) are always corners
-    // 2. Small angles on long segments might be corners if they create significant deviation
-    //    Use sagitta formula: s = r(1 - cos(θ/2)) ≈ rθ²/8 for small θ
-    //    For a segment of length L, r ≈ L/(2sin(θ/2)) ≈ L/θ
-    //    So sagitta ≈ Lθ/8. We want sagitta > 2 pixels to be significant.
-    // 3. Angles very close to 0 (< 5°) or π (straight continuation) are never corners
-    const minDetectableAngle = Math.PI / 180 * 30; // ~5 degrees
-    const isSignificantAngle = angle > minDetectableAngle;
-    const isLargeAngle = angle > cornerAngleThreshold;
-    // Sagitta approximation: s ≈ L*θ/8, want s > 2 pixels, so L*θ > 16
-    const isSmallAngleOnLongSegment = angle > minDetectableAngle &&
-      (angle * avgLen > 16);
+    // Align directions with point sequence to ensure consistency
+    const backFirstToLast = {
+      x: backPoints[backPoints.length - 1].x - backPoints[0].x,
+      y: backPoints[backPoints.length - 1].y - backPoints[0].y,
+    };
+    const fwdFirstToLast = {
+      x: fwdPoints[fwdPoints.length - 1].x - fwdPoints[0].x,
+      y: fwdPoints[fwdPoints.length - 1].y - fwdPoints[0].y,
+    };
 
-    const isSharp = isSignificantAngle &&
-      (isLargeAngle || isSmallAngleOnLongSegment);
+    // Flip directions if they point backwards
+    if (backDir.x * backFirstToLast.x + backDir.y * backFirstToLast.y < 0) {
+      backDir.x = -backDir.x;
+      backDir.y = -backDir.y;
+    }
+    if (fwdDir.x * fwdFirstToLast.x + fwdDir.y * fwdFirstToLast.y < 0) {
+      fwdDir.x = -fwdDir.x;
+      fwdDir.y = -fwdDir.y;
+    }
 
-    if (isSharp) {
-      const cornerPos = current.end;
-      const radius = 2; // Pixel radius of influence
+    // Compute turning angle between fitted directions
+    const dotProd = backDir.x * fwdDir.x + backDir.y * fwdDir.y;
+    const clampedDot = Math.max(-1, Math.min(1, dotProd));
+    const turningAngle = Math.acos(clampedDot);
 
-      // Look backwards and forwards to absorb small segments
-      let startIdx = i;
-      let endIdx = i + 1;
+    // Total arc length in window
+    const totalArcLength = backDist + fwdDist;
+    if (totalArcLength < 0.1) continue;
 
-      // Check if previous segment is small and can be absorbed
-      if (i > 0) {
-        const prevLen = distance(segments[i - 1].start, segments[i - 1].end);
-        if (prevLen < minSegmentLength) {
-          startIdx = i - 1;
-          segmentsWithCorners[i - 1].absorbedIntoCorner = true;
+    // Step 1b: Compute curvature concentration κ = θ / ℓ
+    const curvature = turningAngle / totalArcLength;
+
+    curvatures.push({
+      index: i,
+      position: allPoints[i],
+      curvature,
+      turningAngle,
+      arcLength: totalArcLength,
+    });
+  }
+
+  // Step 2: Find local maxima in curvature signal (peak detection)
+  const corners: Corner[] = [];
+  const peakRadius = Math.max(3, Math.round(windowLength / 2));
+
+  for (let i = 0; i < curvatures.length; i++) {
+    const cp = curvatures[i];
+
+    // Check if this is a local maximum and exceeds threshold
+    if (cp.curvature > curvatureThreshold) {
+      let isLocalMax = true;
+
+      // Check neighbors within peakRadius
+      for (let j = 0; j < curvatures.length; j++) {
+        if (i === j) continue;
+        const neighbor = curvatures[j];
+        const dist = Math.abs(cp.index - neighbor.index);
+
+        if (dist <= peakRadius && neighbor.curvature > cp.curvature) {
+          isLocalMax = false;
+          break;
         }
       }
 
-      // Check if next segment is small and can be absorbed
-      if (i + 2 < segments.length) {
-        const nextLen = distance(segments[i + 1].start, segments[i + 1].end);
-        if (nextLen < minSegmentLength) {
-          endIdx = i + 2;
-          segmentsWithCorners[i + 1].absorbedIntoCorner = true;
-        }
-      }
-
-      const cornerIdx = corners.length;
-      corners.push({
-        position: cornerPos,
-        cornerAngle: angle,
-        radius,
-        segmentIndices: Array.from(
-          { length: endIdx - startIdx + 1 },
-          (_, j) => startIdx + j,
-        ),
-      });
-
-      // Mark segments involved in this corner
-      for (
-        let j = startIdx;
-        j <= endIdx && j < segmentsWithCorners.length;
-        j++
-      ) {
-        segmentsWithCorners[j].cornerIndices.push(cornerIdx);
+      if (isLocalMax) {
+        corners.push({
+          position: cp.position,
+          cornerAngle: cp.turningAngle,
+          radius: 2,
+          segmentIndices: [],
+        });
       }
     }
   }
 
-  // Also detect corners at path endpoints
-  if (segments.length > 0) {
+  // Step 3: Map corners to segment indices
+  for (const corner of corners) {
+    const cornerSegIndices = new Set<number>();
+    for (let i = 0; i < allPoints.length; i++) {
+      if (distance(allPoints[i], corner.position) < 1e-6) {
+        // Found the point in the flattened sequence
+        for (let segIdx = 0; segIdx < segmentStartIndices.length; segIdx++) {
+          const nextSegStart = segIdx + 1 < segmentStartIndices.length
+            ? segmentStartIndices[segIdx + 1]
+            : allPoints.length;
+          if (i >= segmentStartIndices[segIdx] && i < nextSegStart) {
+            cornerSegIndices.add(segIdx);
+            if (segIdx > 0) cornerSegIndices.add(segIdx - 1);
+            if (segIdx < segments.length - 1) cornerSegIndices.add(segIdx + 1);
+            break;
+          }
+        }
+        break;
+      }
+    }
+    corner.segmentIndices = Array.from(cornerSegIndices);
+  }
+
+  // Step 4: Mark segments as absorbed if their midpoint is within corner radius
+  for (let segIdx = 0; segIdx < segments.length; segIdx++) {
+    const seg = segments[segIdx];
+    const midpoint = {
+      x: (seg.start.x + seg.end.x) / 2,
+      y: (seg.start.y + seg.end.y) / 2,
+    };
+
+    for (let cornerIdx = 0; cornerIdx < corners.length; cornerIdx++) {
+      if (
+        distance(midpoint, corners[cornerIdx].position) <=
+          corners[cornerIdx].radius
+      ) {
+        segmentsWithCorners[segIdx].absorbedIntoCorner = true;
+        segmentsWithCorners[segIdx].cornerIndices.push(cornerIdx);
+        if (!corners[cornerIdx].segmentIndices.includes(segIdx)) {
+          corners[cornerIdx].segmentIndices.push(segIdx);
+        }
+      }
+    }
+  }
+
+  // Step 5: Add endpoint corners for noise filtering at path boundaries
+  if (segments.length > 0 && allPoints.length > 0) {
     const startCorner: Corner = {
-      position: segments[0].start,
-      cornerAngle: 0, // Endpoint
+      position: allPoints[0],
+      cornerAngle: 0, // Endpoint marker
       radius: 2,
       segmentIndices: [0],
     };
@@ -243,8 +320,8 @@ export function detectCorners(
     segmentsWithCorners[0].cornerIndices.push(corners.length - 1);
 
     const endCorner: Corner = {
-      position: segments[segments.length - 1].end,
-      cornerAngle: 0, // Endpoint
+      position: allPoints[allPoints.length - 1],
+      cornerAngle: 0, // Endpoint marker
       radius: 2,
       segmentIndices: [segments.length - 1],
     };
@@ -254,77 +331,13 @@ export function detectCorners(
     );
   }
 
-  if (true) {
-    console.log(`Detected ${corners.length} corners:`);
-    corners.forEach((c, i) => {
-      console.log(
-        ` Corner ${i}: angle=${
-          (c.cornerAngle * 180 / Math.PI).toFixed(1)
-        }°, pos={${c.position.x.toFixed(2)},${
-          c.position.y.toFixed(2)
-        }}, segments=[${c.segmentIndices.join(",")}]`,
-      );
-    });
-  }
-
-  // Merge corners that are very close together
-  const mergeThreshold = 2.9;
-  const mergedCorners: Corner[] = [];
-  const merged = new Set<number>();
-
-  for (let i = 0; i < corners.length; i++) {
-    if (merged.has(i)) continue;
-
-    const corner = corners[i];
-    const nearbyCorners = [i];
-
-    // Find all corners within merge threshold
-    for (let j = i + 1; j < corners.length; j++) {
-      if (merged.has(j)) continue;
-      const dist = distance(corner.position, corners[j].position);
-      console.log(`Distance between corner ${i} and ${j}: ${dist}`);
-      if (dist < mergeThreshold) {
-        nearbyCorners.push(j);
-        merged.add(j);
-      }
-    }
-
-    // Merge nearby corners
-    if (nearbyCorners.length > 1) {
-      // Average position
-      let sumX = 0, sumY = 0;
-      let maxAngle = 0;
-      const allSegmentIndices = new Set<number>();
-
-      for (const idx of nearbyCorners) {
-        const c = corners[idx];
-        sumX += c.position.x;
-        sumY += c.position.y;
-        maxAngle = Math.max(maxAngle, c.cornerAngle);
-        c.segmentIndices.forEach((si) => allSegmentIndices.add(si));
-      }
-
-      mergedCorners.push({
-        position: {
-          x: sumX / nearbyCorners.length,
-          y: sumY / nearbyCorners.length,
-        },
-        cornerAngle: maxAngle,
-        radius: corner.radius,
-        segmentIndices: Array.from(allSegmentIndices),
-      });
-    } else {
-      mergedCorners.push(corner);
-    }
-  }
-
   const { cornerSegments, segmentPrimitives } = integrateCornerSegments(
     segments,
-    mergedCorners,
+    corners,
   );
 
   return {
-    corners: mergedCorners,
+    corners,
     segmentsWithCorners,
     cornerSegments,
     segmentPrimitives,
