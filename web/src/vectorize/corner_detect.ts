@@ -96,14 +96,14 @@ function fitLineDirection(points: Point[]): Point | null {
  * peak detection to identify true corners robustly.
  *
  * @param segments The segments to analyze
- * @param windowLength Arc length window size (default 6 pixels ≈ 2x stroke width)
- * @param curvatureThreshold Minimum curvature (angle/length) for a corner (default 0.1 rad/px)
+ * @param windowLength Arc length window size
+ * @param curvatureThreshold Minimum curvature (angle/length) for a corner
  * @returns Detected corners and updated segment info
  */
 export function detectCorners(
   segments: Segment[],
-  windowLength = 6,
-  curvatureThreshold = 0.1,
+  windowLength = 10,
+  curvatureThreshold = 0.01,
 ): {
   corners: Corner[];
   segmentsWithCorners: SegmentWithCorners[];
@@ -146,6 +146,10 @@ export function detectCorners(
     cornerIndices: [],
   }));
 
+  // Check if path is closed
+  const isClosed = allPoints.length > 2 &&
+    distance(allPoints[0], allPoints[allPoints.length - 1]) < 1;
+
   // Step 1: Compute curvature κ(i) = θ(i) / ℓ(i) at each vertex
   interface CurvaturePoint {
     index: number;
@@ -157,29 +161,64 @@ export function detectCorners(
 
   const curvatures: CurvaturePoint[] = [];
 
-  for (let i = 1; i < allPoints.length - 1; i++) {
-    // Walk backward to accumulate arc length
+  // For closed paths, also evaluate wraparound (index 0); for open paths skip endpoints
+  const startIdx = isClosed ? 0 : 1;
+  const endIdx = isClosed ? allPoints.length : allPoints.length - 1;
+
+  for (let i = startIdx; i < endIdx; i++) {
+    // Walk backward to accumulate arc length (with wraparound for closed paths)
     let backDist = 0;
     let backIdx = i - 1;
     const backPoints = [allPoints[i]];
-    while (backIdx >= 0 && backDist < windowLength) {
-      backPoints.unshift(allPoints[backIdx]);
-      if (backIdx > 0) {
-        backDist += distance(allPoints[backIdx], allPoints[backIdx - 1]);
+    while (backDist < windowLength) {
+      // Wraparound for closed paths
+      if (backIdx < 0) {
+        if (!isClosed) break;
+        backIdx = allPoints.length - 1;
       }
+
+      backPoints.unshift(allPoints[backIdx]);
+
+      // Calculate distance to next point backward
+      const prevIdx = backIdx - 1 < 0
+        ? (isClosed ? allPoints.length - 1 : -1)
+        : backIdx - 1;
+      if (prevIdx < 0 || prevIdx >= allPoints.length) break;
+
+      backDist += distance(allPoints[backIdx], allPoints[prevIdx]);
       backIdx--;
+
+      // Prevent infinite loop
+      if (backPoints.length > allPoints.length) break;
     }
 
-    // Walk forward to accumulate arc length
+    // Walk forward to accumulate arc length (with wraparound for closed paths)
     let fwdDist = 0;
     let fwdIdx = i + 1;
     const fwdPoints = [allPoints[i]];
-    while (fwdIdx < allPoints.length && fwdDist < windowLength) {
-      fwdPoints.push(allPoints[fwdIdx]);
-      if (fwdIdx < allPoints.length - 1) {
-        fwdDist += distance(allPoints[fwdIdx], allPoints[fwdIdx + 1]);
+    while (fwdDist < windowLength) {
+      // Wraparound for closed paths
+      if (fwdIdx >= allPoints.length) {
+        if (!isClosed) break;
+        fwdIdx = 0;
       }
+
+      fwdPoints.push(allPoints[fwdIdx]);
+
+      // Calculate distance to next point forward
+      const nextIdx = fwdIdx + 1 >= allPoints.length
+        ? (isClosed ? 0 : allPoints.length)
+        : fwdIdx + 1;
+      if (nextIdx >= allPoints.length && !isClosed) break;
+
+      fwdDist += distance(
+        allPoints[fwdIdx],
+        allPoints[nextIdx % allPoints.length],
+      );
       fwdIdx++;
+
+      // Prevent infinite loop
+      if (fwdPoints.length > allPoints.length) break;
     }
 
     // Step 1a: Fit lines using PCA to get robust directions
@@ -308,8 +347,9 @@ export function detectCorners(
     }
   }
 
-  // Step 5: Add endpoint corners for noise filtering at path boundaries
-  if (segments.length > 0 && allPoints.length > 0) {
+  // Step 5: Add endpoint corners for open paths (for noise filtering)
+  if (!isClosed && segments.length > 0 && allPoints.length > 0) {
+    // For open paths, add endpoint corners for noise filtering
     const startCorner: Corner = {
       position: allPoints[0],
       cornerAngle: 0, // Endpoint marker

@@ -3,9 +3,13 @@
     "tasks": {
         "build": "deno run -A npm:esbuild browser-app/main.ts --bundle --format=esm --outfile=browser-app/bundle.js --platform=browser --sourcemap",
         "build:visualizer": "deno run -A npm:esbuild browser-app/test_visualizer.ts --bundle --format=esm --outfile=browser-app/test_visualizer_bundle.js --platform=browser --sourcemap",
+        "build:debug-app": "deno run -A debug-app/build.ts",
+        "build:debug-app:watch": "deno run -A debug-app/watch.ts",
         "build:watch": "deno run -A npm:esbuild browser-app/main.ts --bundle --format=esm --outfile=browser-app/bundle.js --platform=browser --sourcemap --watch",
-        "dev": "deno task build:watch & deno run --allow-net --allow-read --allow-write --watch browser-app/server.ts",
+        "dev": "deno run -A --watch=./debug-app,server.ts server.ts",
+        "dev:debug-app": "deno task build:debug-app:watch & deno run --allow-net --allow-read --watch debug-app/server.ts",
         "start": "deno run --allow-net --allow-read browser-app/server.ts",
+        "start:debug-app": "deno run --allow-net --allow-read debug-app/server.ts",
         "cli": "deno run --allow-read --allow-write --allow-env --allow-run --unstable-webgpu deno-app/cli.ts",
         "test": "deno test --allow-read --allow-write"
     },

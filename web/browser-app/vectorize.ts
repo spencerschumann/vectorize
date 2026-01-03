@@ -44,8 +44,10 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
   const graph = traceGraph(binary);
   const simplified = simplifyGraph(graph);
 
+  console.log("Running vectorizeSkeleton()...");
+
   const paths: SimplifiedPath[] = simplified.edges.map((edge, index) => {
-    console.log(`Path ${index}: ${edge.segments.length} segments`);
+    console.log(`>>> Path ${index}: ${edge.segments.length} segments`);
     edge.segments.forEach((seg, segIndex) => {
       if (seg.type === "line") {
         console.log(
@@ -79,7 +81,20 @@ export function vectorizeSkeleton(binary: BinaryImage): VectorizedImage {
       Math.abs(first.y - last.y) < 1e-4;
 
     // Detect corners for this path
+    console.log("CALLING detectCorners()");
     const { corners, segmentPrimitives } = detectCorners(edge.segments);
+
+    // Log the corners
+    console.log(`Detected ${corners.length} corners:`);
+    for (const corner of corners) {
+      console.log(
+        `  Corner at (${corner.position.x.toFixed(2)}, ${
+          corner.position.y.toFixed(2)
+        }) with angle ${corner.cornerAngle.toFixed(2)} and radius ${
+          corner.radius.toFixed(2)
+        }`,
+      );
+    }
 
     return {
       points: allPoints,

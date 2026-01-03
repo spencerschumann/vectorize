@@ -73,15 +73,31 @@ function createArcSegment(
   const start = { x: startX, y: startY };
   const end = { x: endX, y: endY };
   const center = { x: centerX, y: centerY };
+  const radius = Math.sqrt((startX - centerX) ** 2 + (startY - centerY) ** 2);
+
+  // Generate intermediate points along the arc (simulating pixel path)
+  const points: Point[] = [start];
+  
+  // Normalize angles to handle wraparound
+  let angle = startAngle;
+  const angleStep = (endAngle - startAngle) / 10; // 10 segments
+  for (let i = 1; i < 10; i++) {
+    angle += angleStep;
+    points.push({
+      x: centerX + radius * Math.cos(angle),
+      y: centerY + radius * Math.sin(angle),
+    });
+  }
+  points.push(end);
 
   return {
     type: "arc",
     start,
     end,
-    points: [start, end],
+    points,
     arc: {
       center,
-      radius: 10,
+      radius,
       startAngle,
       endAngle,
       clockwise: false,
@@ -373,3 +389,123 @@ Deno.test("detectCorners - corner segment owns pixels and trims neighbors", () =
     "Corner segment should own the original joint pixel",
   );
 });
+
+Deno.test("detectCorners - closed rounded rectangle with 2 segments per corner", () => {
+  // Closed path: a rounded rectangle with 2 line segments per rounded corner
+  // This matches the actual fitted polyline output from the simplifier
+  
+  // Rectangle bounds with corner radius = 5
+  const x1 = 10, y1 = 10, x2 = 90, y2 = 90;
+  const r = 5; // corner radius
+
+  const segments: Segment[] = [
+    // Top edge (left to right, from corner to corner)
+    createLineSegment(x1 + r, y1, x2 - r, y1),
+    // Top-right rounded corner (2 segments)
+    createLineSegment(x2 - r, y1, x2 - r * 0.3, y1 + r * 0.3),
+    createLineSegment(x2 - r * 0.3, y1 + r * 0.3, x2, y1 + r),
+    // Right edge (top to bottom)
+    createLineSegment(x2, y1 + r, x2, y2 - r),
+    // Bottom-right rounded corner (2 segments)
+    createLineSegment(x2, y2 - r, x2 - r * 0.3, y2 - r * 0.3),
+    createLineSegment(x2 - r * 0.3, y2 - r * 0.3, x2 - r, y2),
+    // Bottom edge (right to left)
+    createLineSegment(x2 - r, y2, x1 + r, y2),
+    // Bottom-left rounded corner (2 segments)
+    createLineSegment(x1 + r, y2, x1 + r * 0.3, y2 - r * 0.3),
+    createLineSegment(x1 + r * 0.3, y2 - r * 0.3, x1, y2 - r),
+    // Left edge (bottom to top)
+    createLineSegment(x1, y2 - r, x1, y1 + r),
+    // Top-left rounded corner (2 segments) - this is the wraparound junction
+    createLineSegment(x1, y1 + r, x1 + r * 0.3, y1 + r * 0.3),
+    createLineSegment(x1 + r * 0.3, y1 + r * 0.3, x1 + r, y1),
+  ];
+
+  const { corners } = detectCorners(
+    segments,
+    6, // windowLength
+    0.2, // curvatureThreshold - high enough to not detect 45-50° rounded corners
+  );
+
+  console.log(`Rounded rectangle corners found: ${corners.length}`);
+  corners.forEach((c, i) => {
+    console.log(
+      `  Corner ${i}: angle=${
+        (c.cornerAngle * 180 / Math.PI).toFixed(1)
+      }°, pos={${c.position.x.toFixed(1)},${c.position.y.toFixed(1)}}`,
+    );
+  });
+
+  // With 2 segments per corner, each corner has ~45° angles
+  // These should not be detected as sharp corners - not even at wraparound
+  const sharpCorners = corners.filter((c) => c.cornerAngle > Math.PI / 4);
+  assertEquals(
+    sharpCorners.length,
+    0,
+    "Rounded rectangle should have no sharp corners (including at wraparound)",
+  );
+
+  // Should have NO endpoint corners (angle = 0) for closed paths
+  const endpointCorners = corners.filter((c) => c.cornerAngle === 0);
+  assertEquals(
+    endpointCorners.length,
+    0,
+    "Closed paths should not have endpoint corners",
+  );
+});
+
+Deno.test("detectCorners - closed teardrop with sharp point at wraparound", () => {
+  // Closed teardrop shape: circular at bottom, pointed at top (start/end)
+  // The sharp point at start/end should be detected via wraparound evaluation
+  
+  const centerX = 50;
+  const centerY = 60;
+  const radius = 20;
+  
+  const segments: Segment[] = [
+    // Sharp point at top (this is the wraparound junction)
+    createLineSegment(centerX, centerY - radius - 10, centerX + 5, centerY - radius),
+    createLineSegment(centerX + 5, centerY - radius, centerX + 10, centerY - radius + 5),
+    
+    // Right side (curving down)
+    createLineSegment(centerX + 10, centerY - radius + 5, centerX + 14, centerY - 5),
+    createLineSegment(centerX + 14, centerY - 5, centerX + 15, centerY + 5),
+    
+    // Bottom curve (rounded)
+    createLineSegment(centerX + 15, centerY + 5, centerX + 10, centerY + 12),
+    createLineSegment(centerX + 10, centerY + 12, centerX, centerY + 15),
+    createLineSegment(centerX, centerY + 15, centerX - 10, centerY + 12),
+    createLineSegment(centerX - 10, centerY + 12, centerX - 15, centerY + 5),
+    
+    // Left side (curving up)
+    createLineSegment(centerX - 15, centerY + 5, centerX - 14, centerY - 5),
+    createLineSegment(centerX - 14, centerY - 5, centerX - 10, centerY - radius + 5),
+    
+    // Back to sharp point (completing the teardrop)
+    createLineSegment(centerX - 10, centerY - radius + 5, centerX - 5, centerY - radius),
+    createLineSegment(centerX - 5, centerY - radius, centerX, centerY - radius - 10),
+  ];
+
+  const { corners } = detectCorners(
+    segments,
+    6, // windowLength
+    0.05, // curvatureThreshold
+  );
+
+  // Should detect the sharp point at the wraparound location
+  const sharpCorners = corners.filter((c) => c.cornerAngle > Math.PI / 3);
+  assertEquals(
+    sharpCorners.length >= 1,
+    true,
+    "Should detect sharp point at wraparound junction",
+  );
+
+  // Should NOT have endpoint corners (closed path)
+  const endpointCorners = corners.filter((c) => c.cornerAngle === 0);
+  assertEquals(
+    endpointCorners.length,
+    0,
+    "Closed teardrop should not have endpoint corners",
+  );
+});
+

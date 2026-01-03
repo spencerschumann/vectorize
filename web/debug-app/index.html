@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vectorize Debugger</title>
+  <style>
+    body { font-family: sans-serif; margin: 0; padding: 12px; display: flex; gap: 16px; }
+    #controls { width: 260px; display: flex; flex-direction: column; gap: 8px; }
+    #viewer { flex: 1; border: 1px solid #ddd; padding: 8px; overflow: auto; min-height: 480px; touch-action: none; }
+    .layer-toggle { display: flex; gap: 8px; align-items: center; }
+    svg { background: #fff; border: 1px solid #ccc; touch-action: none; }
+    button { padding: 6px 10px; }
+    select, label { font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <label>
+      Test Case:
+      <select id="case-select"></select>
+    </label>
+    <label>
+      Zoom:
+      <input type="range" id="zoom-slider" min="1" max="20" value="10" step="0.5" />
+      <span id="zoom-value">10x</span>
+    </label>
+    <div id="toggles">
+      <div class="layer-toggle"><input type="checkbox" data-layer="binary" checked /> Binary</div>
+      <div class="layer-toggle"><input type="checkbox" data-layer="skeleton" checked /> Skeleton</div>
+      <div class="layer-toggle"><input type="checkbox" data-layer="raw" checked /> Raw pixels</div>
+      <div class="layer-toggle"><input type="checkbox" data-layer="dp" checked /> DP path</div>
+      <div class="layer-toggle"><input type="checkbox" data-layer="prims" checked /> Primitives</div>
+    </div>
+    <button id="run-btn">Run</button>
+    <div id="info"></div>
+    <pre id="detail" style="font-size:12px; background:#f6f6f6; border:1px solid #ddd; padding:8px; max-height:160px; overflow:auto;">Click elements to inspect</pre>
+    <div id="build-info" style="font-size:11px; color:#999; margin-top:8px;"></div>
+  </div>
+  <div id="viewer"></div>
+  <script type="module" src="/debug-app/main.js"></script>
+</body>
+</html>
