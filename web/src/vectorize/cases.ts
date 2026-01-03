@@ -70,6 +70,7 @@ export const TEST_CASES: TestCase[] = [
       const r = 44;
       // Start directly on the arc at 90 degrees (top-right of center)
       ctx.moveTo(cx + r * Math.cos(Math.PI / 2), cy + r * Math.sin(Math.PI / 2));
+      // TODO: add an arc() draw function to the drawing context abstraction
       for (let angle = Math.PI / 2; angle <= Math.PI; angle += 0.1) {
         ctx.lineTo(cx + r * Math.cos(angle), cy + r * Math.sin(angle));
       }

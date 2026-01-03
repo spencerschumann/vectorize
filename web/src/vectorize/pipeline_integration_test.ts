@@ -9,7 +9,7 @@ import {
 import { PNG } from "npm:pngjs@7.0.0";
 import { Buffer } from "node:buffer";
 import { buildStrokesFromBase64, buildStrokesFromCanvas } from "./test_pipeline.ts";
-import { globalFit } from "./global_fitter.ts";
+import { ArcPrimitive, globalFit } from "./global_fitter.ts";
 import type { BinaryImage } from "../formats/binary.ts";
 import { getPixelBin } from "../formats/binary.ts";
 import { renderDebugLayers } from "./debug_render.ts";
@@ -21,7 +21,7 @@ import { TEST_CASES } from "./cases.ts";
 const DEBUG_VIS = Deno.env.get("DEBUG_VIS") === "1" || false;
 
 // Helper to run a canvas case
-async function runCanvasCase(
+function runCanvasCase(
   name: string,
   width: number,
   height: number,
@@ -33,13 +33,17 @@ async function runCanvasCase(
   const { strokes, skeleton } = buildStrokesFromCanvas(width, height, draw, pipelineOpts);
   assertEquals(strokes.length >= 1, true);
 
+  const fitted = [];
   for (let i = 0; i < strokes.length; i++) {
     const stroke = strokes[i];
     const result = globalFit(stroke, fitOpts);
     assertExists(result.primitives);
+    fitted.push(result.primitives);
     assertEquals(result.primitives.length >= 1, true);
 
-    if (DEBUG_VIS) {
+    // TODO: this DEBUG_VIS block is deprecated, replaced with the debug-app browser-based UI.
+    // Need to remove the helper functions referenced below.
+    /*if (DEBUG_VIS) {
       const dataUrl = await renderDebugLayers({
         skeleton,
         dpPath: stroke.dpPoints,
@@ -51,8 +55,10 @@ async function runCanvasCase(
       });
       console.log(`\n${name} debug (${stroke.dpPoints.length} DP, ${result.primitives.length} prims):`);
       console.log(dataUrl);
-    }
+    }*/
   }
+
+  return fitted;
 }
 
 function binaryToBase64PngRGBA(binary: BinaryImage): string {
@@ -76,7 +82,7 @@ function binaryToBase64PngRGBA(binary: BinaryImage): string {
 Deno.test("pipeline - canvas line then global fit", async () => {
   const c = TEST_CASES.find((c) => c.name === "Line (thick)");
   if (!c) throw new Error("missing case");
-  await runCanvasCase(
+  runCanvasCase(
     c.name,
     c.width,
     c.height,
@@ -99,6 +105,7 @@ Deno.test("pipeline - base64 (L shape) then global fit", async () => {
     c.pipeline,
   );
 
+  // TODO: why is this converting between binary and base64? base64 was meant for capturing external image test data.
   const base64 = binaryToBase64PngRGBA(canvasBuild.skeleton);
   const { strokes, skeleton } = buildStrokesFromBase64(base64, c.pipeline);
 
@@ -128,7 +135,7 @@ Deno.test("pipeline - base64 (L shape) then global fit", async () => {
 Deno.test("pipeline - arc shape with visualization", async () => {
   const c = TEST_CASES.find((c) => c.name === "Quarter arc");
   if (!c) throw new Error("missing case");
-  await runCanvasCase(
+  const strokes = runCanvasCase(
     c.name,
     c.width,
     c.height,
@@ -137,4 +144,23 @@ Deno.test("pipeline - arc shape with visualization", async () => {
     { ...c.fit, tolerance: c.fit.tolerance, curvatureLambda: c.fit.curvatureLambda },
     "debug_arc_stroke",
   );
+
+  assertEquals(strokes.length, 1);
+  const prims = strokes[0];
+  assertEquals(prims.length, 1);
+  const prim = prims[0];
+  assertEquals(prim.type, "arc");
+  const arc = prim as ArcPrimitive;
+  // Expect approximately quarter circle arc
+  const angleSpan = Math.abs(arc.endAngle - arc.startAngle);
+  assertEquals(angleSpan > Math.PI / 2 - 0.2 && angleSpan < Math.PI / 2 + 0.2, true);
+
+  console.log("Arc primitive:", arc);
+
+  // Note: this is currently returning an arc with:
+  //  cx: 47.69818423969554,
+  //  cy: 20.915536556654374,
+  //  r: 42.190491800562576,
+  //
+  // but the test case has cx=50, cy=20, r=44.  
 });
